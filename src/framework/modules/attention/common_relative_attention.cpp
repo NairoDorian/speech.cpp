@@ -5,9 +5,28 @@ namespace engine::modules::attention::internal {
 namespace {
 
 bool use_specialized_flash_attention(
+    const core::ModuleBuildContext & ctx,
     const RelativeAttentionConfig & config,
     const std::optional<core::TensorValue> & attention_mask,
     const std::optional<core::TensorValue> & projected_pos_emb) {
+    // This lowering builds its additive mask with ggml_flash_attn_ext_with_bias_mask,
+    // whose bias carries one slice per query head, so the mask has ne[2] == n_head.
+    // Only the CPU flash-attention kernel actually honours that: ggml's CUDA
+    // kernels index the mask as nb32*(head % ne32) in source, but the result is
+    // head 0's slice for every head -- measured in
+    // tests/unittests/test_ggml_fork_ops_cpu.cpp, where the CUDA output matches a
+    // reference forced to slice 0 to within the F16 floor (4.9e-4) while diverging
+    // from the true per-head reference by 9.1e-2. Upstream refuses such masks
+    // outright (BEST_FATTN_KERNEL_NONE), which is why enabling them there turns an
+    // abort into a wrong answer rather than into a working kernel.
+    //
+    // So the choice is made here rather than by patching ggml: on any backend but
+    // CPU, fall through to the reference lowering, which every backend computes
+    // correctly. Same pattern as the ggml_backend_supports_op probe in
+    // community_models/minimax_h3/dit_denoiser.cpp.
+    if (ctx.backend_type != core::BackendType::Cpu) {
+        return false;
+    }
     // Keep the production path on the reference implementation until callers
     // explicitly opt in. The flash-attention path is only valid for offline
     // full-context attention with a precomputed projected positional embedding.
@@ -103,7 +122,7 @@ core::TensorValue build_global_relative_attention_impl(
     auto q_u = add_attention_bias(ctx, q_heads, weights.pos_bias_u, config.num_heads, head_dim);
     auto q_v = add_attention_bias(ctx, q_heads, weights.pos_bias_v, config.num_heads, head_dim);
 
-    const bool specialized_flash = use_specialized_flash_attention(config, attention_mask, projected_pos_emb);
+    const bool specialized_flash = use_specialized_flash_attention(ctx, config, attention_mask, projected_pos_emb);
     std::optional<core::TensorValue> k_transposed;
     if (!specialized_flash) {
         k_transposed = permute_tensor(ctx, k_heads, {0, 1, 3, 2});

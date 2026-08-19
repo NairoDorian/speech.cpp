@@ -63,6 +63,11 @@ void require_max_abs_diff_below(
         }
     }
     mean_diff /= static_cast<double>(actual.size());
+    // Always report the measured drift, not only on failure: these bounds are
+    // calibrated numbers, and the trend is what tells the next reader whether a
+    // ggml upgrade moved a kernel's accuracy.
+    std::cout << "[drift] " << label << " max=" << max_diff << " (limit " << max_allowed << ")"
+              << " mean=" << mean_diff << " (limit " << mean_allowed << ")\n";
     if (max_diff > max_allowed || mean_diff > mean_allowed) {
         std::ostringstream oss;
         oss << label << " drift exceeds bounds: max diff " << max_diff << " (limit " << max_allowed << ")"
@@ -216,8 +221,14 @@ engine::runtime::GraphOptimizationBackend graph_optimizer_backend_for_test(engin
     return engine::runtime::GraphOptimizationBackend::Other;
 }
 
+// Production builds a ModuleBuildContext as {ggml, name, execution.backend_type()},
+// and modules branch on ctx.backend_type to pick lowerings (fast CUDA projections,
+// flash vs reference attention, ...). A runner that swapped only the ggml backend
+// would keep ctx.backend_type at its Cpu default and so exercise the CPU lowerings
+// on a GPU device — passing while testing the wrong graph. Keep the two in step.
 void set_runner_backend(ModuleRunner & runner, engine::core::BackendType type) {
     runner.backend_config.type = type;
+    runner.ctx.backend_type = type;
     if (runner.backend != nullptr) {
         ggml_backend_free(runner.backend);
         runner.backend = nullptr;
@@ -664,14 +675,10 @@ void test_relative_attention_specialized_flash_matches_reference_on_realistic_sh
     const auto keep_mask = make_keep_mask_for_test(frames, valid_frames);
     const auto projected_pos_values = project_sequence(pos_values, pos_frames, hidden, pos_weight, hidden);
 
-    auto run_case = [&](engine::core::BackendType backend_type, const std::string & backend_label) {
+    auto run_case = [&](engine::core::BackendType backend_type,
+                        const std::string & backend_label) -> std::vector<float> {
         ModuleRunner reference_runner;
-        reference_runner.backend_config.type = backend_type;
-        if (reference_runner.backend != nullptr) {
-            ggml_backend_free(reference_runner.backend);
-            reference_runner.backend = nullptr;
-        }
-        reference_runner.backend = engine::core::init_backend(reference_runner.backend_config);
+        set_runner_backend(reference_runner, backend_type);
 
         auto ref_input = reference_runner.make_f32(engine::core::TensorShape::from_dims({batch, frames, hidden}));
         auto ref_pos = reference_runner.make_f32(engine::core::TensorShape::from_dims({batch, pos_frames, hidden}));
@@ -717,12 +724,7 @@ void test_relative_attention_specialized_flash_matches_reference_on_realistic_sh
         const auto reference_values = reference_runner.run_f32(ref_output);
 
         ModuleRunner flash_runner;
-        flash_runner.backend_config.type = backend_type;
-        if (flash_runner.backend != nullptr) {
-            ggml_backend_free(flash_runner.backend);
-            flash_runner.backend = nullptr;
-        }
-        flash_runner.backend = engine::core::init_backend(flash_runner.backend_config);
+        set_runner_backend(flash_runner, backend_type);
 
         auto flash_input = flash_runner.make_f32(engine::core::TensorShape::from_dims({batch, frames, hidden}));
         auto flash_pos = flash_runner.make_f32(engine::core::TensorShape::from_dims({batch, pos_frames, hidden}));
@@ -769,19 +771,48 @@ void test_relative_attention_specialized_flash_matches_reference_on_realistic_sh
         engine::core::write_tensor_f32(flash_weights.pos_bias_v, pos_bias_v);
         const auto flash_values = flash_runner.run_f32(flash_output);
 
-        const float max_abs_tol = backend_type == engine::core::BackendType::Cuda ? 4.0e-3f : 4.0e-3f;
-        const double mean_abs_tol = backend_type == engine::core::BackendType::Cuda ? 7.5e-4 : 6.0e-4;
+        // On CPU this compares the specialized flash lowering against the
+        // reference one. On CUDA the module deliberately does NOT take the flash
+        // lowering — ggml's CUDA flash kernels ignore the per-head mask this path
+        // builds (see common_relative_attention.cpp) — so there it compares the
+        // reference lowering fed a precomputed positional projection against the
+        // same lowering recomputing it. Either way it is the graph a consumer
+        // actually gets on that backend, which is what should be pinned.
+        //
+        // The CUDA bounds are deliberately tight — measured 8.1e-6 max, 1.3e-6
+        // mean, kept at roughly 10x that. Taking the flash lowering on CUDA
+        // instead lands at 3.2e-3 / 8.0e-4 (its kernels convert K/V to F16 on
+        // top of dropping the per-head mask), so these bounds are what turns a
+        // silent regression back onto that path into a test failure.
+        const bool cuda = backend_type == engine::core::BackendType::Cuda;
+        const float max_abs_tol = cuda ? 1.0e-4f : 4.0e-3f;
+        const double mean_abs_tol = cuda ? 1.5e-5 : 6.0e-4;
         require_max_abs_diff_below(
             flash_values,
             reference_values,
             max_abs_tol,
             mean_abs_tol,
             "relative attention flash parity " + backend_label);
+        return flash_values;
     };
 
-    run_case(engine::core::BackendType::Cpu, "cpu");
+    const auto cpu_flash = run_case(engine::core::BackendType::Cpu, "cpu");
     if (backend_is_available(engine::core::BackendType::Cuda)) {
-        run_case(engine::core::BackendType::Cuda, "cuda");
+        const auto cuda_flash = run_case(engine::core::BackendType::Cuda, "cuda");
+        // Backend parity: the module's chosen lowering on CPU against its chosen
+        // lowering on CUDA. Those are different graphs by design (CUDA falls back
+        // off the flash path), so this asserts the thing that actually matters to
+        // a caller — that switching backends does not move the answer — rather
+        // than that two kernels agree.
+        // Measured 5.7e-5 max, 9.2e-6 mean; the residual is ggml-cuda running F32
+        // GEMMs on TF32 tensor cores (CUBLAS_TF32_TENSOR_OP_MATH in
+        // ggml-cuda/common.cuh), a 10-bit mantissa.
+        require_max_abs_diff_below(
+            cuda_flash,
+            cpu_flash,
+            5.0e-4f,
+            1.0e-4,
+            "relative attention flash cpu-vs-cuda");
     } else {
         std::cout << "encoder_module_test: skipping cuda flash parity\n";
     }
