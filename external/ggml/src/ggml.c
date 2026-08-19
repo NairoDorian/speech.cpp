@@ -1098,9 +1098,13 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "OPT_STEP_SGD",
 
     "GLU",
+
+    "MUL_MAT_PACK4",
+    "SAGE_ATTN2",
+    "CONVROT_LINEAR",
 };
 
-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
+static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1213,9 +1217,13 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "sgd(x)",
 
     "glu(x)",
+
+    "x*y",            // MUL_MAT_PACK4
+    "sage_attn2(q, k, v)",
+    "convrot_linear(weight_i8, input, weight_scale, bias)",
 };
 
-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
+static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -3295,7 +3303,7 @@ struct ggml_tensor * ggml_mul_mat(
 void ggml_mul_mat_set_prec(
         struct ggml_tensor * a,
         enum ggml_prec       prec) {
-    GGML_ASSERT(a->op == GGML_OP_MUL_MAT);
+    GGML_ASSERT(a->op == GGML_OP_MUL_MAT || a->op == GGML_OP_MUL_MAT_PACK4);
 
     const int32_t prec_i32 = (int32_t) prec;
 
@@ -3305,11 +3313,187 @@ void ggml_mul_mat_set_prec(
 void ggml_mul_mat_set_hint(
         struct ggml_tensor * a,
         enum ggml_op_hint    hint) {
-    GGML_ASSERT(a->op == GGML_OP_MUL_MAT);
+    GGML_ASSERT(a->op == GGML_OP_MUL_MAT || a->op == GGML_OP_MUL_MAT_PACK4);
 
     const int32_t hint_i32 = (int32_t) hint;
 
     ggml_set_op_params_i32(a, 1, hint_i32);
+}
+
+void ggml_graph_set_n_nodes(struct ggml_cgraph * cgraph, int n_nodes) {
+    GGML_ASSERT(n_nodes >= 0);
+    GGML_ASSERT(n_nodes <= cgraph->size);
+    cgraph->n_nodes = n_nodes;
+}
+
+struct ggml_tensor * ggml_mul_mat_pack4(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b) {
+    GGML_ASSERT(ggml_can_mul_mat(a, b));
+    GGML_ASSERT(!ggml_is_transposed(a));
+    GGML_ASSERT(a->ne[1] % 4 == 0);
+
+    const int64_t ne[4] = { a->ne[1], b->ne[1], b->ne[2], b->ne[3] };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    result->op     = GGML_OP_MUL_MAT_PACK4;
+    result->src[0] = a;
+    result->src[1] = b;
+
+    return result;
+}
+
+struct ggml_tensor * ggml_conv_1d_fast_1d_im2col(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,   // convolution kernel
+        struct ggml_tensor  * b,   // data
+        int                   s0,  // stride
+        int                   p0,  // padding
+        int                   d0) { // dilation
+    struct ggml_tensor * im2col = ggml_im2col(ctx, a, b, s0, 0, p0, 0, d0, 0, false, a->type);
+
+    struct ggml_tensor * result =
+        ggml_mul_mat(ctx,
+                ggml_reshape_2d(ctx, im2col, im2col->ne[0], (im2col->ne[2] * im2col->ne[1])),
+                ggml_reshape_2d(ctx, a, (a->ne[0] * a->ne[1]), a->ne[2]));
+
+    result = ggml_reshape_3d(ctx, result, im2col->ne[1], a->ne[2], im2col->ne[2]);
+
+    return result;
+}
+
+struct ggml_tensor * ggml_sage_attn2(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * v,
+        float                 scale,
+        bool                  causal) {
+    GGML_ASSERT(q->type == GGML_TYPE_F16);
+    GGML_ASSERT(k->type == GGML_TYPE_F16);
+    GGML_ASSERT(v->type == GGML_TYPE_F16);
+    GGML_ASSERT(ggml_is_contiguous(q));
+    GGML_ASSERT(ggml_is_contiguous(k));
+    GGML_ASSERT(ggml_is_contiguous(v));
+
+    GGML_ASSERT(q->ne[0] == k->ne[0]);
+    GGML_ASSERT(q->ne[0] == v->ne[0]);
+    GGML_ASSERT(k->ne[1] == v->ne[1]);
+    GGML_ASSERT(k->ne[2] == v->ne[2]);
+    GGML_ASSERT(q->ne[3] == k->ne[3]);
+    GGML_ASSERT(q->ne[3] == v->ne[3]);
+    GGML_ASSERT(q->ne[2] % k->ne[2] == 0);
+    GGML_ASSERT(q->ne[0] == 64 || q->ne[0] == 128);
+    GGML_ASSERT(scale > 0.0f);
+
+    int64_t ne[4] = { v->ne[0], q->ne[2], q->ne[1], q->ne[3] };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F16, 4, ne);
+
+    ggml_set_op_params_f32(result, 0, scale);
+    ggml_set_op_params_i32(result, 1, causal ? 1 : 0);
+
+    result->op     = GGML_OP_SAGE_ATTN2;
+    result->src[0] = q;
+    result->src[1] = k;
+    result->src[2] = v;
+
+    return result;
+}
+
+struct ggml_tensor * ggml_convrot_linear(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * weight_i8,
+        struct ggml_tensor  * input,
+        struct ggml_tensor  * weight_scale,
+        struct ggml_tensor  * bias,
+        int                   group_size) {
+    GGML_ASSERT(weight_i8->type == GGML_TYPE_I8);
+    GGML_ASSERT(input->type == GGML_TYPE_F32);
+    GGML_ASSERT(weight_scale->type == GGML_TYPE_F32);
+    GGML_ASSERT(bias == NULL || bias->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous(weight_i8));
+    GGML_ASSERT(ggml_is_contiguous(input));
+    GGML_ASSERT(ggml_is_contiguous(weight_scale));
+    GGML_ASSERT(bias == NULL || ggml_is_contiguous(bias));
+    GGML_ASSERT(group_size > 0);
+
+    const int64_t in_features = weight_i8->ne[0];
+    const int64_t out_features = weight_i8->ne[1];
+    GGML_ASSERT(input->ne[0] == in_features);
+    GGML_ASSERT(in_features % group_size == 0);
+    GGML_ASSERT(ggml_nelements(weight_scale) == out_features);
+    GGML_ASSERT(bias == NULL || bias->ne[0] == out_features);
+
+    int64_t ne[4] = { out_features, input->ne[1], input->ne[2], input->ne[3] };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, ggml_n_dims(input), ne);
+
+    ggml_set_op_params_i32(result, 0, group_size);
+
+    result->op     = GGML_OP_CONVROT_LINEAR;
+    result->src[0] = weight_i8;
+    result->src[1] = input;
+    result->src[2] = weight_scale;
+    result->src[3] = bias;
+
+    return result;
+}
+
+struct ggml_tensor * ggml_flash_attn_ext_with_bias_mask(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * v,
+        struct ggml_tensor  * bias,
+        struct ggml_tensor  * mask,
+        float                 scale,
+        float                 max_bias,
+        float                 logit_softcap) {
+    GGML_ASSERT(bias);
+    GGML_ASSERT(q && k && v);
+    GGML_ASSERT(q->ne[1] == bias->ne[1]);
+    GGML_ASSERT(k->ne[1] == bias->ne[0]);
+    GGML_ASSERT(q->ne[2] % bias->ne[2] == 0);
+    GGML_ASSERT(q->ne[3] % bias->ne[3] == 0);
+    if (mask) {
+        GGML_ASSERT(mask->type == GGML_TYPE_F16 || mask->type == GGML_TYPE_F32);
+        GGML_ASSERT(mask->ne[0] == bias->ne[0]);
+        GGML_ASSERT(mask->ne[1] == bias->ne[1]);
+        GGML_ASSERT(bias->ne[2] % mask->ne[2] == 0);
+        GGML_ASSERT(bias->ne[3] % mask->ne[3] == 0);
+    }
+
+    if (!ggml_is_contiguous(bias)) {
+        bias = ggml_cont(ctx, bias);
+    }
+
+    struct ggml_tensor * effective_mask = ggml_scale(ctx, bias, scale);
+    if (mask) {
+        if (!ggml_are_same_shape(mask, effective_mask)) {
+            mask = ggml_repeat(ctx, mask, effective_mask);
+        }
+        effective_mask = ggml_add(ctx, effective_mask, mask);
+    }
+
+    if (!ggml_is_contiguous(effective_mask)) {
+        effective_mask = ggml_cont(ctx, effective_mask);
+    }
+    if (effective_mask->type != GGML_TYPE_F16) {
+        effective_mask = ggml_cast(ctx, effective_mask, GGML_TYPE_F16);
+    }
+    if (!ggml_is_contiguous(effective_mask)) {
+        effective_mask = ggml_cont(ctx, effective_mask);
+    }
+
+    return ggml_flash_attn_ext(
+            ctx,
+            q,
+            k,
+            v,
+            effective_mask,
+            scale,
+            max_bias,
+            logit_softcap);
 }
 
 // ggml_mul_mat_id

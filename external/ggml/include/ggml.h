@@ -590,6 +590,15 @@ extern "C" {
 
         GGML_OP_GLU,
 
+        // AudioCPP fork-only ops (no upstream 0.20.2 equivalent; mirrored from
+        // the audio.cpp fork tree so the unified audio.cpp framework compiles).
+        // SAGE_ATTN2 and CONVROT_LINEAR are CUDA-only; on CPU they hit the
+        // compute dispatch default. MUL_MAT_PACK4 has a faithful CPU kernel in
+        // audio.cpp but is not exercised by builtin transcribe families.
+        GGML_OP_MUL_MAT_PACK4,
+        GGML_OP_SAGE_ATTN2,
+        GGML_OP_CONVROT_LINEAR,
+
         GGML_OP_COUNT,
     };
 
@@ -1430,6 +1439,12 @@ extern "C" {
             struct ggml_tensor  * a,
             struct ggml_tensor  * b);
 
+    // packed matrix multiplication with a 4-element wide layout (AudioCPP fast projection)
+    GGML_API struct ggml_tensor * ggml_mul_mat_pack4(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b);
+
     // change the precision of a matrix multiplication
     // set to GGML_PREC_F32 for higher precision (useful for phi-2)
     GGML_API void ggml_mul_mat_set_prec(
@@ -2045,6 +2060,15 @@ extern "C" {
             int                   s,  // stride
             int                   d); // dilation
 
+    // conv_1d implemented as an im2col + mul_mat composition (AudioCPP fast conv)
+    GGML_API struct ggml_tensor * ggml_conv_1d_fast_1d_im2col(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,   // convolution kernel
+            struct ggml_tensor  * b,   // data
+            int                   s0,  // stride
+            int                   p0,  // padding
+            int                   d0); // dilation
+
     // depthwise
     // TODO: this is very likely wrong for some cases! - needs more testing
     GGML_API struct ggml_tensor * ggml_conv_1d_dw(
@@ -2433,6 +2457,40 @@ extern "C" {
     GGML_API enum ggml_prec ggml_flash_attn_ext_get_prec(
             const struct ggml_tensor * a);
 
+    // SageAttention2 (scaled cosine attention), F16 inputs (AudioCPP).
+    // q, k, v: [head_dim, seq, n_head, batch]  res: [head_dim, n_head, seq, batch]
+    GGML_API struct ggml_tensor * ggml_sage_attn2(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k,
+            struct ggml_tensor  * v,
+            float                 scale,
+            bool                  causal);
+
+    // ConvRot tensorwise INT8 linear (AudioCPP). CUDA-only on CPU; builds the
+    // node, compute is handled by the CUDA backend.
+    GGML_API struct ggml_tensor * ggml_convrot_linear(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * weight_i8,
+            struct ggml_tensor  * input,
+            struct ggml_tensor  * weight_scale,
+            struct ggml_tensor  * bias,
+            int                   group_size);
+
+    // Helper that expands an optional mask into an additive F16 mask and folds a
+    // dense attention bias before dispatching the existing ggml_flash_attn_ext
+    // (AudioCPP MINITTS_FLASH_BIAS_WRAPPER).
+    GGML_API struct ggml_tensor * ggml_flash_attn_ext_with_bias_mask(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k,
+            struct ggml_tensor  * v,
+            struct ggml_tensor  * bias,
+            struct ggml_tensor  * mask,
+            float                 scale,
+            float                 max_bias,
+            float                 logit_softcap);
+
     GGML_API void ggml_flash_attn_ext_add_sinks(
             struct ggml_tensor * a,
             struct ggml_tensor * sinks);
@@ -2812,6 +2870,7 @@ extern "C" {
     GGML_API struct ggml_tensor *  ggml_graph_node   (struct ggml_cgraph * cgraph, int i); // if i < 0, returns nodes[n_nodes + i]
     GGML_API struct ggml_tensor ** ggml_graph_nodes  (struct ggml_cgraph * cgraph);
     GGML_API int                   ggml_graph_n_nodes(struct ggml_cgraph * cgraph);
+    GGML_API void                  ggml_graph_set_n_nodes(struct ggml_cgraph * cgraph, int n_nodes);
 
     GGML_API void   ggml_graph_add_node(struct ggml_cgraph * cgraph, struct ggml_tensor * tensor);
 

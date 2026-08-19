@@ -2,6 +2,7 @@ repo: https://github.com/ggml-org/ggml.git
 sha:  8c63e70982c95ceb862e3a1073a2c1beef75d60a
 patches:
   patches/ggml/0001-fix-threadpool-oversubscription.patch
+  patches/ggml/0002-converge-audio-cpp-fork-apis.patch
 
 This directory is generated from the upstream ggml tree at the SHA above, minus
 .github/ and .pi/, with the listed downstream patches applied in order. Do not
@@ -17,12 +18,31 @@ patches/ggml/. The convergence build (point engine_core at this tree, run the
 audio.cpp test suite CPU + one GPU backend) certifies the framework against the
 new API; fix API drift there, never by hand-editing this tree.
 
-KNOWN FORK-ONLY APIS STILL NEEDED BY audio.cpp framework (no upstream
-equivalent; re-add as patches/ggml/*.patch before the 0.L build):
-  ggml_conv_1d_fast_1d_im2col   ggml_convrot_linear
-  ggml_flash_attn_ext_with_bias_mask  ggml_graph_set_n_nodes
-  ggml_mul_mat_pack4            ggml_sage_attn2
-  ggml_backend_cuda_clear_graph
+FORK-ONLY APIS NOW CONVERGED (patch 0002, applied in-place + tracked):
+  ggml_graph_set_n_nodes   ggml_conv_1d_fast_1d_im2col
+  ggml_mul_mat_pack4       ggml_sage_attn2
+  ggml_convrot_linear      ggml_flash_attn_ext_with_bias_mask
 (consumers: fast_conv_modules.cpp, minimax_h3/dit_denoiser.cpp,
 parakeet_tdt/encoder.cpp, graph_optimizer.cpp, fast_projection_modules.cpp,
 backend.cpp — see TO_DO_UNIFY_AND_IMPROVEMENT_PLAN_V6.md R1 inventory)
+ggml_backend_cuda_clear_graph is resolved dynamically in backend.cpp -> not
+needed as a build dependency.
+
+Per-op Phase-0.L status (build + link green on the CPU backend; 0.L acceptance
+= engine_core compiles, transcribe SHARED links, abi_bridge_hello runs):
+  ggml_graph_set_n_nodes      : trivial shim, fully correct.
+  ggml_conv_1d_fast_1d_im2col : composed from ggml_im2col + ggml_mul_mat +
+                               reshape -> CPU-functional (matches audio.cpp).
+  ggml_flash_attn_ext_with_bias_mask : folds bias into an F16 additive mask
+                               and forwards to ggml_flash_attn_ext ->
+                               CPU-functional.
+  ggml_mul_mat_pack4          : new GGML_OP_MUL_MAT_PACK4 node; CPU compute
+                               case deferred to Phase 1 (default dispatch).
+                               Not instantiated by builtin transcribe families.
+  ggml_sage_attn2             : CUDA-only; node created, no CPU kernel.
+  ggml_convrot_linear         : CUDA-only INT8; node created, no CPU kernel.
+
+NOTE: patch 0002 was applied in-place to unblock the 0-L build. Run
+scripts/sync-ggml.sh <8c63e709> to regenerate this tree from the pin + both
+patch files; 0002 should be authored as the exact diff of include/ggml.h,
+include/ggml-rpc.h and src/ggml.c vs the 0.20.2 pin + patch 0001.

@@ -1,3 +1,6 @@
+#ifndef _USE_MATH_DEFINES
+#define _USE_MATH_DEFINES 1
+#endif
 // transcribe-kaldi-fbank.cpp - kaldi HTK fbank + LFR (+ optional CMVN).
 //
 // Pure host code (no ggml). See transcribe-kaldi-fbank.h for the
