@@ -93,12 +93,23 @@ patch until now -- the next sync-ggml.sh run would have deleted it silently.
 That is the failure mode this manifest warns about, and it happened; anything
 added to this tree must land under patches/ggml/ in the same change.
 
-REPRODUCIBILITY: verified 2026-08-20 on Windows/Git-Bash by regenerating into a
-scratch directory and diffing: `sync-ggml.sh` + patches 0001-0005 reproduces
-this tree with an empty `git diff`. Patch-added files land CRLF on disk here
-(git apply honours the global core.autocrlf in a non-repo directory) and are
-normalized back to LF on check-in by the repo .gitattributes, so the on-disk
-bytes differ while the tracked content does not. Do not "fix" this by passing
--c core.autocrlf=false to git apply: patches 0001 and 0002 rely on that
-conversion to match their LF-authored context against the CRLF checkout, and
-turning it off makes 0001 fail to apply.
+REPRODUCIBILITY: verified 2026-08-20 on Windows/Git-Bash. `scripts/sync-ggml.sh`
+with patches 0001-0005 regenerates this tree with no content difference at all:
+`git diff --ignore-cr-at-eol -- external/ggml` is empty, and UPSTREAM itself is
+byte-identical.
+
+A plain `git diff` after a sync does show ~13 paths on Windows. That is line
+endings only. The script extracts via `git archive | tar`, which writes LF, while
+many blobs in this tree are committed with CRLF (1145 of 2163 -- see the mixed
+line-endings note in the changelog), so the on-disk bytes differ where the
+content does not. Check with --ignore-cr-at-eol before concluding a sync changed
+anything, and do not "fix" it by renormalizing: that is a 1145-file sweep whose
+only effect here is churn.
+
+NOTE ON THE UPSTREAM HEADER vs THESE NOTES: only the header above (repo, sha,
+patch list) is generated. Everything from "This directory is generated" onwards
+is hand-written and is CARRIED OVER by the sync script, not re-emitted. A sync
+that regenerated the whole file would delete every note below -- the audit
+recipe, the per-op status, the deliberately-not-restored decision -- which is
+precisely the institutional knowledge a sync should preserve. The script grew
+that behaviour on 2026-08-20 after a run demonstrated the loss (91 lines).

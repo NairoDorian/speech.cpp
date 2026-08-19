@@ -126,13 +126,26 @@ EOF
             echo "  patches/ggml/$(basename "$patch")"
         done
     fi
-    cat <<'EOF'
+    # Everything from the boilerplate paragraph onwards is carried over from the
+    # existing UPSTREAM rather than re-emitted. Below that line the file holds
+    # hand-written convergence notes -- which fork deltas were restored and which
+    # were deliberately not, the per-op status, the audit recipe, the CRLF
+    # caveat -- and only the header above (repo/sha/patch list) is generated.
+    # Regenerating the whole file would silently delete all of it, which is the
+    # opposite of what a sync is for: the header goes stale on every sync, the
+    # notes do not.
+    if [ -f "$UPSTREAM_FILE" ] && grep -q '^This directory is generated' "$UPSTREAM_FILE"; then
+        echo
+        sed -n '/^This directory is generated/,$p' "$UPSTREAM_FILE"
+    else
+        cat <<'EOF'
 
 This directory is generated from the upstream ggml tree at the SHA above, minus
 .github/ and .pi/, with the listed downstream patches applied in order. Do not
 edit it by hand. Run scripts/sync-ggml.sh <ref> from the repo root to reproduce
 or upgrade it; the script rewrites this file.
 EOF
+    fi
 } > "${STAGE_DIR}/UPSTREAM"
 
 find "$STAGE_DIR" -type f -exec touch {} +
