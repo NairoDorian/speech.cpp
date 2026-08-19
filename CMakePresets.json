@@ -1,0 +1,72 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "dev-base",
+      "hidden": true,
+      "displayName": "Common dev posture",
+      "description": "Ninja + Release + tests. OpenMP stays at the project default (ON): CMakeLists auto-detects LLVM libomp for clang/clang-cl on Windows, and prints the libomp.dll PATH requirement at configure time. Run from a VS x64 developer environment (vcvars64) so Ninja finds the toolchain.",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "ENGINE_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "cpu-full",
+      "inherits": "dev-base",
+      "displayName": "CPU, full model set, unified ABI + transcribe arches",
+      "description": "The configuration the merge is validated against on CPU (progress.md test baseline; includes abi_bridge_hello / abi_stream_hello / asr_e2e_wer_test).",
+      "binaryDir": "${sourceDir}/build-cpu-full",
+      "cacheVariables": {
+        "AUDIOCPP_MODEL_SET": "full",
+        "SPEECHCPP_ENABLE_UNIFIED_ABI": "ON",
+        "SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES": "ON"
+      }
+    },
+    {
+      "name": "cpu-core",
+      "inherits": "cpu-full",
+      "displayName": "CPU, core model set (lean, fast iteration)",
+      "description": "Same ABI surface as cpu-full but links no optional models. Lean sets with tests ON are a supported configuration (plan R10.5) — a link failure here is a bug, not a limitation.",
+      "binaryDir": "${sourceDir}/build-cpu-core",
+      "cacheVariables": {
+        "AUDIOCPP_MODEL_SET": "core"
+      }
+    },
+    {
+      "name": "cuda",
+      "inherits": "dev-base",
+      "displayName": "CUDA, core model set",
+      "description": "The configuration the ggml convergence was GPU-certified against (plan R10, RTX 4070 / sm_89 / CUDA 13.3). nvcc requires the MSVC host compiler on Windows, so no compiler override — the vcvars environment decides.",
+      "binaryDir": "${sourceDir}/build-cuda",
+      "cacheVariables": {
+        "AUDIOCPP_MODEL_SET": "core",
+        "ENGINE_ENABLE_CUDA": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "cpu-full", "configurePreset": "cpu-full" },
+    { "name": "cpu-core", "configurePreset": "cpu-core" },
+    { "name": "cuda", "configurePreset": "cuda" }
+  ],
+  "testPresets": [
+    {
+      "name": "cpu-full",
+      "configurePreset": "cpu-full",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "cpu-core",
+      "configurePreset": "cpu-core",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "cuda",
+      "configurePreset": "cuda",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}
