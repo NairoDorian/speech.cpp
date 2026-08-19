@@ -3,6 +3,7 @@ sha:  8c63e70982c95ceb862e3a1073a2c1beef75d60a
 patches:
   patches/ggml/0001-fix-threadpool-oversubscription.patch
   patches/ggml/0002-converge-audio-cpp-fork-apis.patch
+  patches/ggml/0003-cpu-kernels-for-fork-only-ops.patch
 
 This directory is generated from the upstream ggml tree at the SHA above, minus
 .github/ and .pi/, with the listed downstream patches applied in order. Do not
@@ -28,21 +29,41 @@ backend.cpp — see TO_DO_UNIFY_AND_IMPROVEMENT_PLAN_V6.md R1 inventory)
 ggml_backend_cuda_clear_graph is resolved dynamically in backend.cpp -> not
 needed as a build dependency.
 
-Per-op Phase-0.L status (build + link green on the CPU backend; 0.L acceptance
-= engine_core compiles, transcribe SHARED links, abi_bridge_hello runs):
+Per-op status (all six build + link green on the CPU backend; the three that
+gained CPU kernels are covered by tests/unittests/test_ggml_fork_ops_cpu.cpp,
+which checks each against an independent reference at 1 and 4 threads):
   ggml_graph_set_n_nodes      : trivial shim, fully correct.
   ggml_conv_1d_fast_1d_im2col : composed from ggml_im2col + ggml_mul_mat +
                                reshape -> CPU-functional (matches audio.cpp).
   ggml_flash_attn_ext_with_bias_mask : folds bias into an F16 additive mask
                                and forwards to ggml_flash_attn_ext ->
                                CPU-functional.
-  ggml_mul_mat_pack4          : new GGML_OP_MUL_MAT_PACK4 node; CPU compute
-                               case deferred to Phase 1 (default dispatch).
-                               Not instantiated by builtin transcribe families.
-  ggml_sage_attn2             : CUDA-only; node created, no CPU kernel.
-  ggml_convrot_linear         : CUDA-only INT8; node created, no CPU kernel.
+  ggml_mul_mat_pack4          : CPU compute dispatches to
+                               ggml_compute_forward_mul_mat, matching what the
+                               audio.cpp fork and the CUDA backend both do.
+  ggml_sage_attn2             : CPU reference kernel (patch 0003). F16 QK^T +
+                               softmax + AV in F32, GQA and causal masking
+                               matching the CUDA kernel. Skips the INT8/FP8
+                               quantization and the K-mean subtraction, both of
+                               which are quantization-accuracy devices: mean
+                               subtraction shifts every logit for a query by the
+                               same constant and so is softmax-invariant.
+  ggml_convrot_linear         : CPU reference kernel (patch 0003). Applies the
+                               SAME radix-4 orthonormal rotation the CUDA kernel
+                               fuses into its activation quantizer -- the
+                               weights ship pre-rotated, so the rotation is part
+                               of the op's definition, not an optimization --
+                               then dot-products against the dequantized INT8
+                               weight in F32. Strictly more accurate than the
+                               CUDA path (it drops only the lossy activation
+                               quantization), which is what a reference wants.
 
-NOTE: patch 0002 was applied in-place to unblock the 0-L build. Run
-scripts/sync-ggml.sh <8c63e709> to regenerate this tree from the pin + both
-patch files; 0002 should be authored as the exact diff of include/ggml.h,
-include/ggml-rpc.h and src/ggml.c vs the 0.20.2 pin + patch 0001.
+REPRODUCIBILITY: verified 2026-08-19 on Windows/Git-Bash by regenerating into a
+scratch directory and diffing: `sync-ggml.sh` + patches 0001-0003 reproduces
+this tree with an empty `git diff`. Patch-added files land CRLF on disk here
+(git apply honours the global core.autocrlf in a non-repo directory) and are
+normalized back to LF on check-in by the repo .gitattributes, so the on-disk
+bytes differ while the tracked content does not. Do not "fix" this by passing
+-c core.autocrlf=false to git apply: patches 0001 and 0002 rely on that
+conversion to match their LF-authored context against the CRLF checkout, and
+turning it off makes 0001 fail to apply.
