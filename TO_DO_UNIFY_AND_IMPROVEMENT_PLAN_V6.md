@@ -2,7 +2,9 @@
 
 **Status:** Active — Phase 0 kickoff ready. V6 = V5 merged with
 `UNIFY_AND_IMPROVEMENT_PLAN.md` (2026-08-19). See §0.0 for the merge log and
-binding refinements (R1–R7).
+binding refinements (R1–R10). The ggml convergence (R1) is certified on CPU and
+CUDA as of R10 (2026-08-20); the live blocker is now an in-tree ASR model for
+end-to-end WER validation.
 
 This document is the master plan for evolving `speech.cpp` (a fork of
 `audio.cpp`) by systematically absorbing the architecture, model families,
@@ -242,10 +244,64 @@ changed against the R1 text above:
    deletes it on the next run. Reproducibility is defined as "regenerating
    yields an empty `git diff`", not byte-identity: patch-added files land CRLF
    on Windows and are normalized to LF on check-in. See `external/ggml/UPSTREAM`.
-4. **Still open from R1:** the GPU half of the convergence build. Everything
-   certified so far is CPU-only — this host has no CUDA device, so
-   `scaled_dot_product_attention_test` cannot run and the CUDA dispatch added for
-   the three ops is compile-reviewed but unexecuted.
+4. ~~**Still open from R1:** the GPU half of the convergence build.~~ **Closed by
+   R10** — the host does have CUDA 13.3 + an RTX 4070 (sm_89); the earlier note
+   was wrong.
+
+### R10. ggml convergence certified on a GPU backend (2026-08-20)
+
+R1 step 2's GPU half is done: the CUDA build links and the full suite runs on an
+RTX 4070 (sm_89, CUDA 13.3). `scaled_dot_product_attention_test`, which had never
+executed, passes. Both backends now sit at the same documented pre-existing
+failure baseline (see `../progress.md`). What running it actually changed:
+
+1. **The three fork-op CUDA kernels are numerically confirmed**, at the error
+   levels their quantization implies (normalized RMS vs the CPU references:
+   sage_attn2 3.7e-2, convrot_linear 7.4e-3, mul_mat_pack4 6.9e-4). The initial
+   failures were all tolerance-model bugs — `tests/unittests/test_ggml_fork_ops_cpu.cpp`
+   had been holding activation-quantizing CUDA kernels to the CPU reference
+   kernels' bounds. It now carries two named tolerance classes instead.
+
+2. **R9's audit recommendation is superseded by something cheaper.** R9 said the
+   tractable approach was to diff audio.cpp's `ggml-cpu` against the upstream pin
+   and triage hunks. Not needed: audio.cpp tags its own ggml deltas with
+   `MINITTS_*` markers, so `grep -rn "MINITTS_" audio.cpp/external/ggml/{src,include}`
+   enumerates the whole class in one command. It found the two remaining drops
+   immediately. **Re-run it against any future fork base before anything else.**
+   (Corollary: audio.cpp has only 14 commits touching `external/ggml` and none
+   touch `binary-ops.cpp` — deltas of this class live in the *initial* vendored
+   drop, so reading the fork's commit history does not find them.)
+
+3. **Not every dropped fork delta should be restored.** The fork's
+   `MINITTS_FLASH_PER_HEAD_MASK` re-enables per-head flash-attention masks on
+   CUDA, which upstream 0.20.2 refuses outright. Porting it removed the abort and
+   returned *wrong numbers*: ggml 0.20.2's CUDA kernels write the per-head offset
+   into the mask pointer but still read head 0's slice for every head (measured —
+   the CUDA output matches a slice-0-forced reference to 4.9e-4 while diverging
+   from the true per-head reference by 9.1e-2, and it reproduces at
+   `gqa_ratio == 1`). Upstream's restriction is load-bearing. The fix belongs in
+   the framework, not in ggml: `use_specialized_flash_attention()` now keeps that
+   lowering on CPU and falls through to the reference lowering elsewhere, which
+   is also ~390x more accurate on CUDA (8.1e-6 vs 3.2e-3 max abs) because it
+   avoids the flash kernels' F32→F16 K/V conversion.
+
+   **Rule this establishes for the rest of the convergence:** when the fork and
+   upstream disagree about what a backend supports, the fork is not automatically
+   right. Verify numerically before restoring, and prefer a capability check at
+   the framework's lowering decision over a patch to `external/ggml`.
+
+4. **The `patches/ggml/` invariant had been broken in practice.** Commit `e11e3c5`
+   applied the two-sided broadcast restore in place without a tracked patch, so
+   the next `sync-ggml.sh` run would have deleted it. Now tracked as patch 0004
+   (with the concat fast path as 0005); regeneration reproduces the tree with an
+   empty diff. R9 point 3 stated the invariant correctly — it just was not
+   being followed, which is worth checking rather than assuming.
+
+5. **Lean builds were broken and are a supported configuration.** With
+   `ENGINE_BUILD_TESTS=ON`, any `AUDIOCPP_MODEL_SET` short of `full` failed to
+   link because 11 test targets reference model-internal symbols ungated. Fixed
+   per-target against `AUDIOCPP_LINKED_MODELS`. Appendix I's build-verification
+   matrix should treat "lean set + tests ON" as a first-class row.
 
 ---
 
