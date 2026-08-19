@@ -220,6 +220,33 @@ Consequences for the plan:
    transcribe.cpp arch/sortformer ↔ NeMo-Speech.cpp), strengthening the golden
    manifests for the DIARIZATION family.
 
+### R9. ggml convergence closed out (2026-08-19)
+
+R1 step 2 (the convergence build) and its CPU-kernel follow-on are done. What
+changed against the R1 text above:
+
+1. **All 7 fork-only APIs are converged and CPU-functional.** The R1 inventory
+   listed 6 as "must become tracked patches"; they are (patch 0002), and the
+   three that had no CPU compute — `ggml_sage_attn2`, `ggml_convrot_linear`,
+   `ggml_mul_mat_pack4` — now have CPU kernels (patch 0003), so a graph
+   containing them no longer aborts on the CPU backend. Numerical coverage:
+   `tests/unittests/test_ggml_fork_ops_cpu.cpp`.
+2. **`ggml_convrot_linear` is not "an INT8 linear".** It is a *rotated* INT8
+   linear: the CUDA kernel fuses a QuaRot-style radix-4 orthonormal rotation
+   into its activation quantizer and the weights ship pre-rotated, so the
+   rotation is part of the op's semantics. Any future backend port (Vulkan,
+   Metal, HIP) must implement it or it will return confident garbage — the
+   shapes and dtypes all check out without it.
+3. **`patches/ggml/` is the invariant, not `external/ggml`.** Anything added to
+   the vendored tree must land as a tracked patch or `scripts/sync-ggml.sh`
+   deletes it on the next run. Reproducibility is defined as "regenerating
+   yields an empty `git diff`", not byte-identity: patch-added files land CRLF
+   on Windows and are normalized to LF on check-in. See `external/ggml/UPSTREAM`.
+4. **Still open from R1:** the GPU half of the convergence build. Everything
+   certified so far is CPU-only — this host has no CUDA device, so
+   `scaled_dot_product_attention_test` cannot run and the CUDA dispatch added for
+   the three ops is compile-reviewed but unexecuted.
+
 ---
 
 ## 0. Vision Statement
