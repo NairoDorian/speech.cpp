@@ -1,0 +1,28 @@
+repo: https://github.com/ggml-org/ggml.git
+sha:  8c63e70982c95ceb862e3a1073a2c1beef75d60a
+patches:
+  patches/ggml/0001-fix-threadpool-oversubscription.patch
+
+This directory is generated from the upstream ggml tree at the SHA above, minus
+.github/ and .pi/, with the listed downstream patches applied in order. Do not
+edit it by hand. Run scripts/sync-ggml.sh <ref> from the repo root to reproduce
+or upgrade it; the script rewrites this file.
+
+CONVERGENCE STATUS (V6 plan R1 / sub-task 0.L):
+The audio.cpp fork tree (HEAD 52080cd, labelled 0.12.0) was replaced by this
+upstream pin (8c63e709, ggml 0.20.2) + the threadpool patch, mirroring
+transcribe.cpp's ggml (its "upgrade ggml to 0.20.2" commit 923d4a0). Any
+audio.cpp fork-only deltas must be re-added as tracked patches under
+patches/ggml/. The convergence build (point engine_core at this tree, run the
+audio.cpp test suite CPU + one GPU backend) certifies the framework against the
+new API; fix API drift there, never by hand-editing this tree.
+
+KNOWN FORK-ONLY APIS STILL NEEDED BY audio.cpp framework (no upstream
+equivalent; re-add as patches/ggml/*.patch before the 0.L build):
+  ggml_conv_1d_fast_1d_im2col   ggml_convrot_linear
+  ggml_flash_attn_ext_with_bias_mask  ggml_graph_set_n_nodes
+  ggml_mul_mat_pack4            ggml_sage_attn2
+  ggml_backend_cuda_clear_graph
+(consumers: fast_conv_modules.cpp, minimax_h3/dit_denoiser.cpp,
+parakeet_tdt/encoder.cpp, graph_optimizer.cpp, fast_projection_modules.cpp,
+backend.cpp — see TO_DO_UNIFY_AND_IMPROVEMENT_PLAN_V6.md R1 inventory)

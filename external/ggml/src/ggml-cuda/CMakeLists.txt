@@ -15,6 +15,7 @@ if (CUDAToolkit_FOUND)
         # 80     == Ampere, asynchronous data loading, faster tensor core instructions
         # 86     == RTX 3000, needs CUDA v11.1
         # 89     == RTX 4000, needs CUDA v11.8
+        # 90     == Hopper H100/200, needs CUDA v11.8
         # 120    == Blackwell, needs CUDA v12.8, FP4 tensor cores
         #
         # XX-virtual == compile CUDA code as PTX, do JIT compilation to binary code on first run
@@ -33,7 +34,7 @@ if (CUDAToolkit_FOUND)
             list(APPEND CMAKE_CUDA_ARCHITECTURES 75-virtual 80-virtual 86-real)
 
             if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "11.8")
-                list(APPEND CMAKE_CUDA_ARCHITECTURES 89-real)
+                list(APPEND CMAKE_CUDA_ARCHITECTURES 89-real 90-virtual)
             endif()
 
             if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")
@@ -111,21 +112,6 @@ if (CUDAToolkit_FOUND)
     file(GLOB   SRCS "template-instances/mmf*.cu")
     list(APPEND GGML_SOURCES_CUDA ${SRCS})
 
-    set(GGML_CUDA_SAGE_ATTN2_ENABLED ON)
-    foreach(ARCH IN LISTS CMAKE_CUDA_ARCHITECTURES)
-        string(REGEX MATCH "^[0-9]+" ARCH_NUMBER "${ARCH}")
-        if (ARCH_NUMBER STREQUAL "" OR ARCH_NUMBER LESS 89)
-            set(GGML_CUDA_SAGE_ATTN2_ENABLED OFF)
-        endif()
-    endforeach()
-
-    if (NOT GGML_CUDA_SAGE_ATTN2_ENABLED)
-        list(REMOVE_ITEM GGML_SOURCES_CUDA
-            "${CMAKE_CURRENT_SOURCE_DIR}/sage-attn2.cu"
-            "sage-attn2.cu")
-        message(STATUS "CUDA SageAttention2 disabled for CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES}")
-    endif()
-
     if (GGML_CUDA_FA_ALL_QUANTS)
         file(GLOB   SRCS "template-instances/fattn-vec*.cu")
         list(APPEND GGML_SOURCES_CUDA ${SRCS})
@@ -142,10 +128,6 @@ if (CUDAToolkit_FOUND)
                              ${GGML_HEADERS_CUDA}
                              ${GGML_SOURCES_CUDA}
                             )
-
-    if (GGML_CUDA_SAGE_ATTN2_ENABLED)
-        target_compile_definitions(ggml-cuda PRIVATE GGML_CUDA_SAGE_ATTN2_ENABLED)
-    endif()
 
     add_compile_definitions(GGML_CUDA_PEER_MAX_BATCH_SIZE=${GGML_CUDA_PEER_MAX_BATCH_SIZE})
 

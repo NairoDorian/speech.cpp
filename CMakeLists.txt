@@ -95,6 +95,14 @@ option(ENGINE_ENABLE_CPU_ALL_VARIANTS
 option(ENGINE_BUILD_EXAMPLES "Build example binaries" OFF)
 option(ENGINE_BUILD_TESTS "Build framework unit tests" OFF)
 option(ENGINE_BUILD_WARMBENCH "Build warmbench helper binaries" OFF)
+# Unified ABI runtime (transcribe.cpp port). Default OFF until Phase 5 (V6 plan J.2).
+option(SPEECHCPP_ENABLE_UNIFIED_ABI
+    "Build the unified C ABI runtime (engine_transcribe_runtime + transcribe_shared)"
+    OFF)
+# transcribe.cpp arch families built alongside audio.cpp families (kept separate until Phase 1).
+option(SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES
+    "Build transcribe.cpp arch families as engine_arch_* OBJECT libraries"
+    OFF)
 set(AUDIOCPP_GGML_SOURCE_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/external/ggml"
     CACHE PATH "ggml source tree to build with AudioCPP")
@@ -218,8 +226,8 @@ add_compile_options(
     $<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/permissive->
 )
 
-set(AUDIOCPP_MODEL_SET "full" CACHE STRING "Model composite to build: full, core, or custom")
-set_property(CACHE AUDIOCPP_MODEL_SET PROPERTY STRINGS full core custom)
+set(AUDIOCPP_MODEL_SET "full" CACHE STRING "Model composite to build: full, core, asr, asr+full, or custom")
+set_property(CACHE AUDIOCPP_MODEL_SET PROPERTY STRINGS full core asr "asr+full" custom)
 set(AUDIOCPP_MODELS "" CACHE STRING "Comma or semicolon separated model targets for AUDIOCPP_MODEL_SET=custom")
 set(AUDIOCPP_LIBYAML_COMPILE_DEFINITIONS
     _POSIX_C_SOURCE=200809L
@@ -1215,8 +1223,29 @@ audiocpp_add_model(ace_step
 )
 
 set(AUDIOCPP_ENABLED_MODELS "")
-if (AUDIOCPP_MODEL_SET STREQUAL "full")
+# ASR/STT model targets for the "asr" composite (speech-to-text families in audio.cpp).
+set(AUDIOCPP_ASR_MODEL_TARGETS
+    silero_vad
+    marblenet_vad
+    kroko_asr
+    fun_asr_nano
+    sense_asr
+    hviske_asr
+    nemotron_asr
+    citrinet_asr
+    qwen3_asr
+    parakeet_tdt
+    higgs_audio_stt
+    vibevoice_asr
+    voxtral_realtime
+    moss
+    sortformer_diar
+    roformer
+)
+if (AUDIOCPP_MODEL_SET STREQUAL "full" OR AUDIOCPP_MODEL_SET STREQUAL "asr+full")
     set(AUDIOCPP_ENABLED_MODELS ${AUDIOCPP_MODEL_TARGETS})
+elseif (AUDIOCPP_MODEL_SET STREQUAL "asr")
+    set(AUDIOCPP_ENABLED_MODELS ${AUDIOCPP_ASR_MODEL_TARGETS})
 elseif (AUDIOCPP_MODEL_SET STREQUAL "core")
     set(AUDIOCPP_ENABLED_MODELS "")
 elseif (AUDIOCPP_MODEL_SET STREQUAL "custom")
@@ -1234,8 +1263,9 @@ elseif (AUDIOCPP_MODEL_SET STREQUAL "custom")
     endforeach()
     list(REMOVE_DUPLICATES AUDIOCPP_ENABLED_MODELS)
 else()
-    message(FATAL_ERROR "AUDIOCPP_MODEL_SET must be full, core, or custom")
+    message(FATAL_ERROR "AUDIOCPP_MODEL_SET must be full, core, asr, asr+full, or custom")
 endif()
+list(REMOVE_DUPLICATES AUDIOCPP_ENABLED_MODELS)
 
 set(AUDIOCPP_REGISTRY_INCLUDE_CONTENT "")
 set(AUDIOCPP_REGISTRY_LOADER_CONTENT "")
@@ -1285,6 +1315,111 @@ add_library(engine_runtime STATIC
     src/framework/runtime/registry.cpp
     ${AUDIOCPP_RUNTIME_OBJECTS}
 )
+
+# ---------------------------------------------------------------------------
+# Unified transcribe runtime (V6 plan sub-task 0.I). Gated default-OFF per
+# plan J.2; enabled with -DSPEECHCPP_ENABLE_UNIFIED_ABI=ON. The C ABI runtime
+# is ported verbatim from transcribe.cpp; its per-family sources live in
+# src/runtime/arch/<family>/ and are kept separate from audio.cpp model
+# families until Phase 1.
+# ---------------------------------------------------------------------------
+if (SPEECHCPP_ENABLE_UNIFIED_ABI)
+    add_library(engine_transcribe_runtime OBJECT
+        src/runtime/transcribe.cpp
+        src/runtime/transcribe-arch.cpp
+        src/runtime/transcribe-backend.cpp
+        src/runtime/transcribe-batch-util.cpp
+        src/runtime/transcribe-bin-loader.cpp
+        src/runtime/transcribe-debug.cpp
+        src/runtime/transcribe-env.cpp
+        src/runtime/transcribe-flash-policy.cpp
+        src/runtime/transcribe-kaldi-fbank.cpp
+        src/runtime/transcribe-load-common.cpp
+        src/runtime/transcribe-loader.cpp
+        src/runtime/transcribe-mel.cpp
+        src/runtime/transcribe-meta.cpp
+        src/runtime/transcribe-model.cpp
+        src/runtime/transcribe-tokenizer.cpp
+        src/runtime/transcribe-unicode.cpp
+        src/runtime/transcribe-unicode-data.cpp
+        src/runtime/transcribe-weights-util.cpp
+        src/runtime/causal_lm/causal_lm.cpp
+        src/runtime/conformer/conformer.cpp
+        src/runtime/sanm/sanm.cpp
+        src/runtime/granite_conformer/shaw_attn.cpp
+        src/runtime/third_party/miniz/miniz.c
+    )
+    set_target_properties(engine_transcribe_runtime PROPERTIES EXCLUDE_FROM_ALL TRUE)
+    audiocpp_configure_runtime_object(engine_transcribe_runtime)
+    target_include_directories(engine_transcribe_runtime PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/runtime
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe
+    )
+    target_compile_definitions(engine_transcribe_runtime PRIVATE
+        TRANSCRIBE_BUILD
+        MINIZ_NO_INFLATE_APIS
+        MINIZ_NO_STDIO
+        MINIZ_NO_TIME
+        MINIZ_NO_ZLIB_COMPATIBLE_NAMES
+    )
+    if (MSVC)
+        set_source_files_properties(src/runtime/third_party/miniz/miniz.c PROPERTIES COMPILE_OPTIONS "/w")
+    else()
+        set_source_files_properties(src/runtime/third_party/miniz/miniz.c PROPERTIES COMPILE_OPTIONS "-w")
+    endif()
+
+    # transcribe.cpp arch families (whisper, parakeet, canary, ...). One
+    # OBJECT library per family, grouped by directory under src/runtime/arch/.
+    set(AUDIOCPP_ARCH_OBJECTS "")
+    if (SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES)
+        file(GLOB AUDIOCPP_ARCH_DIRS
+            LIST_DIRECTORIES true
+            CONFIGURE_DEPENDS
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/arch/*
+        )
+        foreach(arch_dir IN LISTS AUDIOCPP_ARCH_DIRS)
+            get_filename_component(arch_family "${arch_dir}" NAME)
+            if (NOT IS_DIRECTORY "${arch_dir}" OR arch_family STREQUAL "" OR arch_family STREQUAL ".")
+                continue()
+            endif()
+            file(GLOB arch_family_sources CONFIGURE_DEPENDS "${arch_dir}/*.cpp")
+            if (NOT arch_family_sources)
+                continue()
+            endif()
+            add_library(engine_arch_${arch_family} OBJECT ${arch_family_sources})
+            set_target_properties(engine_arch_${arch_family} PROPERTIES EXCLUDE_FROM_ALL TRUE)
+            audiocpp_configure_runtime_object(engine_arch_${arch_family})
+            target_include_directories(engine_arch_${arch_family} PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/runtime
+                ${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe
+            )
+            list(APPEND AUDIOCPP_ARCH_OBJECTS $<TARGET_OBJECTS:engine_arch_${arch_family}>)
+        endforeach()
+        list(REMOVE_DUPLICATES AUDIOCPP_ARCH_OBJECTS)
+    endif()
+
+    # C ABI shared library for bindings (mirrors transcribe.cpp's libtranscribe).
+    add_library(transcribe SHARED
+        $<TARGET_OBJECTS:engine_transcribe_runtime>
+        ${AUDIOCPP_ARCH_OBJECTS}
+    )
+    set_target_properties(transcribe PROPERTIES
+        OUTPUT_NAME transcribe
+        VERSION "0.2.1"
+        SOVERSION 0
+    )
+    target_include_directories(transcribe
+        PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/runtime
+    )
+    target_compile_definitions(transcribe PRIVATE TRANSCRIBE_BUILD)
+    target_link_libraries(transcribe PRIVATE ggml sentencepiece)
+    if (WIN32)
+        target_compile_definitions(transcribe PRIVATE _USE_MATH_DEFINES)
+    endif()
+endif()
 
 add_library(cjson_vendor STATIC
     external/cJSON/cJSON.c
