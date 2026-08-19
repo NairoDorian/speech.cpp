@@ -1419,6 +1419,19 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
     if (WIN32)
         target_compile_definitions(transcribe PRIVATE _USE_MATH_DEFINES)
     endif()
+
+    # Phase 0.M: hello-world bridge test. Loads a GGUF through the C ABI,
+    # runs 16 kHz mono PCM, asserts transcribe_full_text() is non-NULL.
+    # Requires a model path at runtime (argv[1] or TRANSCRIBE_BRIDGE_TEST_MODEL);
+    # exits 2 (skipped) without one so it is CTest-safe without model assets.
+    add_executable(abi_bridge_hello tests/abi_bridge_hello.cpp)
+    target_link_libraries(abi_bridge_hello PRIVATE transcribe)
+    if (ENGINE_BUILD_TESTS)
+        add_test(
+            NAME abi_bridge_hello
+            COMMAND abi_bridge_hello
+        )
+    endif()
 endif()
 
 add_library(cjson_vendor STATIC
