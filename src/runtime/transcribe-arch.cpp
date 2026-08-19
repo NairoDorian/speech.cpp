@@ -6,6 +6,8 @@
 
 #include "transcribe-arch.h"
 
+#include "transcribe-arch-adapter.h"
+
 #include <cstring>
 
 namespace transcribe {
@@ -104,6 +106,14 @@ const Arch * find_arch(const char * name) {
         if (std::strcmp(a->name, name) == 0) {
             return a;
         }
+    }
+
+    // Phase 0.H: consult the ArchAdapter table (audio.cpp framework families)
+    // AFTER the builtin transcribe.cpp families so a name collision keeps the
+    // builtin handler (e.g. moss, qwen3_asr, voxtral_realtime) until Phase 1
+    // consolidation assigns the colliding names unambiguously.
+    if (const Arch * a = adapter_find_arch(name)) {
+        return a;
     }
     return nullptr;
 }

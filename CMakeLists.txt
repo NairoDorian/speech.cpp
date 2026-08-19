@@ -1327,6 +1327,7 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
     add_library(engine_transcribe_runtime OBJECT
         src/runtime/transcribe.cpp
         src/runtime/transcribe-arch.cpp
+        src/runtime/transcribe-arch-adapter.cpp
         src/runtime/transcribe-backend.cpp
         src/runtime/transcribe-batch-util.cpp
         src/runtime/transcribe-bin-loader.cpp
@@ -1414,8 +1415,12 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src/runtime
     )
+    # The ArchAdapter (transcribe-arch-adapter.cpp) routes C ABI dispatch into
+    # audio.cpp's ModelRegistry/vtable; linking engine_runtime here resolves
+    # make_default_registry, IVoiceModelLoader and the per-family session
+    # symbols the adapter's hooks call through.
     target_compile_definitions(transcribe PRIVATE TRANSCRIBE_BUILD)
-    target_link_libraries(transcribe PRIVATE ggml sentencepiece)
+    target_link_libraries(transcribe PRIVATE ggml sentencepiece engine_runtime)
     if (WIN32)
         target_compile_definitions(transcribe PRIVATE _USE_MATH_DEFINES)
     endif()
