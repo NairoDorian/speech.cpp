@@ -174,6 +174,23 @@ if (ENGINE_ENABLE_CUDA AND NOT ENGINE_ENABLE_HIP)
     endif()
 endif()
 if (ENGINE_ENABLE_OPENMP)
+    # Auto-resolve LLVM libomp on Clang/Windows: CMake's FindOpenMP does not
+    # auto-detect clang's OpenMP on Windows, which otherwise makes a plain
+    # `cmake -B build` fail (find_package OpenMP REQUIRED is not satisfied).
+    # MSVC and Linux/clang-on-Linux are unaffected (auto-detected by FindOpenMP).
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND NOT MSVC)
+        get_filename_component(_AUDIOCPP_LLVM_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+        get_filename_component(_AUDIOCPP_LLVM_ROOT "${_AUDIOCPP_LLVM_BIN_DIR}" DIRECTORY)
+        if (EXISTS "${_AUDIOCPP_LLVM_ROOT}/lib/libomp.lib")
+            message(STATUS "OpenMP: auto-detected LLVM libomp at ${_AUDIOCPP_LLVM_ROOT}")
+            set(OpenMP_CXX_FLAGS "-fopenmp=libomp" CACHE STRING "OpenMP C++ flags" FORCE)
+            set(OpenMP_C_FLAGS "-fopenmp=libomp" CACHE STRING "OpenMP C flags" FORCE)
+            set(OpenMP_CXX_LIB_NAMES "libomp" CACHE STRING "OpenMP C++ lib names" FORCE)
+            set(OpenMP_C_LIB_NAMES "libomp" CACHE STRING "OpenMP C lib names" FORCE)
+            set(OpenMP_libomp_LIBRARY "${_AUDIOCPP_LLVM_ROOT}/lib/libomp.lib" CACHE FILEPATH "libomp library" FORCE)
+            set(OpenMP_libomp_C_LIBRARY "${_AUDIOCPP_LLVM_ROOT}/lib/libomp.lib" CACHE FILEPATH "libomp C library" FORCE)
+        endif()
+    endif()
     find_package(OpenMP REQUIRED COMPONENTS CXX)
 endif()
 
@@ -250,6 +267,10 @@ function(audiocpp_configure_runtime_object target_name)
         ${CMAKE_CURRENT_SOURCE_DIR}/external/libyaml/include
     )
     target_compile_definitions(${target_name} PRIVATE ${AUDIOCPP_LIBYAML_COMPILE_DEFINITIONS})
+    # <cmath> does not expose M_PI on MSVC unless _USE_MATH_DEFINES is defined
+    # before the include; define it for all engine runtime objects (ggml defines
+    # it internally for its own translation units).
+    target_compile_definitions(${target_name} PRIVATE _USE_MATH_DEFINES)
     if (AUDIOCPP_HIP_STRIX_HALO_OPTIMIZATIONS_ACTIVE)
         target_compile_definitions(${target_name} PRIVATE ENGINE_HIP_STRIX_HALO_OPTIMIZATIONS=1)
     endif()
