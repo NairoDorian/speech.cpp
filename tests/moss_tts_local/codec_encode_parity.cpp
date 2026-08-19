@@ -10,6 +10,8 @@
 #include "engine/framework/core/execution_context.h"
 #include "engine/models/moss/shared/audio_tokenizer_encoder.h"
 
+#include "codec_weights_path.h"
+
 #include <cstdint>
 #include <exception>
 #include <fstream>
@@ -82,10 +84,11 @@ std::vector<std::vector<int32_t>> read_codes_csv(const std::string & path) {
 
 int main(int argc, char ** argv) {
     try {
-        const std::string codec_dir = arg_value(
-            argc, argv, "--codec",
-            "C:/Users/justi/.cache/huggingface/hub/models--OpenMOSS-Team--MOSS-Audio-Tokenizer-v2/"
-            "snapshots/f6e20e543b33d2c252a7ef71bdf8aa71e5ff9169");
+        const std::string codec_dir = arg_value(argc, argv, "--codec", "");
+        if (codec_dir.empty()) {
+            std::cerr << "codec_encode_parity: skipped (pass --codec <weights-file-or-dir>)\n";
+            return 2;
+        }
         const std::string prepared = arg_value(argc, argv, "--prepared", "enc_prepared.f32");
         const std::string ref_codes_path = arg_value(argc, argv, "--ref-codes", "enc_codes.csv");
         const int channels = int_arg(argc, argv, "--channels", 2);
@@ -115,8 +118,9 @@ int main(int argc, char ** argv) {
         engine::core::ExecutionContext execution_context(backend_config);
 
         std::cout << "loading codec encoder weights...\n" << std::flush;
+        const auto codec_weights = moss_parity::open_codec_weights(codec_dir);
         engine::models::moss::MossAudioTokenizerEncoder encoder(
-            codec_dir, execution_context, num_quantizers, kWeightContextBytes, kGraphArenaBytes);
+            *codec_weights, execution_context, num_quantizers, kWeightContextBytes, kGraphArenaBytes);
 
         std::cout << "encoding...\n" << std::flush;
         const auto codes = encoder.encode(stereo);

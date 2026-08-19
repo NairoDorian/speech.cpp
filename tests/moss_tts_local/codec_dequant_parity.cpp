@@ -4,6 +4,8 @@
 
 #include "engine/models/moss/shared/audio_tokenizer_quantizer.h"
 
+#include "codec_weights_path.h"
+
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -13,14 +15,18 @@
 #include <vector>
 
 int main(int argc, char ** argv) {
-    const std::filesystem::path codec_dir =
-        argc > 1 ? argv[1]
-                 : "C:/Users/justi/.cache/huggingface/hub/models--OpenMOSS-Team--MOSS-Audio-Tokenizer-v2/"
-                   "snapshots/f6e20e543b33d2c252a7ef71bdf8aa71e5ff9169";
+    // The codec weights are a multi-GB external download, so there is no
+    // in-tree default. Exit 2 (skipped) without one, matching the convention
+    // used by the abi_* bridge tests.
+    if (argc < 2) {
+        std::fprintf(stderr,
+                     "codec_dequant_parity: skipped (usage: codec_dequant_parity "
+                     "<codec-weights-file-or-dir> [out.txt])\n");
+        return 2;
+    }
+    const std::filesystem::path codec_dir = argv[1];
     const std::filesystem::path out_path =
-        argc > 2 ? argv[2]
-                 : "C:/Users/justi/AppData/Local/Temp/claude/E--REPOS-audio-cpp/"
-                   "62af4e53-c9e0-4e66-ac0e-27e93cec72c9/scratchpad/cpp_latent.txt";
+        argc > 2 ? std::filesystem::path(argv[2]) : std::filesystem::path("cpp_latent.txt");
 
     constexpr int64_t kNumQuantizers = 12;
     constexpr int64_t kSteps = 8;
@@ -33,7 +39,8 @@ int main(int argc, char ** argv) {
     }
 
     try {
-        engine::models::moss::MossAudioTokenizerQuantizer dequantizer(codec_dir, kNumQuantizers);
+        const auto weights = moss_parity::open_codec_weights(codec_dir);
+        engine::models::moss::MossAudioTokenizerQuantizer dequantizer(*weights, kNumQuantizers);
         const std::vector<float> latent = dequantizer.decode(codes);  // [code_dim, steps]
         const int64_t code_dim = dequantizer.code_dim();
 

@@ -7,6 +7,8 @@
 #include "engine/framework/core/execution_context.h"
 #include "engine/models/moss/shared/audio_tokenizer_decoder.h"
 
+#include "codec_weights_path.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -73,10 +75,12 @@ void write_pcm16_wav(
 
 int main(int argc, char ** argv) {
     try {
-        const std::string default_codec =
-            "C:/Users/justi/.cache/huggingface/hub/models--OpenMOSS-Team--MOSS-Audio-Tokenizer-v2/"
-            "snapshots/f6e20e543b33d2c252a7ef71bdf8aa71e5ff9169";
-        const std::filesystem::path codec_dir = arg_value(argc, argv, "--codec", default_codec);
+        const std::string codec_arg = arg_value(argc, argv, "--codec", "");
+        if (codec_arg.empty()) {
+            std::cerr << "codec_decode_parity: skipped (pass --codec <weights-file-or-dir>)\n";
+            return 2;
+        }
+        const std::filesystem::path codec_dir = codec_arg;
         const int frames = int_arg(argc, argv, "--frames", 12);
         const int threads = int_arg(argc, argv, "--threads", 16);
         const int num_quantizers = int_arg(argc, argv, "--quantizers", 12);
@@ -101,8 +105,9 @@ int main(int argc, char ** argv) {
 
         std::cout << "codec=" << codec_dir.string() << "\n";
         std::cout << "loading decoder weights...\n" << std::flush;
+        const auto codec_weights = moss_parity::open_codec_weights(codec_dir);
         engine::models::moss::MossAudioTokenizerDecoder decoder(
-            codec_dir, execution_context, num_quantizers, kWeightContextBytes, kGraphArenaBytes);
+            *codec_weights, execution_context, num_quantizers, kWeightContextBytes, kGraphArenaBytes);
 
         std::cout << "decoding " << frames << " frames...\n" << std::flush;
         const auto stereo = decoder.decode(codes);
