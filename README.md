@@ -1,66 +1,19 @@
 # speech.cpp
 
-[![C++](https://img.shields.io/badge/C%2B%2B-17-blue)](https://en.cppreference.com/w/c++17)
 [![Release](https://img.shields.io/badge/release-v0.0.1--dev-orange)](https://github.com/NairoDorian/speech.cpp)
-[![0xShug0/audio.cpp | Trendshift](https://trendshift.io/api/badge/trendshift/repositories/64983/daily?language=C%2B%2B)](https://trendshift.io/repositories/64983?utm_source=trendshift-badge&utm_medium=badge&utm_campaign=badge-trendshift-64983)
-
 `speech.cpp` is a high-performance C++ audio inference framework built on top of
-`ggml`, formed by unifying **audio.cpp** — a broad multi-task audio engine (TTS,
+`ggml`, formed by unifying **audio.cpp** — a broad audio engine (STT, TTS,
 voice cloning, ASR, diarization, VAD, source separation, alignment, MIDI, etc.) —
-with **transcribe.cpp** — a production-grade speech-to-text library with a public
-C ABI and golden-manifest numerical validation.
+with **transcribe.cpp** — a production-grade STT engine
 
 The result is a single locally-runnable toolkit that combines audio.cpp's model
 coverage and modular build system with transcribe.cpp's disciplined STT
 architecture, C ABI surface, and per-tensor testing methodology.
 
 > [!IMPORTANT]
-> **v0.0.1 (development):** This is the first unified release of `speech.cpp`,
+> **v0.0.1 (development):** This is the first commit of `speech.cpp`,
 > a fork aligned with `audio.cpp@main` (upstream `92816fc`) that is beginning the
-> incremental, one-file-at-a-time absorption of `transcribe.cpp`'s STT families,
-> C ABI, and golden-manifest validation. See
-> [`TO_DO_UNIFY_AND_IMPROVEMENT_PLAN_V5.md`](../TO_DO_UNIFY_AND_IMPROVEMENT_PLAN_V5.md)
-> for the full merge & improvement plan.
->
-> **2026-08-14 - MiniMax Music3 preview release:** MiniMax Music3 text-to-music with
-> lyrics conditioning is available on the [preview/minimax-music-3 branch](https://github.com/0xShug0/audio.cpp/tree/preview/minimax-music-3).
->
-> **2026-08-18**: MiniMax Music3 has been merged from the `preview` branch into `main`.
-> Please use the version from `main` going forward.
-
-> [!TIP]
-> **CUDA performance headline:** multiple TTS paths already run **1.8x to up to
-> 8x faster** than their Python reference paths while cutting end-to-end latency
-> by **45%-85%**.
->
-> **GGUF performance:** all released model families support GGUF loading, and tested
-> Q8 packages can run up to **1.53x faster** while reducing peak VRAM by up to about
-> **37%** on routes such as Higgs Audio, Fish Audio, and Voxtral. See the
-> [GGUF guide](docs/gguf.md) for support status and the
-> [Q8 performance report](docs/reports/gguf_q8_performance.md) for 16-bit vs Q8
-> measurements.
->
-> **Production deployment example:** Try Fun-ASR-Nano with speech.cpp (via the
-> audio.cpp compatibility path) on the FunASR platform
-> https://www.funasr.com/en/deploy/audio-cpp.html!
->
-> **VibeVoice 1.5B:** generates a **93.9-minute podcast in 18.2 minutes** with
-> **10 diffusion steps** and without quantization, running about **5.15x faster
-> than real time**.
->
-> **Supertonic 3:** generates about **10 hours of audio in 3 minutes** on RTX5090.
-> Up to 200x+ real-time on CUDA, 6x+ real-time on CPU, and 47 ms TTFT in CUDA
-> streaming mode.
-> [Demo: 10 hours of audio generated in 3 minutes](https://www.reddit.com/r/LocalLLaMA/comments/1uwpvt9/audiocpp_10_hours_of_audio_generated_in_3_minutes/).
->
-> **Real-world ASR win:** In [TranscrIA benchmark](https://github.com/Martossien/transcria/blob/main/docs/STT_BENCHMARK_REAL_MEETINGS.md)
-> on messy French meeting audio, speech.cpp's (audio.cpp's) Nemotron 3.5 ASR matched
-> the same WER as other implementations while using about **1/4 of the wall time**.
-
-It is built for real end-to-end execution rather than one-off model demos: the
-same runtime powers TTS, voice cloning, voice conversion, ASR, diarization, VAD,
-source separation, alignment, codec-style models, and higher-level workflows
-through a common framework surface.
+> incremental, one-file-at-a-time absorption of `transcribe.cpp`. This commit is about the readme.md
 
 ---
 
@@ -118,7 +71,7 @@ the people already helping shape the project.
 
 > [!TIP]
 > **Contribution focus:** the most helpful contributions right now are
-> improvements to the UI, API server, and pipeline/workflow subsystems. These
+> improvements to the MERGE (transccribe.cpp) and IMPROVE, UI, API server, and pipeline/workflow subsystems. These
 > areas make the existing model surface easier to use, serve, compose, and
 > validate. See [CONTRIBUTING.md](CONTRIBUTING.md) for more details.
 >
@@ -132,8 +85,6 @@ the people already helping shape the project.
 > model paths or package ids, generated outputs, parity or path-test results, and
 > relevant performance or memory notes.
 
----
-
 ## News
 
 > [!IMPORTANT]
@@ -141,64 +92,19 @@ the people already helping shape the project.
 > beginning the integration of transcribe.cpp's STT families. The v0.0.1-dev
 > release aligns with audio.cpp 0.6 upstream.
 >
-> **2026-08-13 - Release 0.6 (audio.cpp upstream):** This release adds **5** new
-> model families — DotTTS, NeuTTS, MuScriptor, MiniMax-H3, and SenseVoice —
-> bringing audio.cpp to **49** total model families and **70+** model variants,
-> alongside the new native WebUI from [@mirek190](https://github.com/mirek190),
-> expanded GGUF packaging, and more shared framework runtime pieces.
->
-> **2026-07-31 - Release 0.5 (audio.cpp upstream):** audio.cpp grows to **44 model
-> families** with **9 new additions**: DramaBox, Confucius4-TTS, RVC, BS-RoFormer,
-> GLM-TTS, Kroko ASR, Parakeet-TDT, Inflect v2, and Fun-ASR-Nano.
->
-> **HIP/ROCm support:** Platform coverage also takes a big step forward! Early
-> HIP/ROCm support lands for AMD GPUs thanks to
-> [@IIIIIllllIIIIIlllll](https://github.com/IIIIIllllIIIIIlllll), with Nix
-> ROCm/HIP build support from [@francescobozzo](https://github.com/francescobozzo).
->
-> **Metal performance boost:** Thanks to [@liuzl](https://github.com/liuzl), Metal
-> ops were optimized, making tested VoxCPM2 end-to-end runs up to **2.56x faster**
-> on Apple Silicon. Many models should benefit from these optimizations.
->
-> This release is a major GGUF-first usability pass. The WebUI now uses model-spec
-> package links for downloads, prefers standalone GGUF packages when available,
-> and handles more models directly from the normal UI flow. New schema-v1 specs
-> make model options, packages, metadata, and UI-facing behavior much easier to
-> keep in sync.
->
-> **2026-07-23 - Release 0.4 (audio.cpp upstream):** audio.cpp expanded to **35
-> model families**, adding Higgs Audio v3 TTS 4B, Fish Audio S2 Pro, Voxtral
-> Realtime ASR, community OuteTTS and VieNeu-TTS, broader GGUF/package-spec
-> support, reusable framework improvements, and the integrated WebUI thanks to
-> [@kigner](https://github.com/kigner) and [@patrickjchen](https://github.com/patrickjchen).
->
-> **2026-07-14 - Release 0.3 (audio.cpp upstream):** This release added IndexTTS2,
-> Irodori-TTS, MOSS-TTS-Nano, MOSS-TTS-Local, Supertonic 3, Chatterbox voice
-> conversion, and the first broad GGUF loading/conversion wave. Thanks to
-> [@justinjohn0306](https://github.com/justinjohn0306) for MOSS-TTS-Local and
-> [@mirek190](https://github.com/mirek190) for driving GGUF forward.
->
-> **transcribe.cpp 0.2.0:** 16 STT model families with a public C ABI,
-> ctypes/Python, TypeScript (koffi), Rust, and Swift bindings, golden-manifest +
-> per-tensor tolerance testing, and an 8-stage porting pipeline.
-
-**2026-06-25 to 2026-07-08:** audio.cpp grew from the first released model wave
-into broad TTS, ASR, music generation, source separation, VAD, diarization, codec,
-and voice-conversion coverage, with VibeVoice 1.5B/7B, LoRA adapter loading,
-initial streaming support, and major CUDA Conv1DTransp speedups.
 
 ---
 
 ## Supported Models
 
 speech.cpp supports the union of models from both parent projects. **Audio.cpp
-families** span TTS, voice cloning, voice conversion, ASR, diarization, VAD, source
+families** span STT , TTS, voice cloning, voice conversion, diarization, VAD, source
 separation, alignment, codec, MIDI, and music generation. **Transcribe.cpp
 families** (being merged in file-by-file starting v0.0.1) add additional STT model
 families with strict WER parity validation.
 
 Task tags: `TTS` text to speech, `Clone` voice cloning, `VC` voice conversion,
-`ASR` speech recognition, `Align` forced alignment, `VAD` voice activity detection,
+`ASR` automatic speech recognition, `Align` forced alignment, `VAD` voice activity detection,
 `Diar` speaker diarization, `Codec` audio codec, `Sep` source separation, `MIDI`
 audio-to-symbolic MIDI/events, `Music` music/song generation, `SFX` sound effects,
 `Video` video generation, `Edit` audio/music editing, `Design` voice design,
@@ -335,7 +241,7 @@ community-model expectations and current entries.
 Docker CUDA and CPU images are available for both CLI and server use. See
 [docs/docker.md](docs/docker.md) for available images, build commands and working
 Docker examples.
-
+REMAINS TO BE DONE:!!!!!
 ---
 
 ## Model Manager and GGUF Downloads
@@ -352,10 +258,10 @@ GGUF downloads:
 
 - Released model packages: [audio-cpp/audio.cpp-gguf](https://huggingface.co/audio-cpp/audio.cpp-gguf)
 - Community model package: [mirek190/audio.cpp](https://huggingface.co/mirek190/audio.cpp)
-
+https://huggingface.co/handy-computer/models
 See the [Model Manager guide](docs/model_manager.md) for model-manager usage and
 package notes.
-
+The model downloader need to be able to download and select quantizations of models
 ---
 
 ## WebUI
@@ -390,10 +296,11 @@ notes, and frontend development instructions.
 
 ## Prebuilt Binaries
 
-- **Windows (CUDA / CPU):** official packages on the [Releases page](https://github.com/0xShug0/audio.cpp/releases).
+- **Windows (CUDA / CPU):** official packages on the [Releases page]
 - **Windows (HIP/ROCm, AMD GPUs):** community-maintained packages with the ROCm
   runtime bundled — no HIP SDK installation required. Published from
   [@IIIIIllllIIIIIlllll's fork Releases](https://github.com/IIIIIllllIIIIIlllll/audio.cpp/releases)
+  NEED TO UPDATE THIS LINK
   in two tracks: ROCm 6.4 (full coverage incl. RX 7600 / gfx1102) and ROCm 7.1
   (recommended for RDNA4). Version numbers follow the upstream releases; see
   [docs/build/windows-hip-distribution.md](docs/build/windows-hip-distribution.md)
@@ -955,29 +862,6 @@ Last update: 2026-08-18
 
 Have a project using speech.cpp? Submit a PR or let me know, and I'll be happy to
 add it here.
-
-- [TranscrIA](https://github.com/Martossien/transcria) is a self-hosted meeting
-  transcription platform with diarization and local LLM correction. speech.cpp is
-  integrated as a first-class STT engine in the product.
-- [Pocket TTS Browser Engine](https://github.com/jjmlovesgit/pocket-tts-browser-engine)
-  uses speech.cpp to bring fully local PocketTTS voices into Chrome and Edge
-  through the browser TTS API.
-- [GuideAnts](https://github.com/Elumenotion/GuideAnts) uses speech.cpp as the
-  default local AI stack path for basic ASR and TTS, with planned reusable skills
-  for speech.cpp scenarios and model configurations.
-- [audio.cpp-webui](https://github.com/kigner/audio.cpp-webui) provides a
-  full-task Python/Gradio WebUI for speech.cpp (audio.cpp), focused on
-  browser-based model downloads and common TTS, ASR, voice conversion, diarization,
-  music, and audio workflows.
-- [audio.cpp-hub](https://github.com/IIIIIllllIIIIIlllll/audio.cpp-hub) is a Web
-  GUI for speech.cpp (audio.cpp) that packages model-oriented workflows around
-  the native runtime.
-- [Delusion](https://github.com/BrokenSource/Delusion) provide Pythonic, strongly
-  typed wrapper classes around speech.cpp (audio.cpp) usage, including model
-  download/cache helpers and typed request surfaces.
-- [AudioCppTray](https://github.com/spicchio72/AudioCppTray) is a Windows tray
-  management tool for `audiocpp_server.exe`, with start/stop/restart controls,
-  notifications, log viewing, log rotation, and server configuration shortcuts.
 
 ---
 
