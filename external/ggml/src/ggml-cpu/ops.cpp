@@ -4573,7 +4573,15 @@ static void ggml_compute_forward_scale_f32(
 
     GGML_ASSERT(ggml_is_contiguous(src0));
     GGML_ASSERT(ggml_is_contiguous(dst));
-    GGML_ASSERT(ggml_are_same_shape(src0, dst));
+    // AudioCPP fork delta: src0 may broadcast up to dst rather than having to
+    // match it exactly. The framework graph optimizer folds
+    // `scale(repeat(x, full))` down to `scale(x)` with dst keeping the repeated
+    // shape (the unary_broadcast_scale fold in
+    // framework/runtime/graph_optimizer.cpp, covered by
+    // tests/unittests/test_encoder_modules.cpp).
+    GGML_ASSERT(ggml_can_repeat(src0, dst));
+
+    GGML_TENSOR_UNARY_OP_LOCALS
 
     float s; // scale factor
     float b; // bias
@@ -4584,22 +4592,37 @@ static void ggml_compute_forward_scale_f32(
     const int ith = params->ith;
     const int nth = params->nth;
 
-    const int nc = src0->ne[0];
-    const int nr = ggml_nrows(src0);
+    // Rows are counted over dst: with broadcasting src0 may have fewer.
+    const int64_t nc = ne0;
+    const int64_t nr = ggml_nrows(dst);
 
     // rows per thread
-    const int dr = (nr + nth - 1)/nth;
+    const int64_t dr = (nr + nth - 1)/nth;
 
     // row range for this thread
-    const int ir0 = dr*ith;
-    const int ir1 = MIN(ir0 + dr, nr);
+    const int64_t ir0 = dr*ith;
+    const int64_t ir1 = MIN(ir0 + dr, nr);
 
-    const size_t nb01 = src0->nb[1];
+    const bool is_src0_full_shape = ggml_are_same_shape(src0, dst);
 
-    const size_t nb1 = dst->nb[1];
+    if (!is_src0_full_shape) {
+        for (int64_t ir = ir0; ir < ir1; ++ir) {
+            const int64_t i3 = ir/(ne2*ne1);
+            const int64_t i2 = (ir - i3*ne2*ne1)/ne1;
+            const int64_t i1 = (ir - i3*ne2*ne1 - i2*ne1);
+            float * dst_row = (float *) ((char *) dst->data + i3*nb3 + i2*nb2 + i1*nb1);
+            const char * src0_row = (const char *) src0->data +
+                (i3 % ne03)*nb03 + (i2 % ne02)*nb02 + (i1 % ne01)*nb01;
+            for (int64_t i0 = 0; i0 < nc; ++i0) {
+                const float value = *(const float *) (src0_row + (i0 % ne00)*nb00);
+                dst_row[i0] = value * s + b;
+            }
+        }
+        return;
+    }
 
     if (b == 0.0f) {
-        for (int i1 = ir0; i1 < ir1; i1++) {
+        for (int64_t i1 = ir0; i1 < ir1; i1++) {
             if (dst->data != src0->data) {
                 // src0 is same shape as dst => same indices
                 // TODO: add x parameter to ggml_vec_scale_f32 and remove this memcpy
@@ -4608,10 +4631,10 @@ static void ggml_compute_forward_scale_f32(
             ggml_vec_scale_f32(nc, (float *) ((char *) dst->data + i1*nb1), s);
         }
     } else {
-        for (int i1 = ir0; i1 < ir1; i1++) {
+        for (int64_t i1 = ir0; i1 < ir1; i1++) {
             ggml_vec_mad1_f32(nc,
                 (float *) ((char *) dst->data  + i1*nb1),
-                (float *) ((char *) src0->data + i1*nb1),
+                (float *) ((char *) src0->data + i1*nb01),
                 s, b);
         }
     }

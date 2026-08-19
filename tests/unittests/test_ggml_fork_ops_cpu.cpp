@@ -7,8 +7,8 @@
 //
 // Before this, all three were CUDA-only: on CPU they fell through the compute
 // dispatch default and aborted. Each op is checked against an independent
-// in-test reference so the kernels are validated as *math*, not just as
-// symbols that link.
+// in-test reference so the kernels are validated as *math*, not just as symbols
+// that link.
 //
 // The CONVROT_LINEAR check is the load-bearing one: the CUDA kernel fuses a
 // QuaRot-style orthonormal rotation into its activation quantization, and the
@@ -16,8 +16,17 @@
 // and returns confident garbage. The test pins the rotation by exploiting its
 // orthogonality — rotating the float weight rows with the same transform must
 // reproduce the un-rotated reference matmul.
+//
+// Every case runs on the CPU backend and, when the build has one, on a GPU
+// device as well; the two are then compared against each other. That CPU<->GPU
+// delta is the per-tensor tolerance the plan's golden-manifest methodology
+// wants, and it is where the two implementations' quantization choices show up:
+// the CPU kernels are deliberately references (no INT8/FP8 activation
+// quantization), so they should be *closer* to the exact answer than CUDA is.
 
 #include "ggml.h"
+#include "ggml-alloc.h"
+#include "ggml-backend.h"
 #include "ggml-cpu.h"
 
 #include <cmath>
@@ -41,12 +50,11 @@ void check(bool ok, const std::string & what) {
     }
 }
 
-void check_close(float got, float want, float tol, const std::string & what) {
-    const float err = std::fabs(got - want);
-    if (err <= tol) {
-        std::printf("  ok   %s (|%.6f - %.6f| = %.2e <= %.2e)\n", what.c_str(), got, want, err, tol);
+void check_le(float got, float limit, const std::string & what) {
+    if (got <= limit) {
+        std::printf("  ok   %s (%.3e <= %.2e)\n", what.c_str(), got, limit);
     } else {
-        std::printf("  FAIL %s (|%.6f - %.6f| = %.2e > %.2e)\n", what.c_str(), got, want, err, tol);
+        std::printf("  FAIL %s (%.3e > %.2e)\n", what.c_str(), got, limit);
         ++g_failures;
     }
 }
@@ -116,20 +124,28 @@ void rotate_row(std::vector<float> & row, int group) {
 }
 
 // --------------------------------------------------------------------------
-// Small ggml graph runner
+// Backend-agnostic graph runner
 // --------------------------------------------------------------------------
 
 struct Graph {
-    ggml_context * ctx = nullptr;
+    ggml_context *        ctx    = nullptr;
+    ggml_backend_t        backend = nullptr;
+    ggml_backend_buffer_t buffer = nullptr;
+    int                   n_threads = 1;
 
-    explicit Graph(size_t mem_mb) {
+    Graph(ggml_backend_t b, int threads, size_t n_tensors = 64)
+        : backend(b), n_threads(threads) {
         ggml_init_params p{};
-        p.mem_size   = mem_mb * 1024 * 1024;
+        // no_alloc: tensor data lives in a backend buffer, not the ggml context.
+        p.mem_size   = ggml_tensor_overhead() * n_tensors + ggml_graph_overhead();
         p.mem_buffer = nullptr;
-        p.no_alloc   = false;
+        p.no_alloc   = true;
         ctx = ggml_init(p);
     }
     ~Graph() {
+        if (buffer) {
+            ggml_backend_buffer_free(buffer);
+        }
         if (ctx) {
             ggml_free(ctx);
         }
@@ -137,10 +153,27 @@ struct Graph {
     Graph(const Graph &) = delete;
     Graph & operator=(const Graph &) = delete;
 
-    void run(ggml_tensor * out, int n_threads) {
+    // Call once, after every tensor is created and before writing any data.
+    void allocate() {
+        buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    }
+
+    void set(ggml_tensor * t, const void * data, size_t bytes) {
+        ggml_backend_tensor_set(t, data, 0, bytes);
+    }
+
+    void get(const ggml_tensor * t, void * data, size_t bytes) const {
+        ggml_backend_tensor_get(t, data, 0, bytes);
+    }
+
+    void compute(ggml_tensor * out) {
+        if (ggml_backend_is_cpu(backend)) {
+            ggml_backend_cpu_set_n_threads(backend, n_threads);
+        }
         ggml_cgraph * gf = ggml_new_graph(ctx);
         ggml_build_forward_expand(gf, out);
-        ggml_graph_compute_with_ctx(ctx, gf, n_threads);
+        ggml_backend_graph_compute(backend, gf);
+        ggml_backend_synchronize(backend);
     }
 };
 
@@ -148,63 +181,53 @@ struct Graph {
 // 1. SAGE_ATTN2 — F16 scaled dot-product attention with GQA + optional causal
 // --------------------------------------------------------------------------
 
-void test_sage_attn2(bool causal, int n_threads) {
-    const int64_t D  = 64;   // head_dim (kernel supports 64 or 128)
-    const int64_t N  = 12;   // queries
-    const int64_t K  = 20;   // keys
-    const int64_t HQ = 4;    // query heads
-    const int64_t HK = 2;    // kv heads (GQA group of 2)
-    const int64_t NB = 2;    // batch
+const int64_t kD = 64;   // head_dim (kernel supports 64 or 128)
+const int64_t kN = 128;  // queries (CUDA tiles at CTA_Q=128)
+const int64_t kK = 128;  // keys    (CUDA tiles at CTA_K=64)
+const int64_t kHQ = 4;   // query heads
+const int64_t kHK = 2;   // kv heads (GQA group of 2)
+const int64_t kNB = 2;   // batch
 
-    Graph g(64);
+// Deterministic inputs shared by every backend so results are comparable.
+struct SageInputs {
+    std::vector<uint16_t> q, k, v;   // ggml_fp16_t bit patterns
+    std::vector<float>    qf, kf, vf; // the same values read back through F16
+};
 
-    ggml_tensor * q = ggml_new_tensor_4d(g.ctx, GGML_TYPE_F16, D, N, HQ, NB);
-    ggml_tensor * k = ggml_new_tensor_4d(g.ctx, GGML_TYPE_F16, D, K, HK, NB);
-    ggml_tensor * v = ggml_new_tensor_4d(g.ctx, GGML_TYPE_F16, D, K, HK, NB);
-
+SageInputs make_sage_inputs() {
+    SageInputs in;
     std::mt19937 rng(1234u);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-
-    auto fill = [&](ggml_tensor * t, std::vector<float> & shadow) {
-        const int64_t n = ggml_nelements(t);
+    auto fill = [&](std::vector<uint16_t> & bits, std::vector<float> & shadow, int64_t n) {
+        bits.resize((size_t) n);
         shadow.resize((size_t) n);
-        auto * data = (ggml_fp16_t *) t->data;
         for (int64_t i = 0; i < n; ++i) {
-            const float value = dist(rng);
-            data[i] = ggml_fp32_to_fp16(value);
+            const ggml_fp16_t h = ggml_fp32_to_fp16(dist(rng));
+            std::memcpy(&bits[(size_t) i], &h, sizeof(uint16_t));
             // Read back through F16 so the reference sees exactly what the
-            // kernel sees — otherwise the F16 rounding shows up as "error".
-            shadow[(size_t) i] = ggml_fp16_to_fp32(data[i]);
+            // kernel sees — otherwise F16 rounding shows up as "error".
+            shadow[(size_t) i] = ggml_fp16_to_fp32(h);
         }
     };
+    fill(in.q, in.qf, kD * kN * kHQ * kNB);
+    fill(in.k, in.kf, kD * kK * kHK * kNB);
+    fill(in.v, in.vf, kD * kK * kHK * kNB);
+    return in;
+}
 
-    std::vector<float> qh, kh, vh;
-    fill(q, qh);
-    fill(k, kh);
-    fill(v, vh);
-
-    const float scale = 1.0f / std::sqrt((float) D);
-
-    ggml_tensor * out = ggml_sage_attn2(g.ctx, q, k, v, scale, causal);
-    g.run(out, n_threads);
-
-    check(out->ne[0] == D && out->ne[1] == HQ && out->ne[2] == N && out->ne[3] == NB,
-          "sage_attn2 output shape is [D, HQ, N, NB]");
-
-    // Independent reference in F32.
-    std::vector<float> want((size_t) ggml_nelements(out), 0.0f);
-    std::vector<float> logits((size_t) K);
-    for (int64_t b = 0; b < NB; ++b) {
-        for (int64_t h = 0; h < HQ; ++h) {
-            const int64_t hk = h * HK / HQ;
-            for (int64_t qi = 0; qi < N; ++qi) {
+std::vector<float> sage_attn2_reference(const SageInputs & in, bool causal, float scale) {
+    std::vector<float> want((size_t) (kD * kHQ * kN * kNB), 0.0f);
+    std::vector<float> logits((size_t) kK);
+    for (int64_t b = 0; b < kNB; ++b) {
+        for (int64_t h = 0; h < kHQ; ++h) {
+            const int64_t hk = h * kHK / kHQ;
+            for (int64_t qi = 0; qi < kN; ++qi) {
                 float max_logit = -INFINITY;
-                for (int64_t ki = 0; ki < K; ++ki) {
+                for (int64_t ki = 0; ki < kK; ++ki) {
                     float dot = 0.0f;
-                    for (int64_t d = 0; d < D; ++d) {
-                        const float qv = qh[(size_t) (((b * HQ + h) * N + qi) * D + d)];
-                        const float kv = kh[(size_t) (((b * HK + hk) * K + ki) * D + d)];
-                        dot += qv * kv;
+                    for (int64_t d = 0; d < kD; ++d) {
+                        dot += in.qf[(size_t) (((b * kHQ + h) * kN + qi) * kD + d)]
+                             * in.kf[(size_t) (((b * kHK + hk) * kK + ki) * kD + d)];
                     }
                     float logit = dot * scale;
                     if (causal && ki > qi) {
@@ -214,60 +237,92 @@ void test_sage_attn2(bool causal, int n_threads) {
                     max_logit = std::fmax(max_logit, logit);
                 }
                 float sum = 0.0f;
-                for (int64_t ki = 0; ki < K; ++ki) {
+                for (int64_t ki = 0; ki < kK; ++ki) {
                     logits[(size_t) ki] = std::exp(logits[(size_t) ki] - max_logit);
                     sum += logits[(size_t) ki];
                 }
-                for (int64_t d = 0; d < D; ++d) {
+                for (int64_t d = 0; d < kD; ++d) {
                     float acc = 0.0f;
-                    for (int64_t ki = 0; ki < K; ++ki) {
-                        const float vv = vh[(size_t) (((b * HK + hk) * K + ki) * D + d)];
-                        acc += (logits[(size_t) ki] / sum) * vv;
+                    for (int64_t ki = 0; ki < kK; ++ki) {
+                        acc += (logits[(size_t) ki] / sum)
+                             * in.vf[(size_t) (((b * kHK + hk) * kK + ki) * kD + d)];
                     }
                     // dst layout: [D, HQ, N, NB] -> d + h*D + qi*HQ*D + b*N*HQ*D
-                    want[(size_t) (((b * N + qi) * HQ + h) * D + d)] = acc;
+                    want[(size_t) (((b * kN + qi) * kHQ + h) * kD + d)] = acc;
                 }
             }
         }
     }
+    return want;
+}
 
-    std::vector<float> got((size_t) ggml_nelements(out));
-    const auto * out_data = (const ggml_fp16_t *) out->data;
-    for (size_t i = 0; i < got.size(); ++i) {
-        got[i] = ggml_fp16_to_fp32(out_data[i]);
+// Returns the op output, or an empty vector if the backend does not support it.
+std::vector<float> run_sage_attn2(ggml_backend_t backend, int n_threads,
+                                  const SageInputs & in, bool causal, float scale) {
+    Graph g(backend, n_threads);
+
+    ggml_tensor * q = ggml_new_tensor_4d(g.ctx, GGML_TYPE_F16, kD, kN, kHQ, kNB);
+    ggml_tensor * k = ggml_new_tensor_4d(g.ctx, GGML_TYPE_F16, kD, kK, kHK, kNB);
+    ggml_tensor * v = ggml_new_tensor_4d(g.ctx, GGML_TYPE_F16, kD, kK, kHK, kNB);
+    ggml_tensor * out = ggml_sage_attn2(g.ctx, q, k, v, scale, causal);
+
+    if (!ggml_backend_supports_op(backend, out)) {
+        return {};
     }
+    g.allocate();
+    g.set(q, in.q.data(), in.q.size() * sizeof(uint16_t));
+    g.set(k, in.k.data(), in.k.size() * sizeof(uint16_t));
+    g.set(v, in.v.data(), in.v.size() * sizeof(uint16_t));
+    g.compute(out);
 
-    const ErrStats st = compare(got, want);
-    // dst is F16, so ~1e-3 absolute is the representation floor.
-    const std::string tag = causal ? "sage_attn2 causal" : "sage_attn2 non-causal";
-    check_close(st.max_abs, 0.0f, 2e-3f, tag + " max abs error (nth=" + std::to_string(n_threads) + ")");
+    check(out->ne[0] == kD && out->ne[1] == kHQ && out->ne[2] == kN && out->ne[3] == kNB,
+          "sage_attn2 output shape is [D, HQ, N, NB]");
+
+    std::vector<uint16_t> raw((size_t) ggml_nelements(out));
+    g.get(out, raw.data(), raw.size() * sizeof(uint16_t));
+    std::vector<float> got(raw.size());
+    for (size_t i = 0; i < raw.size(); ++i) {
+        ggml_fp16_t h;
+        std::memcpy(&h, &raw[i], sizeof(uint16_t));
+        got[i] = ggml_fp16_to_fp32(h);
+    }
+    return got;
 }
 
 // --------------------------------------------------------------------------
 // 2. CONVROT_LINEAR — rotated INT8 linear
 // --------------------------------------------------------------------------
 
-void test_convrot_linear(bool with_bias, int n_threads) {
-    const int group = 256;
-    const int64_t k = 512;   // in_features (2 rotation groups)
-    const int64_t n = 96;    // out_features
-    const int64_t tokens = 5;
+const int    kGroup  = 256;
+const int64_t kCk    = 512;   // in_features (2 rotation groups)
+const int64_t kCn    = 256;   // out_features
+const int64_t kTokens = 5;
 
+struct ConvrotInputs {
+    std::vector<int8_t> w_i8;
+    std::vector<float>  w_scale;
+    std::vector<float>  bias;
+    std::vector<float>  x;                 // [k, tokens] row-major by token
+    std::vector<float>  want_dequant;      // <dequantized rotated row, rotated x>
+    std::vector<float>  want_float;        // the un-rotated float matmul
+};
+
+ConvrotInputs make_convrot_inputs(bool with_bias) {
     std::mt19937 rng(4321u);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
 
-    // Ground-truth float layer.
-    std::vector<std::vector<float>> w_float((size_t) n, std::vector<float>((size_t) k));
+    ConvrotInputs in;
+    std::vector<std::vector<float>> w_float((size_t) kCn, std::vector<float>((size_t) kCk));
     for (auto & row : w_float) {
         for (auto & value : row) {
             value = dist(rng);
         }
     }
-    std::vector<float> bias_vec((size_t) n);
-    for (auto & value : bias_vec) {
+    in.bias.assign((size_t) kCn, 0.0f);
+    for (auto & value : in.bias) {
         value = with_bias ? dist(rng) : 0.0f;
     }
-    std::vector<std::vector<float>> x((size_t) tokens, std::vector<float>((size_t) k));
+    std::vector<std::vector<float>> x((size_t) kTokens, std::vector<float>((size_t) kCk));
     for (auto & row : x) {
         for (auto & value : row) {
             value = dist(rng);
@@ -279,181 +334,304 @@ void test_convrot_linear(bool with_bias, int n_threads) {
     //     <R w_j, R x> == <w_j, x>
     // so the op must reproduce the *un-rotated* float matmul. If the kernel
     // skipped the activation rotation this identity would not hold.
-    std::vector<int8_t> w_i8((size_t) (n * k));
-    std::vector<float>  w_scale((size_t) n);
-    std::vector<std::vector<float>> w_rot_dequant((size_t) n, std::vector<float>((size_t) k));
-    for (int64_t j = 0; j < n; ++j) {
+    in.w_i8.assign((size_t) (kCn * kCk), 0);
+    in.w_scale.assign((size_t) kCn, 0.0f);
+    std::vector<std::vector<float>> w_rot_dequant((size_t) kCn, std::vector<float>((size_t) kCk));
+    for (int64_t j = 0; j < kCn; ++j) {
         std::vector<float> row = w_float[(size_t) j];
-        rotate_row(row, group);
+        rotate_row(row, kGroup);
         float max_abs = 0.0f;
         for (float value : row) {
             max_abs = std::fmax(max_abs, std::fabs(value));
         }
         const float s = std::fmax(max_abs / 127.0f, 1e-8f);
-        w_scale[(size_t) j] = s;
-        for (int64_t i = 0; i < k; ++i) {
+        in.w_scale[(size_t) j] = s;
+        for (int64_t i = 0; i < kCk; ++i) {
             int q = (int) std::lrint(row[(size_t) i] / s);
             q = q < -127 ? -127 : (q > 127 ? 127 : q);
-            w_i8[(size_t) (j * k + i)] = (int8_t) q;
+            in.w_i8[(size_t) (j * kCk + i)] = (int8_t) q;
             w_rot_dequant[(size_t) j][(size_t) i] = (float) q * s;
         }
     }
 
-    Graph g(64);
-    ggml_tensor * t_w     = ggml_new_tensor_2d(g.ctx, GGML_TYPE_I8,  k, n);
-    ggml_tensor * t_x     = ggml_new_tensor_2d(g.ctx, GGML_TYPE_F32, k, tokens);
-    ggml_tensor * t_scale = ggml_new_tensor_1d(g.ctx, GGML_TYPE_F32, n);
-    ggml_tensor * t_bias  = with_bias ? ggml_new_tensor_1d(g.ctx, GGML_TYPE_F32, n) : nullptr;
-
-    std::memcpy(t_w->data, w_i8.data(), w_i8.size() * sizeof(int8_t));
-    std::memcpy(t_scale->data, w_scale.data(), w_scale.size() * sizeof(float));
-    if (t_bias) {
-        std::memcpy(t_bias->data, bias_vec.data(), bias_vec.size() * sizeof(float));
-    }
-    for (int64_t t = 0; t < tokens; ++t) {
-        std::memcpy((char *) t_x->data + (size_t) t * t_x->nb[1],
-                    x[(size_t) t].data(), (size_t) k * sizeof(float));
+    in.x.assign((size_t) (kTokens * kCk), 0.0f);
+    for (int64_t t = 0; t < kTokens; ++t) {
+        std::memcpy(in.x.data() + t * kCk, x[(size_t) t].data(), (size_t) kCk * sizeof(float));
     }
 
-    ggml_tensor * out = ggml_convrot_linear(g.ctx, t_w, t_x, t_scale, t_bias, group);
-    g.run(out, n_threads);
-
-    check(out->ne[0] == n && out->ne[1] == tokens, "convrot_linear output shape is [n, tokens]");
-
-    // Reference: <dequantized rotated weight row, rotated activation row>.
-    // This is what the op is *defined* to compute; it differs from the float
-    // ground truth only by the INT8 weight quantization error.
-    std::vector<float> want_exact((size_t) (n * tokens));
-    std::vector<float> want_float((size_t) (n * tokens));
-    for (int64_t t = 0; t < tokens; ++t) {
+    in.want_dequant.assign((size_t) (kCn * kTokens), 0.0f);
+    in.want_float.assign((size_t) (kCn * kTokens), 0.0f);
+    for (int64_t t = 0; t < kTokens; ++t) {
         std::vector<float> rx = x[(size_t) t];
-        rotate_row(rx, group);
-        for (int64_t j = 0; j < n; ++j) {
+        rotate_row(rx, kGroup);
+        for (int64_t j = 0; j < kCn; ++j) {
             float acc_q = 0.0f;
             float acc_f = 0.0f;
-            for (int64_t i = 0; i < k; ++i) {
+            for (int64_t i = 0; i < kCk; ++i) {
                 acc_q += w_rot_dequant[(size_t) j][(size_t) i] * rx[(size_t) i];
                 acc_f += w_float[(size_t) j][(size_t) i] * x[(size_t) t][(size_t) i];
             }
-            want_exact[(size_t) (t * n + j)] = acc_q + bias_vec[(size_t) j];
-            want_float[(size_t) (t * n + j)] = acc_f + bias_vec[(size_t) j];
+            in.want_dequant[(size_t) (t * kCn + j)] = acc_q + in.bias[(size_t) j];
+            in.want_float[(size_t) (t * kCn + j)]   = acc_f + in.bias[(size_t) j];
         }
     }
+    return in;
+}
 
-    std::vector<float> got((size_t) (n * tokens));
-    for (int64_t t = 0; t < tokens; ++t) {
-        std::memcpy(got.data() + (size_t) (t * n),
-                    (const char *) out->data + (size_t) t * out->nb[1],
-                    (size_t) n * sizeof(float));
+std::vector<float> run_convrot_linear(ggml_backend_t backend, int n_threads,
+                                      const ConvrotInputs & in, bool with_bias) {
+    Graph g(backend, n_threads);
+
+    ggml_tensor * t_w     = ggml_new_tensor_2d(g.ctx, GGML_TYPE_I8,  kCk, kCn);
+    ggml_tensor * t_x     = ggml_new_tensor_2d(g.ctx, GGML_TYPE_F32, kCk, kTokens);
+    ggml_tensor * t_scale = ggml_new_tensor_1d(g.ctx, GGML_TYPE_F32, kCn);
+    ggml_tensor * t_bias  = with_bias ? ggml_new_tensor_1d(g.ctx, GGML_TYPE_F32, kCn) : nullptr;
+    ggml_tensor * out = ggml_convrot_linear(g.ctx, t_w, t_x, t_scale, t_bias, kGroup);
+
+    if (!ggml_backend_supports_op(backend, out)) {
+        return {};
     }
+    g.allocate();
+    g.set(t_w, in.w_i8.data(), in.w_i8.size() * sizeof(int8_t));
+    g.set(t_x, in.x.data(), in.x.size() * sizeof(float));
+    g.set(t_scale, in.w_scale.data(), in.w_scale.size() * sizeof(float));
+    if (t_bias) {
+        g.set(t_bias, in.bias.data(), in.bias.size() * sizeof(float));
+    }
+    g.compute(out);
 
-    const std::string tag = std::string("convrot_linear ") + (with_bias ? "with bias" : "no bias");
-    const ErrStats vs_exact = compare(got, want_exact);
-    check_close(vs_exact.max_abs, 0.0f, 2e-3f,
-                tag + " vs dequantized reference, max abs error (nth=" + std::to_string(n_threads) + ")");
+    check(out->ne[0] == kCn && out->ne[1] == kTokens, "convrot_linear output shape is [n, tokens]");
 
-    // The orthogonality identity: the op reproduces the un-rotated float matmul
-    // to within INT8 weight-quantization error (~0.7% RMS here). A kernel that
-    // dropped the activation rotation lands ~140% off — two orders of magnitude
-    // outside this bound — so the check cannot pass by accident.
-    const ErrStats vs_float = compare(got, want_float);
-    check_close(vs_float.rms_rel, 0.0f, 0.05f, tag + " vs float matmul, normalized RMS error");
+    std::vector<float> got((size_t) ggml_nelements(out));
+    g.get(out, got.data(), got.size() * sizeof(float));
+    return got;
 }
 
 // Guard rail: prove the rotation is load-bearing, so this suite can never be
 // satisfied by a kernel that silently drops it.
 void test_convrot_rotation_is_required() {
-    const int group = 256;
     std::mt19937 rng(99u);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
 
-    std::vector<float> w((size_t) group);
-    std::vector<float> x((size_t) group);
-    for (int i = 0; i < group; ++i) {
+    std::vector<float> w((size_t) kGroup);
+    std::vector<float> x((size_t) kGroup);
+    for (int i = 0; i < kGroup; ++i) {
         w[(size_t) i] = dist(rng);
         x[(size_t) i] = dist(rng);
     }
 
     std::vector<float> rw = w;
     std::vector<float> rx = x;
-    rotate_row(rw, group);
-    rotate_row(rx, group);
+    rotate_row(rw, kGroup);
+    rotate_row(rx, kGroup);
 
     float plain = 0.0f, both_rotated = 0.0f, only_weight_rotated = 0.0f;
-    for (int i = 0; i < group; ++i) {
+    for (int i = 0; i < kGroup; ++i) {
         plain               += w[(size_t) i]  * x[(size_t) i];
         both_rotated        += rw[(size_t) i] * rx[(size_t) i];
         only_weight_rotated += rw[(size_t) i] * x[(size_t) i];
     }
 
-    check_close(both_rotated, plain, 1e-3f, "rotation is orthonormal: <Rw, Rx> == <w, x>");
+    check_le(std::fabs(both_rotated - plain), 1e-3f,
+             "rotation is orthonormal: <Rw, Rx> == <w, x>");
     check(std::fabs(only_weight_rotated - plain) > 0.1f,
           "rotation is load-bearing: <Rw, x> != <w, x> (a kernel skipping it is wrong)");
 }
 
 // --------------------------------------------------------------------------
-// 3. MUL_MAT_PACK4 — must match plain MUL_MAT on CPU
+// 3. MUL_MAT_PACK4 — must match plain MUL_MAT
 // --------------------------------------------------------------------------
 
-void test_mul_mat_pack4(int n_threads) {
-    const int64_t k = 64;
-    const int64_t n = 32;   // must be divisible by 4
-    const int64_t m = 7;
+const int64_t kMk = 64;
+const int64_t kMn = 32;   // must be divisible by 4
+const int64_t kMm = 7;
 
+struct MulMatInputs {
+    std::vector<float> a, b;
+};
+
+MulMatInputs make_mul_mat_inputs() {
+    MulMatInputs in;
     std::mt19937 rng(777u);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-
-    Graph g(64);
-    ggml_tensor * a = ggml_new_tensor_2d(g.ctx, GGML_TYPE_F32, k, n);
-    ggml_tensor * b = ggml_new_tensor_2d(g.ctx, GGML_TYPE_F32, k, m);
-    for (int64_t i = 0; i < ggml_nelements(a); ++i) {
-        ((float *) a->data)[i] = dist(rng);
-    }
-    for (int64_t i = 0; i < ggml_nelements(b); ++i) {
-        ((float *) b->data)[i] = dist(rng);
-    }
-
-    ggml_tensor * packed = ggml_mul_mat_pack4(g.ctx, a, b);
-    g.run(packed, n_threads);
-    std::vector<float> got((size_t) ggml_nelements(packed));
-    std::memcpy(got.data(), packed->data, got.size() * sizeof(float));
-
-    Graph g2(64);
-    ggml_tensor * a2 = ggml_new_tensor_2d(g2.ctx, GGML_TYPE_F32, k, n);
-    ggml_tensor * b2 = ggml_new_tensor_2d(g2.ctx, GGML_TYPE_F32, k, m);
-    std::memcpy(a2->data, a->data, (size_t) ggml_nbytes(a));
-    std::memcpy(b2->data, b->data, (size_t) ggml_nbytes(b));
-    ggml_tensor * plain = ggml_mul_mat(g2.ctx, a2, b2);
-    g2.run(plain, n_threads);
-    std::vector<float> want((size_t) ggml_nelements(plain));
-    std::memcpy(want.data(), plain->data, want.size() * sizeof(float));
-
-    check(got.size() == want.size(), "mul_mat_pack4 and mul_mat agree on shape");
-    const ErrStats st = compare(got, want);
-    check_close(st.max_abs, 0.0f, 1e-5f,
-                "mul_mat_pack4 == mul_mat (nth=" + std::to_string(n_threads) + ")");
+    in.a.resize((size_t) (kMk * kMn));
+    in.b.resize((size_t) (kMk * kMm));
+    for (auto & value : in.a) { value = dist(rng); }
+    for (auto & value : in.b) { value = dist(rng); }
+    return in;
 }
 
-} // namespace
+std::vector<float> run_mul_mat(ggml_backend_t backend, int n_threads,
+                               const MulMatInputs & in, bool packed) {
+    Graph g(backend, n_threads);
+    ggml_tensor * a = ggml_new_tensor_2d(g.ctx, GGML_TYPE_F32, kMk, kMn);
+    ggml_tensor * b = ggml_new_tensor_2d(g.ctx, GGML_TYPE_F32, kMk, kMm);
+    ggml_tensor * out = packed ? ggml_mul_mat_pack4(g.ctx, a, b) : ggml_mul_mat(g.ctx, a, b);
+
+    if (!ggml_backend_supports_op(backend, out)) {
+        return {};
+    }
+    g.allocate();
+    g.set(a, in.a.data(), in.a.size() * sizeof(float));
+    g.set(b, in.b.data(), in.b.size() * sizeof(float));
+    g.compute(out);
+
+    std::vector<float> got((size_t) ggml_nelements(out));
+    g.get(out, got.data(), got.size() * sizeof(float));
+    return got;
+}
+
+// --------------------------------------------------------------------------
+// Driver
+// --------------------------------------------------------------------------
+
+struct BackendRun {
+    std::string name;
+    std::vector<float> sage_noncausal, sage_causal;
+    std::vector<float> convrot_nobias, convrot_bias;
+    std::vector<float> pack4, plain_mul_mat;
+};
+
+BackendRun run_all(ggml_backend_t backend, const std::string & name, int n_threads,
+                   const SageInputs & sage_in,
+                   const ConvrotInputs & convrot_nobias_in,
+                   const ConvrotInputs & convrot_bias_in,
+                   const MulMatInputs & mul_in,
+                   float scale) {
+    BackendRun out;
+    out.name = name;
+    std::printf("\n[%s, %d thread(s)]\n", name.c_str(), n_threads);
+
+    out.sage_noncausal = run_sage_attn2(backend, n_threads, sage_in, false, scale);
+    out.sage_causal    = run_sage_attn2(backend, n_threads, sage_in, true,  scale);
+    out.convrot_nobias = run_convrot_linear(backend, n_threads, convrot_nobias_in, false);
+    out.convrot_bias   = run_convrot_linear(backend, n_threads, convrot_bias_in,   true);
+    out.pack4          = run_mul_mat(backend, n_threads, mul_in, true);
+    out.plain_mul_mat  = run_mul_mat(backend, n_threads, mul_in, false);
+    return out;
+}
+
+// dst is F16 for sage_attn2, so ~2e-3 absolute is the representation floor.
+constexpr float kSageAbsTol   = 4e-3f;
+constexpr float kConvrotAbsTol = 2e-3f;
+// INT8 weight quantization floor for the convrot shapes above.
+constexpr float kConvrotRmsTol = 0.05f;
+
+void verify(const BackendRun & run, const SageInputs & sage_in,
+            const ConvrotInputs & convrot_nobias_in, const ConvrotInputs & convrot_bias_in,
+            float scale) {
+    std::printf("\n[%s: vs reference]\n", run.name.c_str());
+
+    if (!run.sage_noncausal.empty()) {
+        const auto want = sage_attn2_reference(sage_in, false, scale);
+        check_le(compare(run.sage_noncausal, want).max_abs, kSageAbsTol,
+                 "sage_attn2 non-causal max abs error");
+    }
+    if (!run.sage_causal.empty()) {
+        const auto want = sage_attn2_reference(sage_in, true, scale);
+        check_le(compare(run.sage_causal, want).max_abs, kSageAbsTol,
+                 "sage_attn2 causal max abs error");
+    }
+    struct ConvrotCase { const std::vector<float> * got; const ConvrotInputs * in; const char * tag; };
+    const ConvrotCase convrot_cases[] = {
+        { &run.convrot_nobias, &convrot_nobias_in, "convrot_linear no bias" },
+        { &run.convrot_bias,   &convrot_bias_in,   "convrot_linear with bias" },
+    };
+    for (const auto & c : convrot_cases) {
+        if (c.got->empty()) {
+            continue;
+        }
+        check_le(compare(*c.got, c.in->want_dequant).max_abs, kConvrotAbsTol,
+                 std::string(c.tag) + " vs dequantized reference, max abs error");
+        // The orthogonality identity: the op reproduces the un-rotated float
+        // matmul to within INT8 weight-quantization error. A kernel that dropped
+        // the activation rotation lands ~140% off — two orders of magnitude
+        // outside this bound — so the check cannot pass by accident.
+        check_le(compare(*c.got, c.in->want_float).rms_rel, kConvrotRmsTol,
+                 std::string(c.tag) + " vs float matmul, normalized RMS error");
+    }
+    if (!run.pack4.empty() && !run.plain_mul_mat.empty()) {
+        check(run.pack4.size() == run.plain_mul_mat.size(),
+              "mul_mat_pack4 and mul_mat agree on shape");
+        check_le(compare(run.pack4, run.plain_mul_mat).max_abs, 1e-5f,
+                 "mul_mat_pack4 == mul_mat");
+    }
+}
+
+// CPU<->GPU agreement. Reported with generous bounds and full numbers: the two
+// implementations make different quantization choices on purpose (the CPU
+// kernels are references and skip the INT8/FP8 activation quantization CUDA
+// does), so the interesting output is the measured delta, not a tight pass.
+void cross_check(const BackendRun & a, const BackendRun & b) {
+    std::printf("\n[%s vs %s]\n", a.name.c_str(), b.name.c_str());
+    struct Pair { const std::vector<float> * x; const std::vector<float> * y; const char * tag; float tol; };
+    const Pair pairs[] = {
+        { &a.sage_noncausal, &b.sage_noncausal, "sage_attn2 non-causal",   0.10f },
+        { &a.sage_causal,    &b.sage_causal,    "sage_attn2 causal",       0.10f },
+        { &a.convrot_nobias, &b.convrot_nobias, "convrot_linear no bias",  0.10f },
+        { &a.convrot_bias,   &b.convrot_bias,   "convrot_linear with bias",0.10f },
+        { &a.pack4,          &b.pack4,          "mul_mat_pack4",           1e-4f },
+    };
+    for (const auto & p : pairs) {
+        if (p.x->empty() || p.y->empty() || p.x->size() != p.y->size()) {
+            std::printf("  skip %s (not run on both backends)\n", p.tag);
+            continue;
+        }
+        check_le(compare(*p.y, *p.x).rms_rel, p.tol,
+                 std::string(p.tag) + " normalized RMS error");
+    }
+}
+
+}  // namespace
 
 int main() {
-    std::printf("ggml fork-op CPU kernels\n");
+    std::printf("ggml fork-op kernels\n");
 
     std::printf("\n[rotation properties]\n");
     test_convrot_rotation_is_required();
 
-    for (int n_threads : {1, 4}) {
-        std::printf("\n[sage_attn2, %d thread(s)]\n", n_threads);
-        test_sage_attn2(/*causal=*/false, n_threads);
-        test_sage_attn2(/*causal=*/true, n_threads);
+    const float scale = 1.0f / std::sqrt((float) kD);
+    const SageInputs    sage_in    = make_sage_inputs();
+    const ConvrotInputs convrot_nb = make_convrot_inputs(false);
+    const ConvrotInputs convrot_b  = make_convrot_inputs(true);
+    const MulMatInputs  mul_in     = make_mul_mat_inputs();
 
-        std::printf("\n[convrot_linear, %d thread(s)]\n", n_threads);
-        test_convrot_linear(/*with_bias=*/false, n_threads);
-        test_convrot_linear(/*with_bias=*/true, n_threads);
-
-        std::printf("\n[mul_mat_pack4, %d thread(s)]\n", n_threads);
-        test_mul_mat_pack4(n_threads);
+    ggml_backend_t cpu = ggml_backend_cpu_init();
+    if (cpu == nullptr) {
+        std::printf("could not initialize the CPU backend\n");
+        return 1;
     }
+
+    // Threading is a CPU-only concern, but it is the cheapest way to catch a
+    // kernel whose work split or per-thread workspace is wrong.
+    BackendRun cpu_run;
+    for (int n_threads : {1, 4}) {
+        BackendRun run = run_all(cpu, "cpu", n_threads, sage_in, convrot_nb, convrot_b, mul_in, scale);
+        verify(run, sage_in, convrot_nb, convrot_b, scale);
+        if (n_threads == 1) {
+            cpu_run = run;
+        } else {
+            cross_check(cpu_run, run);
+        }
+    }
+
+    ggml_backend_dev_t gpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU);
+    if (gpu_dev == nullptr) {
+        std::printf("\nno GPU device in this build; skipping the CPU<->GPU parity pass\n");
+    } else {
+        ggml_backend_t gpu = ggml_backend_dev_init(gpu_dev, nullptr);
+        if (gpu == nullptr) {
+            std::printf("\nGPU device present but failed to initialize; skipping parity pass\n");
+        } else {
+            const std::string gpu_name = ggml_backend_dev_name(gpu_dev);
+            BackendRun gpu_run = run_all(gpu, gpu_name, 1, sage_in, convrot_nb, convrot_b, mul_in, scale);
+            verify(gpu_run, sage_in, convrot_nb, convrot_b, scale);
+            cross_check(cpu_run, gpu_run);
+            ggml_backend_free(gpu);
+        }
+    }
+
+    ggml_backend_free(cpu);
 
     if (g_failures == 0) {
         std::printf("\nAll checks passed.\n");

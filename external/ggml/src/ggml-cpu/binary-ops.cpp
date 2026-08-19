@@ -46,20 +46,52 @@ static inline void vec_binary_op_non_contiguous(const int64_t n, const int64_t n
     }
 }
 
+// AudioCPP fork delta: two-sided broadcasting. Upstream binary ops require src0
+// to already have dst's shape and only let src1 broadcast into it; the fork lets
+// BOTH operands broadcast up to dst. The framework graph optimizer relies on
+// this — it folds `add(repeat(row, full), col)` down to `add(row, col)` and
+// leaves the broadcast to the kernel (see the two_sided_broadcast_repeats_folded
+// fold in framework/runtime/graph_optimizer.cpp, covered by
+// tests/unittests/test_encoder_modules.cpp).
+template <float (*op)(float, float), typename src0_t, typename src1_t, typename dst_t>
+static inline void vec_binary_op_two_sided_broadcast(
+        const int64_t n,
+        dst_t * z,
+        const char * x,
+        const char * y,
+        const int64_t ne00,
+        const int64_t ne10,
+        const int64_t nb00,
+        const int64_t nb10) {
+    constexpr auto src0_to_f32 = type_conversion_table<src0_t>::to_f32;
+    constexpr auto src1_to_f32 = type_conversion_table<src1_t>::to_f32;
+    constexpr auto f32_to_dst  = type_conversion_table<dst_t >::from_f32;
+
+    for (int64_t i = 0; i < n; i++) {
+        const src0_t * x_ptr = (const src0_t *) (x + (i % ne00)*nb00);
+        const src1_t * y_ptr = (const src1_t *) (y + (i % ne10)*nb10);
+        z[i] = f32_to_dst(op(src0_to_f32(*x_ptr), src1_to_f32(*y_ptr)));
+    }
+}
+
 template <float (*op)(float, float), typename src0_t, typename src1_t, typename dst_t>
 static void apply_binary_op(const ggml_compute_params * params, ggml_tensor * dst) {
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
 
-    GGML_ASSERT(ggml_can_repeat(src1, src0) && ggml_are_same_shape(src0, dst));
+    GGML_ASSERT(ggml_can_repeat(src0, dst) && ggml_can_repeat(src1, dst));
 
     GGML_TENSOR_BINARY_OP_LOCALS
 
     GGML_ASSERT( nb0 == sizeof(dst_t));
-    GGML_ASSERT(nb00 == sizeof(src0_t));
+    GGML_ASSERT(nb00 % sizeof(src0_t) == 0);
+    GGML_ASSERT(nb10 % sizeof(src1_t) == 0);
 
-    const auto [ir0, ir1] = get_thread_range(params, src0);
+    // Rows are iterated over dst, not src0: with two-sided broadcasting src0 may
+    // have fewer rows than dst.
+    const auto [ir0, ir1] = get_thread_range(params, dst);
     const bool is_src1_contiguous_rows = ggml_is_contiguous_rows(src1);
+    const bool is_src0_full_shape = ggml_are_same_shape(src0, dst);
 
 #ifdef GGML_USE_ACCELERATE
     vDSP_fn_t vDSP_op = nullptr;
@@ -78,17 +110,31 @@ static void apply_binary_op(const ggml_compute_params * params, ggml_tensor * ds
 #endif
 
     for (int64_t ir = ir0; ir < ir1; ++ir) {
-        const int64_t i03 = ir/(ne02*ne01);
-        const int64_t i02 = (ir - i03*ne02*ne01)/ne01;
-        const int64_t i01 = (ir - i03*ne02*ne01 - i02*ne01);
+        // Decompose over dst's row space, then fold each source index back into
+        // its own extent so a shorter src0/src1 repeats across the higher dims.
+        const int64_t i03 = ir/(ne2*ne1);
+        const int64_t i02 = (ir - i03*ne2*ne1)/ne1;
+        const int64_t i01 = (ir - i03*ne2*ne1 - i02*ne1);
 
         const int64_t i13 = i03 % ne13;
         const int64_t i12 = i02 % ne12;
         const int64_t i11 = i01 % ne11;
 
-        dst_t        * dst_ptr  = (dst_t  *)       ((char *)       dst->data  + i03*nb3  + i02*nb2  + i01*nb1 );
-        const src0_t * src0_ptr = (const src0_t *) ((const char *) src0->data + i03*nb03 + i02*nb02 + i01*nb01);
-        const src1_t * src1_ptr = (const src1_t *) ((const char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11);
+        dst_t      * dst_ptr  = (dst_t *) ((char *) dst->data + i03*nb3 + i02*nb2 + i01*nb1);
+        const char * src0_row = (const char *) src0->data
+            + (i03 % ne03)*nb03 + (i02 % ne02)*nb02 + (i01 % ne01)*nb01;
+        const char * src1_row = (const char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11;
+
+        const src0_t * src0_ptr = (const src0_t *) src0_row;
+        const src1_t * src1_ptr = (const src1_t *) src1_row;
+
+        if (!is_src0_full_shape) {
+            // src0 broadcasts too, so neither the row-blocked nor the
+            // contiguous-row fast paths below apply.
+            vec_binary_op_two_sided_broadcast<op, src0_t, src1_t, dst_t>(
+                ne0, dst_ptr, src0_row, src1_row, ne00, ne10, nb00, nb10);
+            continue;
+        }
 
         if (is_src1_contiguous_rows) {
             // src1 is broadcastable across src0 and dst in i1, i2, i3
