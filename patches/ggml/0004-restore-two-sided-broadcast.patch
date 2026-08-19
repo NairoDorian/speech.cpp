@@ -1,0 +1,508 @@
+Restore the audio.cpp fork's two-sided broadcast on binary ops and scale.
+
+Upstream lets only src1 broadcast into a binary op and requires src0 to already
+match dst; the fork lets BOTH operands broadcast up to dst, and lets scale's
+src0 broadcast up to dst. The framework graph optimizer depends on the relaxed
+form: it folds add(repeat(row, full), col) to add(row, col) and
+scale(repeat(x, full)) to scale(x), leaving dst at the repeated shape and the
+broadcast to the kernel. Without this, those folds emit graphs no backend can
+execute and encoder_module_test aborts on
+GGML_ASSERT(ggml_can_repeat(src1, src0) && ggml_are_same_shape(src0, dst)).
+
+The ops.cpp hunk also picks up the fork's nb01 fix in the scale bias branch,
+where upstream indexes src0 with dst's nb1 -- harmless only while same-shape
+guarantees they match, which is exactly what this patch stops guaranteeing.
+
+Both CUDA paths are separate kernels rather than edits to the tuned upstream
+fast paths, so a future ggml upgrade does not have to re-merge them.
+
+Covered by tests/unittests/test_encoder_modules.cpp.
+
+diff --git a/src/ggml-cpu/binary-ops.cpp b/src/ggml-cpu/binary-ops.cpp
+index 75e3829..3236d8c 100644
+--- a/src/ggml-cpu/binary-ops.cpp
++++ b/src/ggml-cpu/binary-ops.cpp
+@@ -46,20 +46,52 @@ static inline void vec_binary_op_non_contiguous(const int64_t n, const int64_t n
+     }
+ }
+ 
++// AudioCPP fork delta: two-sided broadcasting. Upstream binary ops require src0
++// to already have dst's shape and only let src1 broadcast into it; the fork lets
++// BOTH operands broadcast up to dst. The framework graph optimizer relies on
++// this — it folds `add(repeat(row, full), col)` down to `add(row, col)` and
++// leaves the broadcast to the kernel (see the two_sided_broadcast_repeats_folded
++// fold in framework/runtime/graph_optimizer.cpp, covered by
++// tests/unittests/test_encoder_modules.cpp).
++template <float (*op)(float, float), typename src0_t, typename src1_t, typename dst_t>
++static inline void vec_binary_op_two_sided_broadcast(
++        const int64_t n,
++        dst_t * z,
++        const char * x,
++        const char * y,
++        const int64_t ne00,
++        const int64_t ne10,
++        const int64_t nb00,
++        const int64_t nb10) {
++    constexpr auto src0_to_f32 = type_conversion_table<src0_t>::to_f32;
++    constexpr auto src1_to_f32 = type_conversion_table<src1_t>::to_f32;
++    constexpr auto f32_to_dst  = type_conversion_table<dst_t >::from_f32;
++
++    for (int64_t i = 0; i < n; i++) {
++        const src0_t * x_ptr = (const src0_t *) (x + (i % ne00)*nb00);
++        const src1_t * y_ptr = (const src1_t *) (y + (i % ne10)*nb10);
++        z[i] = f32_to_dst(op(src0_to_f32(*x_ptr), src1_to_f32(*y_ptr)));
++    }
++}
++
+ template <float (*op)(float, float), typename src0_t, typename src1_t, typename dst_t>
+ static void apply_binary_op(const ggml_compute_params * params, ggml_tensor * dst) {
+     const ggml_tensor * src0 = dst->src[0];
+     const ggml_tensor * src1 = dst->src[1];
+ 
+-    GGML_ASSERT(ggml_can_repeat(src1, src0) && ggml_are_same_shape(src0, dst));
++    GGML_ASSERT(ggml_can_repeat(src0, dst) && ggml_can_repeat(src1, dst));
+ 
+     GGML_TENSOR_BINARY_OP_LOCALS
+ 
+     GGML_ASSERT( nb0 == sizeof(dst_t));
+-    GGML_ASSERT(nb00 == sizeof(src0_t));
++    GGML_ASSERT(nb00 % sizeof(src0_t) == 0);
++    GGML_ASSERT(nb10 % sizeof(src1_t) == 0);
+ 
+-    const auto [ir0, ir1] = get_thread_range(params, src0);
++    // Rows are iterated over dst, not src0: with two-sided broadcasting src0 may
++    // have fewer rows than dst.
++    const auto [ir0, ir1] = get_thread_range(params, dst);
+     const bool is_src1_contiguous_rows = ggml_is_contiguous_rows(src1);
++    const bool is_src0_full_shape = ggml_are_same_shape(src0, dst);
+ 
+ #ifdef GGML_USE_ACCELERATE
+     vDSP_fn_t vDSP_op = nullptr;
+@@ -78,17 +110,31 @@ static void apply_binary_op(const ggml_compute_params * params, ggml_tensor * ds
+ #endif
+ 
+     for (int64_t ir = ir0; ir < ir1; ++ir) {
+-        const int64_t i03 = ir/(ne02*ne01);
+-        const int64_t i02 = (ir - i03*ne02*ne01)/ne01;
+-        const int64_t i01 = (ir - i03*ne02*ne01 - i02*ne01);
++        // Decompose over dst's row space, then fold each source index back into
++        // its own extent so a shorter src0/src1 repeats across the higher dims.
++        const int64_t i03 = ir/(ne2*ne1);
++        const int64_t i02 = (ir - i03*ne2*ne1)/ne1;
++        const int64_t i01 = (ir - i03*ne2*ne1 - i02*ne1);
+ 
+         const int64_t i13 = i03 % ne13;
+         const int64_t i12 = i02 % ne12;
+         const int64_t i11 = i01 % ne11;
+ 
+-        dst_t        * dst_ptr  = (dst_t  *)       ((char *)       dst->data  + i03*nb3  + i02*nb2  + i01*nb1 );
+-        const src0_t * src0_ptr = (const src0_t *) ((const char *) src0->data + i03*nb03 + i02*nb02 + i01*nb01);
+-        const src1_t * src1_ptr = (const src1_t *) ((const char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11);
++        dst_t      * dst_ptr  = (dst_t *) ((char *) dst->data + i03*nb3 + i02*nb2 + i01*nb1);
++        const char * src0_row = (const char *) src0->data
++            + (i03 % ne03)*nb03 + (i02 % ne02)*nb02 + (i01 % ne01)*nb01;
++        const char * src1_row = (const char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11;
++
++        const src0_t * src0_ptr = (const src0_t *) src0_row;
++        const src1_t * src1_ptr = (const src1_t *) src1_row;
++
++        if (!is_src0_full_shape) {
++            // src0 broadcasts too, so neither the row-blocked nor the
++            // contiguous-row fast paths below apply.
++            vec_binary_op_two_sided_broadcast<op, src0_t, src1_t, dst_t>(
++                ne0, dst_ptr, src0_row, src1_row, ne00, ne10, nb00, nb10);
++            continue;
++        }
+ 
+         if (is_src1_contiguous_rows) {
+             // src1 is broadcastable across src0 and dst in i1, i2, i3
+diff --git a/src/ggml-cpu/ops.cpp b/src/ggml-cpu/ops.cpp
+index f5b3770..f84ab1e 100644
+--- a/src/ggml-cpu/ops.cpp
++++ b/src/ggml-cpu/ops.cpp
+@@ -4573,7 +4573,15 @@ static void ggml_compute_forward_scale_f32(
+ 
+     GGML_ASSERT(ggml_is_contiguous(src0));
+     GGML_ASSERT(ggml_is_contiguous(dst));
+-    GGML_ASSERT(ggml_are_same_shape(src0, dst));
++    // AudioCPP fork delta: src0 may broadcast up to dst rather than having to
++    // match it exactly. The framework graph optimizer folds
++    // `scale(repeat(x, full))` down to `scale(x)` with dst keeping the repeated
++    // shape (the unary_broadcast_scale fold in
++    // framework/runtime/graph_optimizer.cpp, covered by
++    // tests/unittests/test_encoder_modules.cpp).
++    GGML_ASSERT(ggml_can_repeat(src0, dst));
++
++    GGML_TENSOR_UNARY_OP_LOCALS
+ 
+     float s; // scale factor
+     float b; // bias
+@@ -4584,22 +4592,37 @@ static void ggml_compute_forward_scale_f32(
+     const int ith = params->ith;
+     const int nth = params->nth;
+ 
+-    const int nc = src0->ne[0];
+-    const int nr = ggml_nrows(src0);
++    // Rows are counted over dst: with broadcasting src0 may have fewer.
++    const int64_t nc = ne0;
++    const int64_t nr = ggml_nrows(dst);
+ 
+     // rows per thread
+-    const int dr = (nr + nth - 1)/nth;
++    const int64_t dr = (nr + nth - 1)/nth;
+ 
+     // row range for this thread
+-    const int ir0 = dr*ith;
+-    const int ir1 = MIN(ir0 + dr, nr);
++    const int64_t ir0 = dr*ith;
++    const int64_t ir1 = MIN(ir0 + dr, nr);
+ 
+-    const size_t nb01 = src0->nb[1];
++    const bool is_src0_full_shape = ggml_are_same_shape(src0, dst);
+ 
+-    const size_t nb1 = dst->nb[1];
++    if (!is_src0_full_shape) {
++        for (int64_t ir = ir0; ir < ir1; ++ir) {
++            const int64_t i3 = ir/(ne2*ne1);
++            const int64_t i2 = (ir - i3*ne2*ne1)/ne1;
++            const int64_t i1 = (ir - i3*ne2*ne1 - i2*ne1);
++            float * dst_row = (float *) ((char *) dst->data + i3*nb3 + i2*nb2 + i1*nb1);
++            const char * src0_row = (const char *) src0->data +
++                (i3 % ne03)*nb03 + (i2 % ne02)*nb02 + (i1 % ne01)*nb01;
++            for (int64_t i0 = 0; i0 < nc; ++i0) {
++                const float value = *(const float *) (src0_row + (i0 % ne00)*nb00);
++                dst_row[i0] = value * s + b;
++            }
++        }
++        return;
++    }
+ 
+     if (b == 0.0f) {
+-        for (int i1 = ir0; i1 < ir1; i1++) {
++        for (int64_t i1 = ir0; i1 < ir1; i1++) {
+             if (dst->data != src0->data) {
+                 // src0 is same shape as dst => same indices
+                 // TODO: add x parameter to ggml_vec_scale_f32 and remove this memcpy
+@@ -4608,10 +4631,10 @@ static void ggml_compute_forward_scale_f32(
+             ggml_vec_scale_f32(nc, (float *) ((char *) dst->data + i1*nb1), s);
+         }
+     } else {
+-        for (int i1 = ir0; i1 < ir1; i1++) {
++        for (int64_t i1 = ir0; i1 < ir1; i1++) {
+             ggml_vec_mad1_f32(nc,
+                 (float *) ((char *) dst->data  + i1*nb1),
+-                (float *) ((char *) src0->data + i1*nb1),
++                (float *) ((char *) src0->data + i1*nb01),
+                 s, b);
+         }
+     }
+diff --git a/src/ggml-cuda/binbcast.cu b/src/ggml-cuda/binbcast.cu
+index 2e38077..e979636 100644
+--- a/src/ggml-cuda/binbcast.cu
++++ b/src/ggml-cuda/binbcast.cu
+@@ -430,23 +430,181 @@ static void ggml_cuda_op_bin_bcast(
+     }
+ }
+ 
++
++// AudioCPP fork delta: two-sided broadcasting for the binary ops. The fast
++// paths above require src0 to already have dst's shape; these let BOTH operands
++// broadcast up to dst. The framework graph optimizer folds
++// `add(repeat(row, full), col)` down to `add(row, col)` and leaves the
++// broadcast to the kernel (framework/runtime/graph_optimizer.cpp; covered on
++// CPU by tests/unittests/test_encoder_modules.cpp). Deliberately kept separate
++// from launch_bin_bcast_pack rather than merged into it: this path is the
++// general, slow one, and keeping it standalone leaves the tuned upstream fast
++// paths untouched across ggml upgrades.
++
++template <float (*bin_op)(const float, const float),
++          typename src0_t,
++          typename src1_t,
++          typename dst_t>
++static __global__ void k_bin_bcast_two_sided(const src0_t * src0,
++                                             const src1_t * src1,
++                                             dst_t *        dst,
++                                             const int64_t  ne0,
++                                             const int64_t  ne1,
++                                             const int64_t  ne2,
++                                             const int64_t  ne3,
++                                             const int64_t  ne00,
++                                             const int64_t  ne01,
++                                             const int64_t  ne02,
++                                             const int64_t  ne03,
++                                             const int64_t  ne10,
++                                             const int64_t  ne11,
++                                             const int64_t  ne12,
++                                             const int64_t  ne13,
++                                             const size_t   s0,
++                                             const size_t   s1,
++                                             const size_t   s2,
++                                             const size_t   s3,
++                                             const size_t   s00,
++                                             const size_t   s01,
++                                             const size_t   s02,
++                                             const size_t   s03,
++                                             const size_t   s10,
++                                             const size_t   s11,
++                                             const size_t   s12,
++                                             const size_t   s13) {
++    const int64_t i = int64_t(blockDim.x)*blockIdx.x + threadIdx.x;
++    const int64_t n = ne0*ne1*ne2*ne3;
++    if (i >= n) {
++        return;
++    }
++
++    const int64_t i0 = i % ne0;
++    const int64_t i1 = (i / ne0) % ne1;
++    const int64_t i2 = (i / (ne0*ne1)) % ne2;
++    const int64_t i3 = i / (ne0*ne1*ne2);
++
++    const size_t i_dst = i3*s3 + i2*s2 + i1*s1 + i0*s0;
++    const size_t i_src0 =
++        (i3 % ne03)*s03 + (i2 % ne02)*s02 + (i1 % ne01)*s01 + (i0 % ne00)*s00;
++    const size_t i_src1 =
++        (i3 % ne13)*s13 + (i2 % ne12)*s12 + (i1 % ne11)*s11 + (i0 % ne10)*s10;
++
++    dst[i_dst] = (dst_t) bin_op((float) src0[i_src0], (float) src1[i_src1]);
++}
++
++
++template <float (*bin_op)(const float, const float), typename src0_t, typename src1_t, typename dst_t>
++static void launch_bin_bcast_two_sided(const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst,
++                                       const src0_t * src0_dd, const src1_t * src1_dd, dst_t * dst_dd,
++                                       cudaStream_t stream) {
++    GGML_TENSOR_BINARY_OP_LOCALS
++
++    const size_t s0 = nb0 / sizeof(dst_t);
++    const size_t s1 = nb1 / sizeof(dst_t);
++    const size_t s2 = nb2 / sizeof(dst_t);
++    const size_t s3 = nb3 / sizeof(dst_t);
++
++    const size_t s00 = nb00 / sizeof(src0_t);
++    const size_t s01 = nb01 / sizeof(src0_t);
++    const size_t s02 = nb02 / sizeof(src0_t);
++    const size_t s03 = nb03 / sizeof(src0_t);
++
++    const size_t s10 = nb10 / sizeof(src1_t);
++    const size_t s11 = nb11 / sizeof(src1_t);
++    const size_t s12 = nb12 / sizeof(src1_t);
++    const size_t s13 = nb13 / sizeof(src1_t);
++
++    GGML_ASSERT(nb0 % sizeof(dst_t) == 0);
++    GGML_ASSERT(nb1 % sizeof(dst_t) == 0);
++    GGML_ASSERT(nb2 % sizeof(dst_t) == 0);
++    GGML_ASSERT(nb3 % sizeof(dst_t) == 0);
++    GGML_ASSERT(nb00 % sizeof(src0_t) == 0);
++    GGML_ASSERT(nb01 % sizeof(src0_t) == 0);
++    GGML_ASSERT(nb02 % sizeof(src0_t) == 0);
++    GGML_ASSERT(nb03 % sizeof(src0_t) == 0);
++    GGML_ASSERT(nb10 % sizeof(src1_t) == 0);
++    GGML_ASSERT(nb11 % sizeof(src1_t) == 0);
++    GGML_ASSERT(nb12 % sizeof(src1_t) == 0);
++    GGML_ASSERT(nb13 % sizeof(src1_t) == 0);
++
++    const int block_size = 256;
++    const int64_t n = ne0*ne1*ne2*ne3;
++    const int block_num = (n + block_size - 1) / block_size;
++
++    k_bin_bcast_two_sided<bin_op, src0_t, src1_t, dst_t><<<block_num, block_size, 0, stream>>>(
++        src0_dd, src1_dd, dst_dd,
++        ne0, ne1, ne2, ne3,
++        ne00, ne01, ne02, ne03,
++        ne10, ne11, ne12, ne13,
++        s0, s1, s2, s3,
++        s00, s01, s02, s03,
++        s10, s11, s12, s13);
++}
++
++template <float (*bin_op)(const float, const float)>
++static void ggml_cuda_op_bin_bcast_two_sided(
++    const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst,
++    const void * src0_dd, const void * src1_dd, void * dst_dd, cudaStream_t stream) {
++
++    GGML_ASSERT(ggml_can_repeat(src0, dst));
++    GGML_ASSERT(ggml_can_repeat(src1, dst));
++    GGML_ASSERT(src1->type == GGML_TYPE_F32 || src1->type == GGML_TYPE_F16);
++
++    if (src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
++        launch_bin_bcast_two_sided<bin_op, float, float, float>(
++            src0, src1, dst, (const float *) src0_dd, (const float *) src1_dd, (float *) dst_dd, stream);
++    } else if (src0->type == GGML_TYPE_F16 && src1->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F16) {
++        launch_bin_bcast_two_sided<bin_op, half, half, half>(
++            src0, src1, dst, (const half *) src0_dd, (const half *) src1_dd, (half *) dst_dd, stream);
++    } else if (src0->type == GGML_TYPE_F16 && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F16) {
++        launch_bin_bcast_two_sided<bin_op, half, float, half>(
++            src0, src1, dst, (const half *) src0_dd, (const float *) src1_dd, (half *) dst_dd, stream);
++    } else if (src0->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F32) {
++        launch_bin_bcast_two_sided<bin_op, half, float, float>(
++            src0, src1, dst, (const half *) src0_dd, (const float *) src1_dd, (float *) dst_dd, stream);
++    } else {
++        fprintf(stderr, "%s: unsupported types: dst: %s, src0: %s, src1: %s\n", __func__,
++            ggml_type_name(dst->type), ggml_type_name(src0->type), ggml_type_name(src1->type));
++        GGML_ABORT("fatal error");
++    }
++}
+ void ggml_cuda_op_repeat(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+     ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_repeat, 0>>(dst, dst->src[0], dst, nullptr, dst->src[0]->data, dst->data, ctx.stream());
+ }
+ 
+ void ggml_cuda_op_add(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    if (!ggml_are_same_shape(dst->src[0], dst)) {
++        ggml_cuda_op_bin_bcast_two_sided<op_add>(
++            dst->src[0], dst->src[1], dst, dst->src[0]->data, dst->src[1]->data, dst->data, ctx.stream());
++        return;
++    }
+     ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_add>>(dst->src[0], dst->src[1], dst, dst->src[0]->data, dst->src[1]->data, dst->data, ctx.stream());
+ }
+ 
+ void ggml_cuda_op_sub(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    if (!ggml_are_same_shape(dst->src[0], dst)) {
++        ggml_cuda_op_bin_bcast_two_sided<op_sub>(
++            dst->src[0], dst->src[1], dst, dst->src[0]->data, dst->src[1]->data, dst->data, ctx.stream());
++        return;
++    }
+     ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_sub>>(dst->src[0], dst->src[1], dst, dst->src[0]->data, dst->src[1]->data, dst->data, ctx.stream());
+ }
+ 
+ void ggml_cuda_op_mul(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    if (!ggml_are_same_shape(dst->src[0], dst)) {
++        ggml_cuda_op_bin_bcast_two_sided<op_mul>(
++            dst->src[0], dst->src[1], dst, dst->src[0]->data, dst->src[1]->data, dst->data, ctx.stream());
++        return;
++    }
+     ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_mul>>(dst->src[0], dst->src[1], dst, dst->src[0]->data, dst->src[1]->data, dst->data, ctx.stream());
+ }
+ 
+ void ggml_cuda_op_div(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    if (!ggml_are_same_shape(dst->src[0], dst)) {
++        ggml_cuda_op_bin_bcast_two_sided<op_div>(
++            dst->src[0], dst->src[1], dst, dst->src[0]->data, dst->src[1]->data, dst->data, ctx.stream());
++        return;
++    }
+     ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_div>>(dst->src[0], dst->src[1], dst, dst->src[0]->data, dst->src[1]->data, dst->data, ctx.stream());
+ }
+ 
+diff --git a/src/ggml-cuda/scale.cu b/src/ggml-cuda/scale.cu
+index 7b2e59a..71d3fca 100644
+--- a/src/ggml-cuda/scale.cu
++++ b/src/ggml-cuda/scale.cu
+@@ -13,12 +13,101 @@ static __global__ void scale_f32(const float * x, float * dst, const float scale
+     }
+ }
+ 
++// AudioCPP fork delta: src0 may broadcast up to dst instead of matching it.
++// The framework graph optimizer folds `scale(repeat(x, full))` down to
++// `scale(x)` with dst keeping the repeated shape
++// (framework/runtime/graph_optimizer.cpp; covered on CPU by
++// tests/unittests/test_encoder_modules.cpp). Kept as a separate kernel so the
++// tuned same-shape path above stays untouched across ggml upgrades.
++static __global__ void scale_f32_bcast(
++        const float * x,
++        float * dst,
++        const float scale,
++        const float bias,
++        const int64_t ne0,
++        const int64_t ne1,
++        const int64_t ne2,
++        const int64_t ne3,
++        const int64_t ne00,
++        const int64_t ne01,
++        const int64_t ne02,
++        const int64_t ne03,
++        const size_t s0,
++        const size_t s1,
++        const size_t s2,
++        const size_t s3,
++        const size_t s00,
++        const size_t s01,
++        const size_t s02,
++        const size_t s03) {
++    const int64_t tid = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
++    const int64_t stride = (int64_t)blockDim.x * (int64_t)gridDim.x;
++    const int64_t n = ne0*ne1*ne2*ne3;
++
++    for (int64_t i = tid; i < n; i += stride) {
++        const int64_t i0 = i % ne0;
++        const int64_t i1 = (i / ne0) % ne1;
++        const int64_t i2 = (i / (ne0*ne1)) % ne2;
++        const int64_t i3 = i / (ne0*ne1*ne2);
++        const size_t i_dst = i3*s3 + i2*s2 + i1*s1 + i0*s0;
++        const size_t i_src =
++            (i3 % ne03)*s03 + (i2 % ne02)*s02 + (i1 % ne01)*s01 + (i0 % ne00)*s00;
++        dst[i_dst] = scale * x[i_src] + bias;
++    }
++}
++
+ static void scale_f32_cuda(const float * x, float * dst, const float scale, const float bias, const int64_t nelements, cudaStream_t stream) {
+     const int64_t num_blocks = (nelements + CUDA_SCALE_BLOCK_SIZE - 1) / CUDA_SCALE_BLOCK_SIZE;
+     const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(MIN(MAX_GRIDDIM_X, num_blocks), CUDA_SCALE_BLOCK_SIZE, 0, stream);
+     ggml_cuda_kernel_launch(scale_f32, launch_params, x, dst, scale, bias, nelements);
+ }
+ 
++static void scale_f32_bcast_cuda(const ggml_tensor * src0, ggml_tensor * dst, const float scale, const float bias, cudaStream_t stream) {
++    GGML_TENSOR_UNARY_OP_LOCALS
++
++    GGML_ASSERT(nb0 % sizeof(float) == 0);
++    GGML_ASSERT(nb1 % sizeof(float) == 0);
++    GGML_ASSERT(nb2 % sizeof(float) == 0);
++    GGML_ASSERT(nb3 % sizeof(float) == 0);
++    GGML_ASSERT(nb00 % sizeof(float) == 0);
++    GGML_ASSERT(nb01 % sizeof(float) == 0);
++    GGML_ASSERT(nb02 % sizeof(float) == 0);
++    GGML_ASSERT(nb03 % sizeof(float) == 0);
++
++    const size_t s0 = nb0 / sizeof(float);
++    const size_t s1 = nb1 / sizeof(float);
++    const size_t s2 = nb2 / sizeof(float);
++    const size_t s3 = nb3 / sizeof(float);
++    const size_t s00 = nb00 / sizeof(float);
++    const size_t s01 = nb01 / sizeof(float);
++    const size_t s02 = nb02 / sizeof(float);
++    const size_t s03 = nb03 / sizeof(float);
++
++    const int64_t nelements = ggml_nelements(dst);
++    const int64_t num_blocks = (nelements + CUDA_SCALE_BLOCK_SIZE - 1) / CUDA_SCALE_BLOCK_SIZE;
++    scale_f32_bcast<<<MIN(MAX_GRIDDIM_X, num_blocks), CUDA_SCALE_BLOCK_SIZE, 0, stream>>>(
++        (const float *) src0->data,
++        (float *) dst->data,
++        scale,
++        bias,
++        ne0,
++        ne1,
++        ne2,
++        ne3,
++        ne00,
++        ne01,
++        ne02,
++        ne03,
++        s0,
++        s1,
++        s2,
++        s3,
++        s00,
++        s01,
++        s02,
++        s03);
++}
++
+ void ggml_cuda_op_scale(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+     const ggml_tensor * src0 = dst->src[0];
+     const float * src0_d = (const float *)src0->data;
+@@ -27,11 +116,17 @@ void ggml_cuda_op_scale(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+ 
+     GGML_ASSERT(src0->type == GGML_TYPE_F32);
+     GGML_ASSERT( dst->type == GGML_TYPE_F32);
++    GGML_ASSERT(ggml_can_repeat(src0, dst));
+ 
+     float scale;
+     float bias;
+     memcpy(&scale, (float *) dst->op_params + 0, sizeof(float));
+     memcpy(&bias,  (float *) dst->op_params + 1, sizeof(float));
+ 
++    if (!ggml_are_same_shape(src0, dst)) {
++        scale_f32_bcast_cuda(src0, dst, scale, bias, stream);
++        return;
++    }
++
+     scale_f32_cuda(src0_d, dst_d, scale, bias, ggml_nelements(src0), stream);
+ }

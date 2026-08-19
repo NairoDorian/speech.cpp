@@ -4,6 +4,8 @@ patches:
   patches/ggml/0001-fix-threadpool-oversubscription.patch
   patches/ggml/0002-converge-audio-cpp-fork-apis.patch
   patches/ggml/0003-cpu-kernels-for-fork-only-ops.patch
+  patches/ggml/0004-restore-two-sided-broadcast.patch
+  patches/ggml/0005-cpu-concat-fastpath.patch
 
 This directory is generated from the upstream ggml tree at the SHA above, minus
 .github/ and .pi/, with the listed downstream patches applied in order. Do not
@@ -58,8 +60,41 @@ which checks each against an independent reference at 1 and 4 threads):
                                CUDA path (it drops only the lossy activation
                                quantization), which is what a reference wants.
 
-REPRODUCIBILITY: verified 2026-08-19 on Windows/Git-Bash by regenerating into a
-scratch directory and diffing: `sync-ggml.sh` + patches 0001-0003 reproduces
+FORK DELTAS AFTER THE CONVERGENCE (patches 0004-0005):
+The convergence dropped three audio.cpp fork deltas that the R1 API-drift
+inventory could not see, because each is a *behavioural* change inside an
+existing kernel or dispatcher with no new symbol to grep for. Two were found by
+a crashing test, the third by grepping the fork tree for its own delta markers
+(MINITTS_*) -- which is the cheap, repeatable way to enumerate this class and
+should be re-run against any future fork base:
+
+  0004  two-sided broadcast on binary ops and scale (no marker in the fork; found
+        via encoder_module_test aborting on ggml_can_repeat)
+  0005  contiguous concat fast paths on CPU (MINITTS_CONCAT_FASTPATH). Perf only,
+        but not cosmetic: restoring it is what put
+        supertonic_vector_convnext_exp_test, which asserts a >=5% speedup, back
+        in the green.
+
+The third -- MINITTS_FLASH_PER_HEAD_MASK, the fork's per-head flash-attention
+masks on CUDA -- is deliberately NOT restored. Porting it removed the abort but
+produced wrong numbers: ggml 0.20.2's CUDA kernels write the per-head index into
+the mask pointer (nb32*(head % ne32)) yet still read head 0's slice for every
+head. Measured in tests/unittests/test_ggml_fork_ops_cpu.cpp: the CUDA result
+matches a reference forced to slice 0 to 4.9e-4 (the F16 floor) while diverging
+from the true per-head reference by 9.1e-2. So upstream's blanket
+BEST_FATTN_KERNEL_NONE for ne[2] != 1 masks is load-bearing, not conservatism,
+and the choice belongs one level up: the relative-attention module now keeps
+that lowering on CPU and falls through to the reference path elsewhere
+(src/framework/modules/attention/common_relative_attention.cpp). Restoring the
+fork delta here would trade a loud abort for a silent numerical error.
+
+Patch 0004 was applied in place by commit e11e3c5 and was NOT tracked as a
+patch until now -- the next sync-ggml.sh run would have deleted it silently.
+That is the failure mode this manifest warns about, and it happened; anything
+added to this tree must land under patches/ggml/ in the same change.
+
+REPRODUCIBILITY: verified 2026-08-20 on Windows/Git-Bash by regenerating into a
+scratch directory and diffing: `sync-ggml.sh` + patches 0001-0005 reproduces
 this tree with an empty `git diff`. Patch-added files land CRLF on disk here
 (git apply honours the global core.autocrlf in a non-repo directory) and are
 normalized back to LF on check-in by the repo .gitattributes, so the on-disk

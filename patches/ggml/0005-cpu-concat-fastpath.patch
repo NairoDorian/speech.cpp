@@ -1,0 +1,104 @@
+Restore the audio.cpp fork's contiguous concat fast paths on the CPU backend
+(the fork tags these sites MINITTS_CONCAT_FASTPATH).
+
+Upstream still walks every element scalar-wise, indexing all four dimensions per
+element ("TODO: smarter multi-theading"). When src0, src1 and dst are all
+contiguous, concatenating along dim 1 is two bulk memcpys per (ne0 x ne1) plane
+and along dim 0 is two per row. The framework concatenates per-head attention
+outputs in a loop (the ExplicitCpuPerHead lowering in
+src/framework/modules/attention/scaled_dot_product_attention.cpp), so this is a
+hot path, and losing it in the 0.20.2 convergence was a silent perf regression
+rather than a correctness one.
+
+Behaviour is unchanged: the fast paths are gated on full contiguity and fall
+through to the upstream loop otherwise.
+
+diff --git a/src/ggml-cpu/ops.cpp b/src/ggml-cpu/ops.cpp
+index f84ab1e..a8eca4f 100644
+--- a/src/ggml-cpu/ops.cpp
++++ b/src/ggml-cpu/ops.cpp
+@@ -1915,6 +1915,31 @@ static void ggml_compute_forward_concat_any(
+ 
+     GGML_ASSERT(dim >= 0 && dim < 4);
+ 
++    // MINITTS_CONCAT_FASTPATH (audio.cpp fork delta): when concatenating along
++    // dim 1 with fully contiguous tensors, copy each (ne0 x ne1) plane as two
++    // bulk memcpys instead of element-wise indexing. Upstream still walks every
++    // element scalar-wise ("TODO: smarter multi-theading" below); the framework
++    // concatenates per-head attention outputs in a loop, so this is a hot path.
++    if (dim == 1 && ggml_is_contiguous(src0) && ggml_is_contiguous(src1) && ggml_is_contiguous(dst)) {
++        GGML_ASSERT(ne00 == ne10);
++        GGML_ASSERT(ne02 == ne12 && ne03 == ne13);
++        const int64_t planes = ne02 * ne03;
++        const int64_t plane_begin = planes * ith / nth;
++        const int64_t plane_end = planes * (ith + 1) / nth;
++        const size_t src0_bytes = (size_t) ne00 * ne01 * len;
++        const size_t src1_bytes = (size_t) ne10 * ne11 * len;
++        const size_t dst_plane_bytes = (size_t) ne0 * ne1 * len;
++
++        for (int64_t plane = plane_begin; plane < plane_end; ++plane) {
++            char * dst_plane = (char *) dst->data + (size_t) plane * dst_plane_bytes;
++            const char * src0_plane = (const char *) src0->data + (size_t) plane * src0_bytes;
++            const char * src1_plane = (const char *) src1->data + (size_t) plane * src1_bytes;
++            memcpy(dst_plane, src0_plane, src0_bytes);
++            memcpy(dst_plane + src0_bytes, src1_plane, src1_bytes);
++        }
++        return;
++    }
++
+     int64_t o[4] = {0, 0, 0, 0};
+     if (dim == 0) {
+         o[dim] = src0->ne[dim]/ggml_blck_size(src0->type);
+@@ -2048,6 +2073,52 @@ static void ggml_compute_forward_concat_f32(
+ 
+     GGML_ASSERT(dim >= 0 && dim < 4);
+ 
++    const size_t len = sizeof(float);
++
++    // MINITTS_CONCAT_FASTPATH (audio.cpp fork delta): concatenating along dim 0
++    // with fully contiguous tensors copies each logical row as two bulk memcpys
++    // instead of scalar element dispatch.
++    if (dim == 0 && ggml_is_contiguous(src0) && ggml_is_contiguous(src1) && ggml_is_contiguous(dst)) {
++        GGML_ASSERT(ne01 == ne11 && ne02 == ne12 && ne03 == ne13);
++        const int64_t rows = ne1 * ne2 * ne3;
++        const int64_t row_begin = rows * ith / nth;
++        const int64_t row_end = rows * (ith + 1) / nth;
++        const size_t src0_bytes = (size_t) ne00 * len;
++        const size_t src1_bytes = (size_t) ne10 * len;
++        const size_t dst_row_bytes = (size_t) ne0 * len;
++
++        for (int64_t row = row_begin; row < row_end; ++row) {
++            char * dst_row = (char *) dst->data + (size_t) row * dst_row_bytes;
++            const char * src0_row = (const char *) src0->data + (size_t) row * src0_bytes;
++            const char * src1_row = (const char *) src1->data + (size_t) row * src1_bytes;
++            memcpy(dst_row, src0_row, src0_bytes);
++            memcpy(dst_row + src0_bytes, src1_row, src1_bytes);
++        }
++        return;
++    }
++
++    // MINITTS_CONCAT_FASTPATH (audio.cpp fork delta): the f32 specialization
++    // gets the same plane-copy shortcut as ggml_compute_forward_concat_any.
++    if (dim == 1 && ggml_is_contiguous(src0) && ggml_is_contiguous(src1) && ggml_is_contiguous(dst)) {
++        GGML_ASSERT(ne00 == ne10);
++        GGML_ASSERT(ne02 == ne12 && ne03 == ne13);
++        const int64_t planes = ne02 * ne03;
++        const int64_t plane_begin = planes * ith / nth;
++        const int64_t plane_end = planes * (ith + 1) / nth;
++        const size_t src0_bytes = (size_t) ne00 * ne01 * len;
++        const size_t src1_bytes = (size_t) ne10 * ne11 * len;
++        const size_t dst_plane_bytes = (size_t) ne0 * ne1 * len;
++
++        for (int64_t plane = plane_begin; plane < plane_end; ++plane) {
++            char * dst_plane = (char *) dst->data + (size_t) plane * dst_plane_bytes;
++            const char * src0_plane = (const char *) src0->data + (size_t) plane * src0_bytes;
++            const char * src1_plane = (const char *) src1->data + (size_t) plane * src1_bytes;
++            memcpy(dst_plane, src0_plane, src0_bytes);
++            memcpy(dst_plane + src0_bytes, src1_plane, src1_bytes);
++        }
++        return;
++    }
++
+     int64_t o[4] = {0, 0, 0, 0};
+     o[dim] = src0->ne[dim];
+ 
