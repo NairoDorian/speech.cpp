@@ -1494,6 +1494,28 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
 
         # Exit 2 means "skipped", not "failed" -- CTest needs telling.
         set_tests_properties(abi_bridge_hello abi_stream_hello PROPERTIES SKIP_RETURN_CODE 2)
+
+        # -------------------------------------------------------------------
+        # Phase 0 lint gates ported from transcribe.cpp (testing infrastructure
+        # merge). These validate the C ABI surface and teardown discipline of
+        # the ported transcribe runtime — not the audio.cpp model sessions
+        # (whose safe_* retrofit is Phase 0 sub-task 0.J).
+        # -------------------------------------------------------------------
+
+        add_test(NAME transcribe_extension_umbrella_check
+            COMMAND ${CMAKE_COMMAND}
+                -DSPEECHCPP_SOURCE_DIR=${PROJECT_SOURCE_DIR}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_extension_umbrella.cmake)
+
+        # Scoped to src/runtime/ (the transcribe runtime) where the safe_*
+        # wrappers from transcribe-backend.h are already in use. Expanding to
+        # all of src/ is gated on the Phase 0.J safe_* teardown retrofit across
+        # the audio.cpp model sessions — when that lands, change SRC_DIR here
+        # to ${CMAKE_CURRENT_SOURCE_DIR}/src.
+        add_test(NAME transcribe_lint_teardown_runtime
+            COMMAND ${CMAKE_COMMAND}
+                -DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}/src/runtime
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint_teardown.cmake)
     endif()
 endif()
 
@@ -1713,7 +1735,12 @@ if (vibevoice IN_LIST AUDIOCPP_LINKED_MODELS)
     endif()
 endif()
 
-if (ENGINE_BUILD_TESTS)
+# These four reference model-internal symbols (MossAudioTokenizer*,
+# load_moss_tts_local_assets, ...), which only exist when the moss model is in
+# the selected composite -- same reason vibevoice_finetune_overlay_check is
+# gated above. Without the gate, any lean build (AUDIOCPP_MODEL_SET=core, or a
+# custom set without moss) fails at link with ENGINE_BUILD_TESTS=ON.
+if (ENGINE_BUILD_TESTS AND moss IN_LIST AUDIOCPP_LINKED_MODELS)
     add_executable(moss_tts_local_smoke
         tests/moss_tts_local/moss_tts_local_smoke.cpp
     )
@@ -1864,7 +1891,14 @@ if (ENGINE_BUILD_TESTS)
         COMMAND ggml_fork_ops_cpu_test
     )
 
-    add_engine_unittest(dots_tts_vocoder_parity tests/dots_tts/dots_tts_vocoder_parity.cpp)
+    # Rule for every test below: a test that includes an `engine/models/<x>/` or
+    # `engine/community_models/<x>/` header links against that model's objects,
+    # which only exist when <x> is in the selected composite. Gate it on
+    # AUDIOCPP_LINKED_MODELS or ENGINE_BUILD_TESTS=ON breaks every lean build
+    # (AUDIOCPP_MODEL_SET=core links no models at all).
+    if (dots_tts IN_LIST AUDIOCPP_LINKED_MODELS)
+        add_engine_unittest(dots_tts_vocoder_parity tests/dots_tts/dots_tts_vocoder_parity.cpp)
+    endif()
 
     add_engine_unittest(midi_file_test tests/unittests/test_midi_file.cpp)
 
@@ -1908,21 +1942,25 @@ if (ENGINE_BUILD_TESTS)
         COMMAND audio_chunking_test
     )
 
-    add_engine_unittest(inflect_v2_frontend_test tests/unittests/test_inflect_v2_frontend.cpp)
-    target_include_directories(inflect_v2_frontend_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
+    if (inflect_v2 IN_LIST AUDIOCPP_LINKED_MODELS)
+        add_engine_unittest(inflect_v2_frontend_test tests/unittests/test_inflect_v2_frontend.cpp)
+        target_include_directories(inflect_v2_frontend_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
 
-    add_test(
-        NAME inflect_v2_frontend_test
-        COMMAND inflect_v2_frontend_test
-    )
+        add_test(
+            NAME inflect_v2_frontend_test
+            COMMAND inflect_v2_frontend_test
+        )
+    endif()
 
-    add_engine_unittest(voxtral_realtime_stream_chunking_test tests/unittests/test_voxtral_realtime_stream_chunking.cpp)
-    target_include_directories(voxtral_realtime_stream_chunking_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
+    if (voxtral_realtime IN_LIST AUDIOCPP_LINKED_MODELS)
+        add_engine_unittest(voxtral_realtime_stream_chunking_test tests/unittests/test_voxtral_realtime_stream_chunking.cpp)
+        target_include_directories(voxtral_realtime_stream_chunking_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
 
-    add_test(
-        NAME voxtral_realtime_stream_chunking_test
-        COMMAND voxtral_realtime_stream_chunking_test
-    )
+        add_test(
+            NAME voxtral_realtime_stream_chunking_test
+            COMMAND voxtral_realtime_stream_chunking_test
+        )
+    endif()
 
     add_engine_unittest(chinese_normalization_test tests/unittests/test_chinese_normalization.cpp)
 
@@ -1941,12 +1979,15 @@ if (ENGINE_BUILD_TESTS)
         COMMAND index_tts_tn_corpus_test
     )
 
-    add_engine_unittest(unicode_normalization_test tests/unittests/test_unicode_normalization.cpp)
+    # The normalizer under test lives in engine/models/supertonic/.
+    if (supertonic IN_LIST AUDIOCPP_LINKED_MODELS)
+        add_engine_unittest(unicode_normalization_test tests/unittests/test_unicode_normalization.cpp)
 
-    add_test(
-        NAME unicode_normalization_test
-        COMMAND unicode_normalization_test
-    )
+        add_test(
+            NAME unicode_normalization_test
+            COMMAND unicode_normalization_test
+        )
+    endif()
 
     add_engine_unittest(text_normalization_test tests/unittests/test_text_normalization.cpp)
 
@@ -1955,13 +1996,15 @@ if (ENGINE_BUILD_TESTS)
         COMMAND text_normalization_test
     )
 
-    add_engine_unittest(outetts_generation_budget_test tests/unittests/test_outetts_generation_budget.cpp)
-    target_include_directories(outetts_generation_budget_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
+    if (outetts IN_LIST AUDIOCPP_LINKED_MODELS)
+        add_engine_unittest(outetts_generation_budget_test tests/unittests/test_outetts_generation_budget.cpp)
+        target_include_directories(outetts_generation_budget_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
 
-    add_test(
-        NAME outetts_generation_budget_test
-        COMMAND outetts_generation_budget_test
-    )
+        add_test(
+            NAME outetts_generation_budget_test
+            COMMAND outetts_generation_budget_test
+        )
+    endif()
 
 
     add_engine_unittest(subtitle_formatter_test tests/unittests/test_subtitle_formatter.cpp)
@@ -2145,13 +2188,15 @@ if (ENGINE_BUILD_TESTS)
         COMMAND model_spec_system_test
     )
 
-    add_engine_unittest(qwen3_forced_aligner_processor_test tests/unittests/test_qwen3_forced_aligner_processor.cpp)
-    target_include_directories(qwen3_forced_aligner_processor_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
+    if (qwen3_forced_aligner IN_LIST AUDIOCPP_LINKED_MODELS)
+        add_engine_unittest(qwen3_forced_aligner_processor_test tests/unittests/test_qwen3_forced_aligner_processor.cpp)
+        target_include_directories(qwen3_forced_aligner_processor_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
 
-    add_test(
-        NAME qwen3_forced_aligner_processor_test
-        COMMAND qwen3_forced_aligner_processor_test
-    )
+        add_test(
+            NAME qwen3_forced_aligner_processor_test
+            COMMAND qwen3_forced_aligner_processor_test
+        )
+    endif()
 
     add_engine_unittest(fun_asr_nano_assets_test tests/unittests/test_fun_asr_nano_assets.cpp)
     target_sources(fun_asr_nano_assets_test PRIVATE src/models/fun_asr_nano/assets.cpp)
@@ -2376,16 +2421,19 @@ if (ENGINE_BUILD_TESTS)
         COMMAND scaled_dot_product_attention_test
     )
 
-    add_engine_unittest(asr_standalone_gguf_test tests/unittests/test_asr_standalone_gguf.cpp)
-    target_include_directories(asr_standalone_gguf_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
-    target_compile_definitions(asr_standalone_gguf_test PRIVATE
-        ENGINE_TEST_ASSET_ROOT="${ENGINE_UNITTEST_ASSET_ROOT}"
-    )
+    # Covers both standalone-GGUF ASR families, so it needs both linked.
+    if (citrinet_asr IN_LIST AUDIOCPP_LINKED_MODELS AND hviske_asr IN_LIST AUDIOCPP_LINKED_MODELS)
+        add_engine_unittest(asr_standalone_gguf_test tests/unittests/test_asr_standalone_gguf.cpp)
+        target_include_directories(asr_standalone_gguf_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
+        target_compile_definitions(asr_standalone_gguf_test PRIVATE
+            ENGINE_TEST_ASSET_ROOT="${ENGINE_UNITTEST_ASSET_ROOT}"
+        )
 
-    add_test(
-        NAME asr_standalone_gguf_test
-        COMMAND asr_standalone_gguf_test
-    )
+        add_test(
+            NAME asr_standalone_gguf_test
+            COMMAND asr_standalone_gguf_test
+        )
+    endif()
 
     add_executable(cli_request_options_test
         tests/unittests/test_cli_request_options.cpp
@@ -2490,13 +2538,15 @@ if (ENGINE_BUILD_TESTS)
     # Numerical parity dump tool (not registered as an add_test — it's a
     # manual/pre-release check, not a CI gate). Run it against a NeMo
     # reference dump via compare_parity.py; see tests/parakeet_tdt/parity/README.md.
-    add_executable(parakeet_parity_dump
-        tests/parakeet_tdt/parity/dump_cpp_reference.cpp
-    )
-    target_include_directories(parakeet_parity_dump PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/parakeet_tdt/parity)
-    target_link_libraries(parakeet_parity_dump PRIVATE engine_runtime ggml)
-    if (ENGINE_ENABLE_OPENMP)
-        target_link_libraries(parakeet_parity_dump PRIVATE OpenMP::OpenMP_CXX)
+    if (parakeet_tdt IN_LIST AUDIOCPP_LINKED_MODELS)
+        add_executable(parakeet_parity_dump
+            tests/parakeet_tdt/parity/dump_cpp_reference.cpp
+        )
+        target_include_directories(parakeet_parity_dump PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/parakeet_tdt/parity)
+        target_link_libraries(parakeet_parity_dump PRIVATE engine_runtime ggml)
+        if (ENGINE_ENABLE_OPENMP)
+            target_link_libraries(parakeet_parity_dump PRIVATE OpenMP::OpenMP_CXX)
+        endif()
     endif()
 
     add_executable(server_model_installer_test
