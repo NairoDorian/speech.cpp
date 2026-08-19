@@ -4709,7 +4709,12 @@ struct ggml_tensor * ggml_conv_1d(
         int                   s0,
         int                   p0,
         int                   d0) {
-    struct ggml_tensor * im2col = ggml_im2col(ctx, a, b, s0, 0, p0, 0, d0, 0, false, a->type == GGML_TYPE_BF16 ? GGML_TYPE_F32 : GGML_TYPE_F16); // [N, OL, IC * K]
+    // MINITTS_CONV_IM2COL_WEIGHT_TYPE (audio.cpp fork delta): keep the im2col
+    // activations in the weight's type instead of forcing F16. F32 conv weights
+    // (all framework audio models) would otherwise have every activation rounded
+    // to F16 before the matmul -- ~1e-3 drift that fails the onnx-golden
+    // FlashSR fixtures. See external/ggml/UPSTREAM.
+    struct ggml_tensor * im2col = ggml_im2col(ctx, a, b, s0, 0, p0, 0, d0, 0, false, a->type); // [N, OL, IC * K]
 
     struct ggml_tensor * result =
         ggml_mul_mat(ctx,
@@ -4743,7 +4748,8 @@ struct ggml_tensor * ggml_conv_1d_dw(
         int                   d0) {
     struct ggml_tensor * new_b = ggml_reshape_4d(ctx, b, b->ne[0], 1, b->ne[1], b->ne[2]);
 
-    struct ggml_tensor * im2col = ggml_im2col(ctx, a, new_b, s0, 0, p0, 0, d0, 0, false, a->type == GGML_TYPE_BF16 ? GGML_TYPE_F32 : GGML_TYPE_F16);
+    // MINITTS_CONV_IM2COL_WEIGHT_TYPE: see ggml_conv_1d.
+    struct ggml_tensor * im2col = ggml_im2col(ctx, a, new_b, s0, 0, p0, 0, d0, 0, false, a->type);
 
     struct ggml_tensor * result = ggml_mul_mat(ctx, im2col, a);
 
@@ -4849,7 +4855,8 @@ struct ggml_tensor * ggml_conv_2d(
         int                   p1,
         int                   d0,
         int                   d1) {
-    struct ggml_tensor * im2col = ggml_im2col(ctx, a, b, s0, s1, p0, p1, d0, d1, true, a->type == GGML_TYPE_BF16 ? GGML_TYPE_F32 : GGML_TYPE_F16); // [N, OH, OW, IC * KH * KW]
+    // MINITTS_CONV_IM2COL_WEIGHT_TYPE: see ggml_conv_1d.
+    struct ggml_tensor * im2col = ggml_im2col(ctx, a, b, s0, s1, p0, p1, d0, d1, true, a->type); // [N, OH, OW, IC * KH * KW]
 
     struct ggml_tensor * result =
         ggml_mul_mat(ctx,

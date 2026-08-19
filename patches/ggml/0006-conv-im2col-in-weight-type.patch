@@ -1,0 +1,61 @@
+Restore the audio.cpp fork's im2col activation type in the conv graph builders
+(tagged MINITTS_CONV_IM2COL_WEIGHT_TYPE in this tree; the fork itself left this
+delta UNMARKED, which is why the MINITTS_* marker sweep missed it).
+
+Upstream 0.20.2's ggml_conv_1d / ggml_conv_1d_dw / ggml_conv_2d lower to
+im2col with dst type `a->type == BF16 ? F32 : F16`, so F32 weights get their
+im2col'd activations rounded to F16 before the matmul. The fork lowers to
+`a->type`: F32 weights mean an F32 conv end to end. Every framework audio
+model loads conv weights as F32 (backend_weight_store load_f32_tensor), so
+the convergence silently demoted every framework convolution to F16
+activations.
+
+Found numerically, not by inspection: flashsr_utility_test checks the FlashSR
+decoder against onnxruntime-generated fixtures with a 2e-4 max-abs bound, and
+after the convergence it failed at 1.7e-3 max / 3.3e-4 mean -- identically on
+CPU and CUDA, which is the signature of a graph-builder (backend-independent)
+delta rather than a kernel bug. The same binary against the fork tree passes.
+Restoring `a->type` returns it to green with no other test moving.
+
+ggml_conv_2d_dw is deliberately NOT touched: the fork kept upstream's
+hardcoded F16 there, so upstream 0.20.2 (F16-unless-BF16) is already a
+superset of the fork's behaviour for that builder.
+
+diff --git a/src/ggml.c b/src/ggml.c
+index 2e13724..b1278f3 100644
+--- a/src/ggml.c
++++ b/src/ggml.c
+@@ -4709,7 +4709,12 @@ struct ggml_tensor * ggml_conv_1d(
+         int                   s0,
+         int                   p0,
+         int                   d0) {
+-    struct ggml_tensor * im2col = ggml_im2col(ctx, a, b, s0, 0, p0, 0, d0, 0, false, a->type == GGML_TYPE_BF16 ? GGML_TYPE_F32 : GGML_TYPE_F16); // [N, OL, IC * K]
++    // MINITTS_CONV_IM2COL_WEIGHT_TYPE (audio.cpp fork delta): keep the im2col
++    // activations in the weight's type instead of forcing F16. F32 conv weights
++    // (all framework audio models) would otherwise have every activation rounded
++    // to F16 before the matmul -- ~1e-3 drift that fails the onnx-golden
++    // FlashSR fixtures. See external/ggml/UPSTREAM.
++    struct ggml_tensor * im2col = ggml_im2col(ctx, a, b, s0, 0, p0, 0, d0, 0, false, a->type); // [N, OL, IC * K]
+ 
+     struct ggml_tensor * result =
+         ggml_mul_mat(ctx,
+@@ -4743,7 +4748,8 @@ struct ggml_tensor * ggml_conv_1d_dw(
+         int                   d0) {
+     struct ggml_tensor * new_b = ggml_reshape_4d(ctx, b, b->ne[0], 1, b->ne[1], b->ne[2]);
+ 
+-    struct ggml_tensor * im2col = ggml_im2col(ctx, a, new_b, s0, 0, p0, 0, d0, 0, false, a->type == GGML_TYPE_BF16 ? GGML_TYPE_F32 : GGML_TYPE_F16);
++    // MINITTS_CONV_IM2COL_WEIGHT_TYPE: see ggml_conv_1d.
++    struct ggml_tensor * im2col = ggml_im2col(ctx, a, new_b, s0, 0, p0, 0, d0, 0, false, a->type);
+ 
+     struct ggml_tensor * result = ggml_mul_mat(ctx, im2col, a);
+ 
+@@ -4849,7 +4855,8 @@ struct ggml_tensor * ggml_conv_2d(
+         int                   p1,
+         int                   d0,
+         int                   d1) {
+-    struct ggml_tensor * im2col = ggml_im2col(ctx, a, b, s0, s1, p0, p1, d0, d1, true, a->type == GGML_TYPE_BF16 ? GGML_TYPE_F32 : GGML_TYPE_F16); // [N, OH, OW, IC * KH * KW]
++    // MINITTS_CONV_IM2COL_WEIGHT_TYPE: see ggml_conv_1d.
++    struct ggml_tensor * im2col = ggml_im2col(ctx, a, b, s0, s1, p0, p1, d0, d1, true, a->type); // [N, OH, OW, IC * KH * KW]
+ 
+     struct ggml_tensor * result =
+         ggml_mul_mat(ctx,

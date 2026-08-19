@@ -6,6 +6,7 @@ patches:
   patches/ggml/0003-cpu-kernels-for-fork-only-ops.patch
   patches/ggml/0004-restore-two-sided-broadcast.patch
   patches/ggml/0005-cpu-concat-fastpath.patch
+  patches/ggml/0006-conv-im2col-in-weight-type.patch
 
 This directory is generated from the upstream ggml tree at the SHA above, minus
 .github/ and .pi/, with the listed downstream patches applied in order. Do not
@@ -60,13 +61,17 @@ which checks each against an independent reference at 1 and 4 threads):
                                CUDA path (it drops only the lossy activation
                                quantization), which is what a reference wants.
 
-FORK DELTAS AFTER THE CONVERGENCE (patches 0004-0005):
-The convergence dropped three audio.cpp fork deltas that the R1 API-drift
+FORK DELTAS AFTER THE CONVERGENCE (patches 0004-0006):
+The convergence dropped four audio.cpp fork deltas that the R1 API-drift
 inventory could not see, because each is a *behavioural* change inside an
-existing kernel or dispatcher with no new symbol to grep for. Two were found by
-a crashing test, the third by grepping the fork tree for its own delta markers
-(MINITTS_*) -- which is the cheap, repeatable way to enumerate this class and
-should be re-run against any future fork base:
+existing kernel, dispatcher or graph builder with no new symbol to grep for.
+The MINITTS_* marker grep finds the marked ones cheaply and should still be
+re-run against any future fork base -- but 0004 and 0006 were UNMARKED in the
+fork, so the grep is necessary, NOT sufficient. The only audits that catch the
+unmarked ones are (a) numeric golden gates whose fixtures come from an
+implementation-independent reference (flashsr_utility_test's onnxruntime
+fixtures caught 0006) and (b) diffing the fork tree against its own upstream
+base commit and triaging every hunk:
 
   0004  two-sided broadcast on binary ops and scale (no marker in the fork; found
         via encoder_module_test aborting on ggml_can_repeat)
@@ -74,6 +79,16 @@ should be re-run against any future fork base:
         but not cosmetic: restoring it is what put
         supertonic_vector_convnext_exp_test, which asserts a >=5% speedup, back
         in the green.
+  0006  im2col activation type in ggml_conv_1d / ggml_conv_1d_dw / ggml_conv_2d
+        (no marker in the fork; tagged MINITTS_CONV_IM2COL_WEIGHT_TYPE here).
+        Upstream forces the im2col'd activations to F16 unless the weight is
+        BF16; the fork keeps them in the weight's type, so the framework's F32
+        conv weights get F32 convs end to end. Found numerically:
+        flashsr_utility_test failed its onnx-golden bound at 1.7e-3 max
+        IDENTICALLY on CPU and CUDA -- the signature of a backend-independent
+        graph-builder delta -- and passes against the fork tree on the same
+        machine/compiler. ggml_conv_2d_dw is deliberately untouched: the fork
+        kept upstream's hardcoded F16 there.
 
 The third -- MINITTS_FLASH_PER_HEAD_MASK, the fork's per-head flash-attention
 masks on CUDA -- is deliberately NOT restored. Porting it removed the abort but
