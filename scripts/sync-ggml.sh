@@ -108,9 +108,17 @@ done
 STAGE_NAME="$(realpath --relative-to="$REPO_ROOT" "$STAGE_DIR")"
 for patch in "${PATCHES[@]}"; do
     echo "sync-ggml: applying patches/ggml/$(basename "$patch")"
-    git -C "$REPO_ROOT" apply --check --directory="$STAGE_NAME" "$patch" \
+    # Normalize the patch to LF before applying. The stage is LF (git archive
+    # honors eol=lf), and a patch file freshly written on Windows can carry CRs
+    # in its hunk lines that make context matching fail -- which is how patch
+    # 0006's first sync run died even though the patch was correct. Tracked
+    # patches are CR-free in the object store (add-time normalization), so
+    # stripping CRs from the working copy is always content-preserving here.
+    NORMALIZED_PATCH="${CLONE_DIR}/normalized.patch"
+    tr -d '\r' < "$patch" > "$NORMALIZED_PATCH"
+    git -C "$REPO_ROOT" apply --check --directory="$STAGE_NAME" "$NORMALIZED_PATCH" \
         || die "patch does not apply: patches/ggml/$(basename "$patch")"
-    git -C "$REPO_ROOT" apply --directory="$STAGE_NAME" "$patch"
+    git -C "$REPO_ROOT" apply --directory="$STAGE_NAME" "$NORMALIZED_PATCH"
 done
 
 {
