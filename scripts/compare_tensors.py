@@ -7,12 +7,13 @@
 # ///
 """
 compare_tensors.py - symmetric directory diff for the per-stage
-numerical accuracy harness used by phase 4+ of transcribe.cpp.
+numerical accuracy harness used by Phase 4 of the speech.cpp
+convergence (transcribe runtime debug dumper + reference dumpers).
 
 Each input directory is expected to contain pairs of files written by
 either:
 
-  - the C++ debug dumper in src/transcribe-debug.{h,cpp} (gated on
+  - the C++ debug dumper in src/runtime/transcribe-debug.{h,cpp} (gated on
     TRANSCRIBE_DUMP_DIR)
   - a Python reference dumper under scripts/dump_reference_*.py
 

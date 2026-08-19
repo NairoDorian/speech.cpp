@@ -4,7 +4,9 @@
 # dependencies = ["numpy>=1.26"]
 # ///
 """
-validate.py - convention-driven numerical validation for transcribe.cpp.
+validate.py - convention-driven numerical validation for speech.cpp's transcribe
+runtime (the unified ABI C ABI ported from transcribe.cpp and wired through the
+ArchAdapter into audio.cpp's model sessions).
 
 Orchestrates the full validation flow: generate reference dumps, generate
 C++ dumps, and compare tensors. All paths are derived from convention;
@@ -64,7 +66,7 @@ def find_repo_root(start: Path) -> Path:
         if (p / "CMakeLists.txt").exists() and (p / "scripts").is_dir():
             return p
         p = p.parent
-    raise SystemExit("error: cannot locate transcribe.cpp repo root")
+    raise SystemExit("error: cannot locate speech.cpp repo root")
 
 
 def load_manifest(
@@ -253,17 +255,25 @@ def find_gguf(repo: Path, family: str, slug: str | None = None,
 
 
 def find_cli(repo: Path) -> Path:
+    # In speech.cpp, the Phase 4 transcribe-cli target produces the validation-
+    # hook-aware CLI. Until it lands, audiocpp_cli (the audio.cpp CLI) is the
+    # only built binary — it has a different arg set, so cmd_cpp will fail with
+    # an unrecognized-flag error rather than producing a transcript.
     for candidate in [
         repo / "build" / "bin" / "transcribe-cli",
         repo / "build" / "transcribe-cli",
+        repo / "build" / "bin" / "audiocpp_cli",
+        repo / "build" / "audiocpp_cli",
     ]:
         if candidate.exists():
             return candidate
     raise SystemExit(
-        "error: transcribe-cli not found in build/bin/\n"
-        "  Run: cmake --build build --target transcribe-cli\n"
-        "  For --mel-from-ref and per-layer dumps, configure with\n"
-        "  -DTRANSCRIBE_ENABLE_VALIDATION_HOOKS=ON (or: cmake --preset validation)."
+        "error: no CLI found in build/bin/ or build/.\n"
+        "  The Phase 4 transcribe-cli carries validation hooks (TRANSCRIBE_DUMP_DIR,\n"
+        "  --backend, --timestamps, --raw-tokens). Build it with:\n"
+        "    cmake --build build --target transcribe-cli -DTRANSCRIBE_ENABLE_VALIDATION_HOOKS=ON\n"
+        "  Until Phase 4 lands, audiocpp_cli (audio.cpp CLI) is available but does\n"
+        "  not support the validate.py argument set."
     )
 
 
@@ -328,7 +338,7 @@ def write_cpp_transcript(
         "text": text,
         "normalized_text": normalize_text(text),
         "source": {
-            "kind": "transcribe.cpp",
+            "kind": "speech.cpp",
             "gguf": str(gguf),
             "backend": backend,
         },
@@ -481,7 +491,8 @@ def cmd_cpp(args: argparse.Namespace) -> int:
                     "error: --mel-from-ref requires validation hooks compiled "
                     "in, but build/ has TRANSCRIBE_ENABLE_VALIDATION_HOOKS=OFF "
                     "(the hook is compiled out and would be silently ignored).\n"
-                    "  Reconfigure: cmake --preset validation && "
+                    "  Reconfigure: cmake -B build -D SPEECHCPP_ENABLE_UNIFIED_ABI=ON "
+                    "-D TRANSCRIBE_ENABLE_VALIDATION_HOOKS=ON && "
                     "cmake --build build --target transcribe-cli"
                 )
             ref_dir = repo / "build" / "validate" / args.family / variant / case_name / "ref"
@@ -907,7 +918,7 @@ def cmd_all(args: argparse.Namespace) -> int:
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="Convention-driven numerical validation for transcribe.cpp.",
+        description="Convention-driven numerical validation for speech.cpp's transcribe C ABI runtime.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = p.add_subparsers(dest="cmd", required=True)

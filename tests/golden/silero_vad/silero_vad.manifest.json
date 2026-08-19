@@ -1,0 +1,67 @@
+{
+  "schema": "transcribe-golden-manifest-v1",
+  "family": "silero_vad",
+  "variant": "silero_vad_v6.2",
+  "source_model": {
+    "hf_repo": "ai-forever/silero-vad",
+    "hf_revision": "v6.2",
+    "_comment": "Engine-native safetensors are regenerated from the snakers4/silero-vad v6.2 JIT checkpoint (src/silero_vad/data/silero_vad.jit), NOT the divergent upstream HF safetensors (snakers4/silero-vad issue #768). Pin SHA: D7FB67A5B4DE0414A0178270EE81439B9E3067C883C304AA758C247D50FFD79D. Verify with: uv run scripts/fetch_silero_vad.py --force"
+  },
+  "reference": {
+    "kind": "author_repo_silero",
+    "source": "https://github.com/snakers4/silero-vad",
+    "revision": "v6.2",
+    "entrypoint": "scripts/dump_reference_silero_vad.py"
+  },
+  "expected_dtype": "float32",
+  "dtype_source": "config",
+  "frontend": {
+    "sample_rate": 16000,
+    "n_mels": null,
+    "n_fft": 256,
+    "hop_length": 128,
+    "win_length": 256,
+    "window": "hann_periodic",
+    "stft_channels": 258,
+    "stft_cutoff": 129,
+    "chunk_samples": 512,
+    "context_samples": 64,
+    "hidden_size": 128,
+    "normalization": null,
+    "preemphasis": null,
+    "dither": null
+  },
+  "tokenizer_summary": {
+    "type": "none",
+    "vocab_size": null,
+    "special_tokens": {}
+  },
+  "capabilities": {
+    "languages": [],
+    "language_detection": false,
+    "translation": false,
+    "timestamps": [],
+    "streaming": true,
+    "speaker_diarization": false,
+    "vad": true,
+    "_comment": "silero_vad is a voice-activity detector, not a speech recognizer. It produces per-chunk binary speech probabilities in [0, 1]. Supports streaming chunk-based inference (512-sample chunks with 64-sample reflect-pad context). No language, tokenizer, translation, timestamp, or diarization support."
+  },
+  "tolerance_file": "tests/tolerances/silero_vad.json",
+  "tolerance_file_convention": "tests/tolerances/{family}.json",
+  "cases": [
+    {
+      "audio": "jfk",
+      "language": null
+    }
+  ],
+  "_dump_points": [
+    "vad.stft_magnitude",
+    "vad.conv1.out",
+    "vad.conv2.out",
+    "vad.conv3.out",
+    "vad.conv4.out",
+    "vad.hidden_out",
+    "vad.probs"
+  ],
+  "_note": "Phase 0.K contract for the audio.cpp convergence fork delta. The C++ silero_vad runtime (src/models/silero_vad/runtime.cpp) does not yet emit debug::dump_tensor calls — add dump points at vad.stft_magnitude, vad.conv[1-4].out, vad.hidden_out, vad.probs to make this manifest runnable. Validate once a transcribe-cli binary with TRANSCRIBE_DUMP_DIR support is built (Phase 4)."
+}

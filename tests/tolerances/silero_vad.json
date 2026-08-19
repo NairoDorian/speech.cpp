@@ -1,0 +1,29 @@
+{
+  "_comment": [
+    "silero_vad_v6.2 per-tensor tolerances for compare_tensors.py.",
+    "",
+    "Regime: GGUF weights are float32 (pinned v6.2 JIT, sha D7FB67A5...),",
+    "C++ graph runs on CPU via ggml, reference re-implements the forward",
+    "pass with torch F.conv1d + manual LSTMCell against the same safetensors.",
+    "Default validate.py mode (no --mel-from-ref). The VAD output range is",
+    "[0, 1] so tolerances are tight — any drift past 1e-4 on the final",
+    "probability can flip a chunk-level VAD decision.",
+    "",
+    "Tolerances are conservative first-pass estimates. Calibrate empirically",
+    "by running the first reference vs C++ comparison and tightening:",
+    "  1. Run ref  (produces build/validate/silero_vad/silero_vad_v6.2/<case>/ref/)",
+    "  2. Run cpp  (produces build/validate/.../cpp/)",
+    "  3. Run compare (reports observed max_abs / mean_abs per tensor)",
+    "  4. Set tolerance = 1.5x worst observed, rounded up.",
+    "",
+    "Dump points: vad.stft_magnitude, vad.conv1.out, vad.conv2.out,",
+    "vad.conv3.out, vad.conv4.out, vad.hidden_out, vad.probs."
+  ],
+  "vad.stft_magnitude": {"max_abs": 1e-4, "mean_abs": 1e-5},
+  "vad.conv1.out": {"max_abs": 1e-5, "mean_abs": 1e-6},
+  "vad.conv2.out": {"max_abs": 1e-5, "mean_abs": 1e-6},
+  "vad.conv3.out": {"max_abs": 1e-5, "mean_abs": 1e-6},
+  "vad.conv4.out": {"max_abs": 1e-5, "mean_abs": 1e-6},
+  "vad.hidden_out": {"max_abs": 1e-3, "mean_abs": 1e-4},
+  "vad.probs": {"max_abs": 1e-5, "mean_abs": 1e-6}
+}
