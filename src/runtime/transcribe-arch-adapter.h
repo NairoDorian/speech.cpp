@@ -21,6 +21,8 @@
 
 #include "transcribe-arch.h"
 
+#include <string>
+
 namespace transcribe {
 
 // Look up an audio.cpp framework family by GGUF architecture-name string.
@@ -29,5 +31,16 @@ namespace transcribe {
 // distinguished only by `name`. Consulted by find_arch() AFTER the builtin
 // transcribe.cpp table so builtin families keep precedence on name collision.
 const Arch * adapter_find_arch(const char * name);
+
+// Ask the framework registry which family claims a path the GGUF loader
+// cannot read: a `.safetensors` weight file or a model directory, which is
+// how most audio.cpp families ship. Returns the family id, or "" when no
+// registered loader claims the path.
+//
+// This is what makes the adapter reachable at all. transcribe_model_load_file
+// resolves the family from GGUF `general.architecture`, so before this hook
+// existed only converter-produced GGUF families could ever reach find_arch()
+// - every safetensors/model_spec family failed with ERR_GGUF before dispatch.
+std::string adapter_sniff_framework_family(const char * path);
 
 }  // namespace transcribe

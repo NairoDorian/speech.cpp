@@ -54,6 +54,18 @@ class Loader {
     //                                  / wrong type.
     transcribe_status open(const char * path);
 
+    // Identify a model the GGUF reader cannot open: a `.safetensors` weight
+    // file or a model directory, which is how most audio.cpp framework
+    // families ship. `family` is the id the framework registry resolved (see
+    // adapter_sniff_framework_family) and takes the place of the GGUF
+    // `general.architecture` KV, so dispatch through find_arch() and the
+    // Arch::load contract are identical for both formats.
+    //
+    // No gguf_context is opened: gguf() stays null and release_gguf() returns
+    // null, which the ArchAdapter expects — the framework loader reads the
+    // weights itself from path().
+    transcribe_status open_framework(const char * path, const std::string & family);
+
     // Identification fields, populated on a successful open(). The arch
     // string is required by the GGUF schema we accept; the variant string
     // is optional and may be empty for older or partial files.

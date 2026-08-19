@@ -20,6 +20,7 @@
 #include "ggml.h"  // ggml_log_set: route ggml diagnostics into our sink
 #include "transcribe-abi.h"
 #include "transcribe-arch.h"
+#include "transcribe-arch-adapter.h"
 #include "transcribe-backend.h"
 #include "transcribe-loader.h"
 #include "transcribe-log.h"
@@ -1484,8 +1485,14 @@ static transcribe_status transcribe_model_load_file_impl(const char *           
     if (!transcribe::path_is_present(path)) {
         return TRANSCRIBE_ERR_FILE_NOT_FOUND;
     }
+    // A directory is a legitimate model root for the audio.cpp framework
+    // families (weights + config discovered under it), and there is no magic
+    // to read, so the framework sniff is the only applicable path.
+    std::error_code dir_ec;
+    const bool      path_is_dir = std::filesystem::is_directory(transcribe::path_from_utf8(path), dir_ec);
+
     uint32_t magic = 0;
-    {
+    if (!path_is_dir) {
         std::ifstream fin(transcribe::path_from_utf8(path), std::ios::binary);
         if (!fin) {
             // The existence pre-check said the path is reachable but
@@ -1508,6 +1515,31 @@ static transcribe_status transcribe_model_load_file_impl(const char *           
     // whisper-shaped (rejecting unrelated ggml-magic files like Silero VAD).
     if (magic == 0x67676d6cu) {
         return transcribe::whisper::load_from_bin(path, params, out_model);
+    }
+
+    // Not a GGUF and not a legacy .bin: ask the audio.cpp framework registry
+    // whether one of its families claims this path (a `.safetensors` weight
+    // file or a model directory). GGUF stays the canonical, first-checked
+    // format — this runs only where the GGUF reader would fail anyway, so the
+    // documented error contract for genuinely bad files is unchanged.
+    if (path_is_dir || magic != 0x46554747u) {
+        const std::string family = transcribe::adapter_sniff_framework_family(path);
+        if (!family.empty()) {
+            transcribe::Loader fw_loader;
+            if (const transcribe_status st = fw_loader.open_framework(path, family); st != TRANSCRIBE_OK) {
+                return st;
+            }
+            const transcribe::Arch * fw_arch = transcribe::find_arch(family.c_str());
+            if (fw_arch == nullptr || fw_arch->load == nullptr) {
+                return TRANSCRIBE_ERR_UNSUPPORTED_ARCH;
+            }
+            return fw_arch->load(fw_loader, params, out_model);
+        }
+        if (path_is_dir) {
+            // No loader claimed the directory and there is nothing for the
+            // GGUF reader to open.
+            return TRANSCRIBE_ERR_UNSUPPORTED_ARCH;
+        }
     }
 
     // Header-only GGUF inspection. The Loader is stack-allocated; if

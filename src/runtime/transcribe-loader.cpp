@@ -26,6 +26,21 @@ gguf_context * Loader::release_gguf() {
     return out;
 }
 
+transcribe_status Loader::open_framework(const char * path, const std::string & family) {
+    if (path == nullptr || family.empty()) {
+        return TRANSCRIBE_ERR_INVALID_ARG;
+    }
+    if (!path_is_present(path)) {
+        return TRANSCRIBE_ERR_FILE_NOT_FOUND;
+    }
+    path_    = path;
+    arch_    = family;
+    variant_ = {};
+    meta_.clear();
+    // gguf_ stays null: the framework loader opens the weights itself.
+    return TRANSCRIBE_OK;
+}
+
 transcribe_status Loader::open(const char * path) {
     if (path == nullptr) {
         return TRANSCRIBE_ERR_INVALID_ARG;

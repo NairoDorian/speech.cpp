@@ -2,21 +2,38 @@
 // the transcribe C ABI `Arch` dispatch trait (V6 plan sub-task 0.H). See the
 // sibling header for the lifetime and ABI mismatch rationale.
 //
-// NOTE (Phase 0 structural): this file is NOT compiled-validated until ggml
-// converges (0.L). It implements the documented bridge surface so the
-// unified C ABI can route audio.cpp families through find_arch(). Reachable
-// families are those whose audio.cpp converter writes a GGUF carrying a
-// `general.architecture` equal to the family id (e.g. citrinet_asr); safetensors
-// families only reach here once the dispatcher gains a pre-Loader::open sniff
-// (Phase 1). Backend binding is per-session inside the framework; the adapter
-// reports the caller's requested surface label at model scope and resolves the
-// concrete device when a session is eventually created.
+// STATUS (Phase 0.H, compile-validated since 0.L): implements the documented
+// bridge surface so the unified C ABI can route audio.cpp families through
+// find_arch(). Reachable families are those whose audio.cpp converter writes a
+// GGUF carrying a `general.architecture` equal to the family id (e.g.
+// citrinet_asr); safetensors families only reach here once the dispatcher gains
+// a pre-Loader::open sniff (Phase 1). Backend binding is per-session inside the
+// framework; the adapter reports the caller's requested surface label at model
+// scope and resolves the concrete device when a session is eventually created.
+//
+// Two contract mismatches between the projects are resolved HERE, because
+// neither side is wrong on its own terms:
+//
+//   1. Chunk granularity. The C ABI's transcribe_stream_feed() takes any
+//      n_samples > 0; framework streaming sessions declare a required chunk
+//      size via streaming_policy().preferred_audio_chunk_samples and reject
+//      anything else (silero_vad: "chunk must contain exactly 512 samples")
+//      plus demand contiguous start_sample. The adapter therefore buffers the
+//      caller's PCM and dispatches only whole chunks, flushing the tail at
+//      finalize. See StreamChunker below.
+//
+//   2. Cursor ownership. transcribe-session.h designates the audio cursors,
+//      committed counts and stream_revision as HOOK-owned state that the
+//      dispatcher reads back (transcribe.cpp's streaming-dispatcher comment).
+//      The adapter writes the inherited base fields directly - it must never
+//      declare same-named members, which would silently shadow them.
 
 #include "transcribe-arch-adapter.h"
 
 #include "transcribe-log.h"
 #include "transcribe-loader.h"
 #include "transcribe-model.h"
+#include "transcribe-path.h"
 #include "transcribe-session.h"
 
 #include "engine/framework/core/backend.h"
@@ -30,6 +47,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 using engine::core::BackendType;
@@ -44,6 +62,7 @@ using engine::runtime::ModelRegistry;
 using engine::runtime::RunMode;
 using engine::runtime::SessionOptions;
 using engine::runtime::StreamEvent;
+using engine::runtime::StreamingPolicy;
 using engine::runtime::TaskResult;
 using engine::runtime::TaskSpec;
 using engine::runtime::TaskRequest;
@@ -143,6 +162,84 @@ static int64_t samples_to_ms(int64_t samples) {
     return samples / (k_native_sample_rate / 1000);
 }
 
+static int64_t samples_to_us(int64_t samples) {
+    // Derived from the absolute sample count on every read rather than
+    // accumulated per feed: 1000000/16000 is not an integer, so a running
+    // += would truncate ~0.5 us per odd-length chunk and drift without
+    // bound over a long stream.
+    return samples * 1000000 / k_native_sample_rate;
+}
+
+// The framework identifies speakers by opaque string; the C ABI uses a 1-based
+// int32 (0 = no attribution). Assign indices in first-appearance order so the
+// numbering is stable within a result and reproducible across runs.
+class SpeakerIndexer {
+public:
+    int32_t index_of(const std::string & id) {
+        if (id.empty()) {
+            return 0;
+        }
+        const auto it = ids_.find(id);
+        if (it != ids_.end()) {
+            return it->second;
+        }
+        const auto next = static_cast<int32_t>(ids_.size()) + 1;
+        ids_.emplace(id, next);
+        return next;
+    }
+
+private:
+    std::unordered_map<std::string, int32_t> ids_;
+};
+
+// Attach words to the segment whose time span contains them, and stamp each
+// segment's [first_word, n_words) window. Both vectors are assumed sorted by
+// start time, which every framework family produces. Words that fall past the
+// last segment stay attributed to it rather than being dropped, so the
+// forward/backward indices the C ABI publishes always resolve.
+static void tie_words_to_segments(std::vector<transcribe_session::SegmentEntry> & segments,
+                                  std::vector<transcribe_session::WordEntry> &    words) {
+    if (segments.empty() || words.empty()) {
+        return;
+    }
+    size_t wi = 0;
+    for (size_t si = 0; si < segments.size() && wi < words.size(); ++si) {
+        const size_t first    = wi;
+        const bool   last_seg = (si + 1 == segments.size());
+        while (wi < words.size() && (last_seg || words[wi].t0_ms <= segments[si].t1_ms)) {
+            words[wi].seg_index = static_cast<int>(si);
+            ++wi;
+        }
+        segments[si].n_words = static_cast<int>(wi - first);
+        segments[si].first_word = static_cast<int>(first);
+    }
+}
+
+// Stamp each segment with the speaker whose turn overlaps it most. Speaker
+// turns may overlap each other (crosstalk), so "largest overlap" is the only
+// attribution that stays well defined; a segment no turn covers keeps 0.
+static void attribute_segment_speakers(
+    std::vector<transcribe_session::SegmentEntry> &             segments,
+    const std::vector<transcribe_session::SpeakerSegmentEntry> & turns) {
+    if (turns.empty()) {
+        return;
+    }
+    for (auto & seg : segments) {
+        int64_t best_overlap = 0;
+        int32_t best_speaker = 0;
+        for (const auto & turn : turns) {
+            const int64_t lo = std::max(seg.t0_ms, turn.t0_ms);
+            const int64_t hi = std::min(seg.t1_ms, turn.t1_ms);
+            const int64_t overlap = hi - lo;
+            if (overlap > best_overlap) {
+                best_overlap = overlap;
+                best_speaker = turn.speaker_id;
+            }
+        }
+        seg.speaker_id = best_speaker;
+    }
+}
+
 // Map a framework TaskResult into the family-agnostic result storage on
 // transcribe_session. Single source of truth for the two result views; called
 // by adapter_run() and by stream_finalize().
@@ -163,8 +260,6 @@ static void map_result_into(transcribe_session * ctx, const TaskResult & result)
         ctx->detected_language = result.text_output->language;
     }
 
-    int seg_index = 0;
-    std::vector<int> words_per_segment;
     for (const auto & seg : result.speech_segments) {
         transcribe_session::SegmentEntry entry;
         entry.t0_ms = samples_to_ms(seg.span.start_sample);
@@ -173,13 +268,11 @@ static void map_result_into(transcribe_session * ctx, const TaskResult & result)
         entry.first_word = static_cast<int>(ctx->words.size());
         entry.n_words = 0;
         ctx->segments.push_back(entry);
-        words_per_segment.push_back(0);
-        ++seg_index;
     }
 
     for (const auto & wt : result.word_timestamps) {
         transcribe_session::WordEntry entry;
-        entry.text = wt.text;
+        entry.text = wt.word;
         entry.t0_ms = samples_to_ms(wt.span.start_sample);
         entry.t1_ms = samples_to_ms(wt.span.end_sample);
         entry.seg_index = 0;
@@ -188,33 +281,19 @@ static void map_result_into(transcribe_session * ctx, const TaskResult & result)
         ctx->words.push_back(entry);
     }
 
-    // Tie words to segments by time order so the single-shot accessors stay
-    // coherent; this is a best-effort alignment (Phase 0 structural).
-    if (!ctx->segments.empty() && !ctx->words.empty()) {
-        size_t wi = 0;
-        for (size_t si = 0; si < ctx->segments.size() && wi < ctx->words.size(); ++si) {
-            int first = static_cast<int>(wi);
-            while (wi < ctx->words.size() && ctx->words[wi].t0_ms <= ctx->segments[si].t1_ms) {
-                ctx->words[wi].seg_index = static_cast<int>(si);
-                ++wi;
-            }
-            ctx->segments[si].n_words = static_cast<int>(wi) - first;
-            if (ctx->segments[si].n_words > 0) {
-                ctx->segments[si].first_word = first;
-            }
-        }
-    }
+    tie_words_to_segments(ctx->segments, ctx->words);
 
+    SpeakerIndexer speakers;
     for (const auto & turn : result.speaker_turns) {
         transcribe_session::SpeakerSegmentEntry entry;
         entry.t0_ms = samples_to_ms(turn.span.start_sample);
         entry.t1_ms = samples_to_ms(turn.span.end_sample);
-        // SpeakerTurn carries a string id; the C ABI speaker_segments use a
-        // 1-based int32. Phase 1 assigns stable indices; for now attribute 0.
-        entry.speaker_id = 0;
+        entry.speaker_id = speakers.index_of(turn.speaker_id);
         entry.p = turn.confidence;
         ctx->speaker_segments.push_back(entry);
     }
+
+    attribute_segment_speakers(ctx->segments, ctx->speaker_segments);
 
     if (!ctx->words.empty()) {
         ctx->result_kind = TRANSCRIBE_TIMESTAMPS_WORD;
@@ -248,6 +327,95 @@ static void apply_run_params(TaskRequest & request, const transcribe_run_params 
     request.options["keep_special_tags"] = params->keep_special_tags ? "true" : "false";
     request.options["spec_k_drafts"] = std::to_string(params->spec_k_drafts);
 }
+
+// Re-blocks an arbitrary caller feed into the fixed-size, contiguous chunks a
+// framework streaming session requires. transcribe_stream_feed() imposes no
+// granularity ("n_samples may be 0"), while framework sessions declare one via
+// streaming_policy() and enforce it hard - SileroRuntime::process_chunk throws
+// on both a wrong size and a non-contiguous start_sample. Without this the
+// streaming surface is unusable for every framework family.
+//
+// The tail left over after the last whole chunk stays buffered and is emitted
+// zero-padded by flush(), which finalize_stream() calls so trailing audio is
+// not silently dropped.
+class StreamChunker {
+public:
+    void reset(int64_t chunk_samples) {
+        chunk_samples_ = chunk_samples > 0 ? chunk_samples : 0;
+        pending_.clear();
+        input_samples_     = 0;
+        committed_samples_ = 0;
+    }
+
+    int64_t input_samples() const noexcept { return input_samples_; }
+    int64_t committed_samples() const noexcept { return committed_samples_; }
+    int64_t buffered_samples() const noexcept { return input_samples_ - committed_samples_; }
+
+    // Append `n` samples and invoke `emit(chunk)` once per whole chunk now
+    // available. `emit` receives a chunk whose start_sample is the absolute
+    // cursor the family requires for its contiguity check, and returns false
+    // to stop early (abort) - undispatched samples stay buffered rather than
+    // being counted as committed, so a later feed resumes contiguously.
+    template <typename Emit>
+    void feed(const float * pcm, int n, const Emit & emit) {
+        if (n > 0) {
+            pending_.insert(pending_.end(), pcm, pcm + static_cast<std::size_t>(n));
+            input_samples_ += n;
+        }
+        if (chunk_samples_ <= 0) {
+            // Family declares no granularity: pass the feed straight through.
+            if (!pending_.empty() && emit(make_chunk(pending_))) {
+                committed_samples_ += static_cast<int64_t>(pending_.size());
+                pending_.clear();
+            }
+            return;
+        }
+        const auto  chunk  = static_cast<std::size_t>(chunk_samples_);
+        std::size_t offset = 0;
+        while (pending_.size() - offset >= chunk) {
+            const std::vector<float> block(pending_.begin() + static_cast<std::ptrdiff_t>(offset),
+                                           pending_.begin() + static_cast<std::ptrdiff_t>(offset + chunk));
+            if (!emit(make_chunk(block))) {
+                break;
+            }
+            committed_samples_ += static_cast<int64_t>(chunk);
+            offset += chunk;
+        }
+        pending_.erase(pending_.begin(), pending_.begin() + static_cast<std::ptrdiff_t>(offset));
+    }
+
+    // Emit whatever is still buffered, zero-padded up to the family's chunk
+    // size. Only the real samples count toward committed_samples_ so the
+    // caller-visible audio_committed_ms never exceeds what was actually fed.
+    template <typename Emit>
+    void flush(const Emit & emit) {
+        if (pending_.empty()) {
+            return;
+        }
+        const auto real = static_cast<int64_t>(pending_.size());
+        if (chunk_samples_ > 0) {
+            pending_.resize(static_cast<std::size_t>(chunk_samples_), 0.0f);
+        }
+        (void)emit(make_chunk(pending_));
+        committed_samples_ += real;
+        pending_.clear();
+    }
+
+private:
+    AudioChunk make_chunk(const std::vector<float> & samples) const {
+        AudioChunk chunk;
+        chunk.sample_rate  = k_native_sample_rate;
+        chunk.channels     = 1;
+        chunk.start_sample = committed_samples_;
+        chunk.samples      = samples;
+        return chunk;
+    }
+
+    int64_t            chunk_samples_     = 0;
+    int64_t            input_samples_     = 0;
+    int64_t            committed_samples_ = 0;
+    std::vector<float> pending_;
+};
 
 // An adapter-wrapped model. Owns the framework ILoadedVoiceModel; the
 // framework frees the gguf_context / weights / decode state via the
@@ -364,48 +532,13 @@ public:
         }
     }
 
-    transcribe_status run_batch_offline(const float * const * pcm, const int * n_samples, int n,
-                                        const transcribe_run_params * params) {
-        if (pcm == nullptr || n_samples == nullptr || n <= 0) {
-            return TRANSCRIBE_ERR_INVALID_ARG;
-        }
-        auto * offline = ensure_offline();
-        if (offline == nullptr) {
-            return TRANSCRIBE_ERR_NOT_IMPLEMENTED;
-        }
-        try {
-            std::vector<ResultSet> results;
-            results.reserve(static_cast<std::size_t>(n));
-            for (int i = 0; i < n; ++i) {
-                if (n_samples[i] <= 0 || pcm[i] == nullptr) {
-                    ResultSet rs;
-                    rs.has_result = false;
-                    rs.status = TRANSCRIBE_ERR_INVALID_ARG;
-                    results.push_back(std::move(rs));
-                    continue;
-                }
-                TaskRequest request;
-                request.audio_input = AudioBuffer{
-                    k_native_sample_rate, 1,
-                    std::vector<float>(pcm[i], pcm[i] + static_cast<std::size_t>(n_samples[i]))};
-                apply_run_params(request, params);
-                offline->prepare(build_preparation_request(request));
-                const TaskResult result = offline->run(request);
-                clear_result();
-                map_result_into(this, result);
-                results.push_back(capture_result());
-                if (poll_abort()) {
-                    batch_results = std::move(results);
-                    return TRANSCRIBE_ERR_ABORTED;
-                }
-            }
-            batch_results = std::move(results);
-            return TRANSCRIBE_OK;
-        } catch (const std::exception & e) {
-            transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "adapter run_batch failed: %s", e.what());
-            return TRANSCRIBE_ERR_BACKEND;
-        }
-    }
+    // No run_batch hook is installed. The framework's offline surface takes
+    // one TaskRequest at a time, so an adapter "batch" could only be a serial
+    // loop - which is exactly the dispatcher's generic fallback, and that one
+    // additionally re-validates each utterance, records per-utterance timings
+    // and stores a per-utterance status. Duplicating it here would be strictly
+    // worse; the fallback routes back through run_offline() anyway. Wire a
+    // real run_batch only when a family gains a genuinely batched graph.
 
     transcribe_status begin_stream(const transcribe_run_params * run_params) {
         auto * streaming = ensure_streaming();
@@ -415,9 +548,16 @@ public:
         try {
             TaskRequest request;
             apply_run_params(request, run_params);
+            // prepare() BEFORE start_stream(): every framework session gates
+            // its streaming entry points on require_prepared(), and the
+            // default start_stream() delegates to reset() - which is itself
+            // gated - so an unprepared begin throws on the very first call.
+            // The preparation request carries no audio: a stream has none yet,
+            // and families default the sample rate to 16 kHz in that case.
+            streaming->prepare(build_preparation_request(request));
             streaming->start_stream(request);
-            stream_audio_input_us = 0;
-            stream_audio_committed_us = 0;
+            chunker_.reset(preferred_chunk_samples(streaming));
+            publish_cursors();
             return TRANSCRIBE_OK;
         } catch (const std::exception & e) {
             transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "adapter stream_begin failed: %s", e.what());
@@ -434,19 +574,21 @@ public:
             return TRANSCRIBE_ERR_INVALID_ARG;
         }
         try {
-            AudioChunk chunk;
-            chunk.sample_rate = k_native_sample_rate;
-            chunk.channels = 1;
-            // start_sample is an absolute cursor into the 16 kHz stream.
-            chunk.start_sample = (stream_audio_input_us / 1000) * (k_native_sample_rate / 1000);
-            if (n_samples > 0) {
-                chunk.samples.assign(pcm, pcm + static_cast<std::size_t>(n_samples));
-                stream_audio_input_us +=
-                    static_cast<int64_t>(n_samples) * 1000000 / k_native_sample_rate;
-            }
-            const StreamEvent event = streaming->process_audio_chunk(chunk);
-            update_stream_from_event(event, update);
-            if (poll_abort()) {
+            bool changed = false;
+            // One caller feed can span many family chunks, so the abort poll
+            // lives per chunk rather than per feed; the samples the abort
+            // skipped stay buffered and resume contiguously on the next feed.
+            chunker_.feed(pcm, n_samples, [&](const AudioChunk & chunk) {
+                if (poll_abort()) {
+                    return false;
+                }
+                const StreamEvent event = streaming->process_audio_chunk(chunk);
+                changed = fold_stream_event(event) || changed;
+                return true;
+            });
+            publish_cursors();
+            publish_update(update, changed);
+            if (was_aborted || poll_abort()) {
                 return TRANSCRIBE_ERR_ABORTED;
             }
             return TRANSCRIBE_OK;
@@ -462,20 +604,24 @@ public:
             return TRANSCRIBE_ERR_NOT_IMPLEMENTED;
         }
         try {
-            const TaskResult result = streaming->finalize();
+            // Push the sub-chunk tail through before asking for the final
+            // result, otherwise the last partial block is silently dropped.
+            bool changed = false;
+            chunker_.flush([&](const AudioChunk & chunk) {
+                const StreamEvent event = streaming->process_audio_chunk(chunk);
+                changed = fold_stream_event(event) || changed;
+                return true;
+            });
+            // finish_stream() is the streaming-surface entry point; it
+            // defaults to finalize() but lets a family run stream-specific
+            // teardown first.
+            const TaskResult result = streaming->finish_stream();
             clear_result();
             map_result_into(this, result);
-            const bool changed = has_result || result_kind != TRANSCRIBE_TIMESTAMPS_NONE;
-            if (update != nullptr) {
-                update->result_changed = changed;
-                update->is_final = true;
-                update->revision = ++stream_revision;
-                update->input_received_ms = stream_audio_input_us / 1000;
-                update->audio_committed_ms = stream_audio_committed_us / 1000;
-                update->buffered_ms = 0;
-                update->committed_changed = changed;
-                update->tentative_changed = false;
-            }
+            publish_cursors();
+            // Everything fed is committed once the stream is closed.
+            stream_audio_committed_us = stream_audio_input_us;
+            publish_update(update, changed || has_result);
             return TRANSCRIBE_OK;
         } catch (const std::exception & e) {
             transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "adapter stream_finalize failed: %s", e.what());
@@ -487,43 +633,60 @@ public:
         if (streaming_ != nullptr) {
             auto * s = dynamic_cast<IStreamingVoiceTaskSession *>(streaming_.get());
             if (s != nullptr) {
-                s->reset();
+                // reset() is prepared-gated like the rest of the streaming
+                // surface; a session reset before any begin has nothing to
+                // release, so skip rather than throw out of a void hook.
+                try {
+                    s->reset();
+                } catch (const std::exception & e) {
+                    transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_DEBUG,
+                                        "adapter stream_reset: framework reset skipped: %s", e.what());
+                }
+                chunker_.reset(preferred_chunk_samples(s));
             }
         }
-        stream_audio_input_us = 0;
-        stream_audio_committed_us = 0;
+        publish_cursors();
     }
 
 private:
-    void update_stream_from_event(const StreamEvent & event, transcribe_stream_update * update) {
+    static int64_t preferred_chunk_samples(IStreamingVoiceTaskSession * streaming) {
+        if (streaming == nullptr) {
+            return 0;
+        }
+        const StreamingPolicy policy = streaming->streaming_policy();
+        if (policy.preferred_audio_chunk_samples > 0) {
+            return policy.preferred_audio_chunk_samples;
+        }
+        if (policy.preferred_audio_chunk_seconds > 0.0) {
+            return static_cast<int64_t>(policy.preferred_audio_chunk_seconds * k_native_sample_rate);
+        }
+        return 0;
+    }
+
+    // Fold one framework StreamEvent into the session's result snapshot.
+    // Returns whether anything observable moved.
+    //
+    // Each category is replaced only when the event actually carries data for
+    // it. A VAD event stream in particular emits bare SpeechStart/SpeechEnd
+    // markers with no segment payload; wiping the accumulated segments on
+    // those would drop the hypothesis mid-stream. result_kind and has_result
+    // are likewise derived from what the session now HOLDS, not from what this
+    // one event happened to contain.
+    bool fold_stream_event(const StreamEvent & event) {
         bool changed = false;
 
         if (event.partial_text.has_value()) {
-            full_text = event.partial_text->text;
-            raw_text = full_text;
+            full_text         = event.partial_text->text;
+            raw_text          = full_text;
             detected_language = event.partial_text->language;
-            changed = true;
-        }
-
-        if (!event.speech_segments.empty()) {
-            segments.clear();
-            for (const auto & seg : event.speech_segments) {
-                SegmentEntry entry;
-                entry.t0_ms = samples_to_ms(seg.span.start_sample);
-                entry.t1_ms = samples_to_ms(seg.span.end_sample);
-                entry.text = seg.text;
-                entry.first_word = static_cast<int>(words.size());
-                entry.n_words = 0;
-                segments.push_back(entry);
-            }
-            changed = true;
+            changed           = true;
         }
 
         if (!event.word_timestamps.empty()) {
             words.clear();
             for (const auto & wt : event.word_timestamps) {
                 WordEntry entry;
-                entry.text = wt.text;
+                entry.text  = wt.word;
                 entry.t0_ms = samples_to_ms(wt.span.start_sample);
                 entry.t1_ms = samples_to_ms(wt.span.end_sample);
                 words.push_back(entry);
@@ -531,54 +694,98 @@ private:
             changed = true;
         }
 
+        std::vector<SegmentEntry> event_segments;
+        for (const auto & va : event.voice_activity) {
+            if (!va.segment.has_value()) {
+                continue;
+            }
+            const auto & seg = *va.segment;
+            SegmentEntry entry;
+            entry.t0_ms      = samples_to_ms(seg.span.start_sample);
+            entry.t1_ms      = samples_to_ms(seg.span.end_sample);
+            entry.text       = seg.text;
+            entry.first_word = 0;
+            entry.n_words    = 0;
+            event_segments.push_back(std::move(entry));
+        }
+        if (!event_segments.empty()) {
+            segments = std::move(event_segments);
+            changed  = true;
+        }
+
         if (!event.speaker_turns.empty()) {
+            SpeakerIndexer speakers;
             speaker_segments.clear();
             for (const auto & turn : event.speaker_turns) {
                 SpeakerSegmentEntry entry;
-                entry.t0_ms = samples_to_ms(turn.span.start_sample);
-                entry.t1_ms = samples_to_ms(turn.span.end_sample);
-                entry.speaker_id = 0;
-                entry.p = turn.confidence;
+                entry.t0_ms      = samples_to_ms(turn.span.start_sample);
+                entry.t1_ms      = samples_to_ms(turn.span.end_sample);
+                entry.speaker_id = speakers.index_of(turn.speaker_id);
+                entry.p          = turn.confidence;
                 speaker_segments.push_back(entry);
             }
             changed = true;
         }
 
-        if (event.is_final) {
-            // The framework signals stream closure; the dispatcher owns the
-            // FINISHED transition, so we just fold the final payload in.
+        if (changed) {
+            tie_words_to_segments(segments, words);
+            attribute_segment_speakers(segments, speaker_segments);
         }
 
-        if (!event.word_timestamps.empty()) {
+        if (!words.empty()) {
             result_kind = TRANSCRIBE_TIMESTAMPS_WORD;
-        } else if (!event.speech_segments.empty()) {
+        } else if (!segments.empty()) {
             result_kind = TRANSCRIBE_TIMESTAMPS_SEGMENT;
         } else {
             result_kind = TRANSCRIBE_TIMESTAMPS_NONE;
         }
-        has_result = changed;
+        has_result = !full_text.empty() || !words.empty() || !segments.empty() || !speaker_segments.empty();
 
-        if (update != nullptr) {
-            ++stream_revision;
-            update->revision = stream_revision;
-            update->result_changed = changed;
-            update->input_received_ms = stream_audio_input_us / 1000;
-            update->audio_committed_ms = stream_audio_committed_us / 1000;
-            update->buffered_ms = 0;
-            update->committed_changed = changed;
-            update->tentative_changed = changed;
-        }
+        // event.is_final is informational here: the dispatcher owns the
+        // ACTIVE -> FINISHED transition and forces update->is_final itself.
+        return changed;
     }
 
-    AdapterModel * model_ = nullptr;
-    SessionOptions session_options_;
+    // Mirror the chunker's sample cursors onto the base session fields.
+    // transcribe-session.h designates these as hook-owned state the dispatcher
+    // reads back, so they must be the INHERITED members - a same-named member
+    // here would shadow them and leave the dispatcher reading zeros.
+    void publish_cursors() {
+        stream_audio_input_us     = samples_to_us(chunker_.input_samples());
+        stream_audio_committed_us = samples_to_us(chunker_.committed_samples());
+    }
+
+    // Fill the caller's update with the fields this hook owns. Revision,
+    // result_changed, committed_changed, tentative_changed and is_final all
+    // belong to the dispatcher (publish_observable_delta / publish_stream_-
+    // update_tail); writing the two trailing bool fields here would also
+    // overrun any caller whose struct_size stops at buffered_ms, which the ABI
+    // explicitly permits.
+    //
+    // stream_revision is advanced only on a real change: publish_observable_-
+    // delta forces result_changed true whenever the hook moved the counter, so
+    // an unconditional bump would report every feed as a change.
+    void publish_update(transcribe_stream_update * update, bool changed) {
+        if (changed) {
+            ++stream_revision;
+        }
+        n_committed_segments = static_cast<int>(segments.size());
+        n_committed_words    = static_cast<int>(words.size());
+        n_committed_tokens   = static_cast<int>(tokens.size());
+        if (update == nullptr) {
+            return;
+        }
+        update->result_changed     = changed;
+        update->input_received_ms  = stream_audio_input_us / 1000;
+        update->audio_committed_ms = stream_audio_committed_us / 1000;
+        update->buffered_ms        = samples_to_us(chunker_.buffered_samples()) / 1000;
+    }
+
+    AdapterModel *                     model_ = nullptr;
+    SessionOptions                     session_options_;
     std::unique_ptr<IVoiceTaskSession> offline_;
     std::unique_ptr<IVoiceTaskSession> streaming_;
-
-    // The dispatcher owns the committed/tentative state machine; these cursors
-    // are only the adapter's local progress counters mirrored into the update.
-    int64_t stream_audio_input_us = 0;
-    int64_t stream_audio_committed_us = 0;
+    StreamChunker                      chunker_;
 };
 
 static SessionOptions build_session_options(const transcribe_session_params * params,
@@ -604,6 +811,16 @@ static SessionOptions build_session_options(const transcribe_session_params * pa
         options.options["n_ctx"] = std::to_string(n_ctx);
     }
     return options;
+}
+
+// The default registry instantiates every compiled-in family loader (~46 of
+// them). The loaders are stateless factories and ModelRegistry::load() is
+// const, so one shared instance serves every model load instead of rebuilding
+// the catalog per transcribe_open(). Function-local static: thread-safe
+// initialization, and no static-init-order dependency at library load.
+static const ModelRegistry & default_registry() {
+    static const ModelRegistry registry = make_default_registry();
+    return registry;
 }
 
 // --- Static Arch hooks -------------------------------------------------------
@@ -634,8 +851,7 @@ transcribe_status adapter_load_impl(Loader & loader,
         request.model_path = loader.path();
         request.family_hint = std::string(family);
 
-        ModelRegistry registry = make_default_registry();
-        std::unique_ptr<ILoadedVoiceModel> framework_model = registry.load(request);
+        std::unique_ptr<ILoadedVoiceModel> framework_model = default_registry().load(request);
         if (framework_model == nullptr) {
             return TRANSCRIBE_ERR_UNSUPPORTED_ARCH;
         }
@@ -692,13 +908,6 @@ transcribe_status adapter_run_impl(struct transcribe_session * ctx, const float 
                                    const struct transcribe_run_params * params) {
     auto * session = static_cast<AdapterSession *>(ctx);
     return session->run_offline(pcm, n_samples, params);
-}
-
-transcribe_status adapter_run_batch_impl(struct transcribe_session * ctx, const float * const * pcm,
-                                         const int * n_samples, int n,
-                                         const struct transcribe_run_params * params) {
-    auto * session = static_cast<AdapterSession *>(ctx);
-    return session->run_batch_offline(pcm, n_samples, n, params);
 }
 
 transcribe_status adapter_stream_begin_impl(struct transcribe_session * ctx,
@@ -798,6 +1007,31 @@ constexpr size_t k_n_adapter_archs = sizeof(adapter_archs) / sizeof(adapter_arch
 // builtin transcribe.cpp families fail to match. `adapter_archs` lives in the
 // anonymous namespace above but remains visible here via the enclosing
 // `transcribe` namespace; only this function has external linkage.
+std::string adapter_sniff_framework_family(const char * path) {
+    if (path == nullptr || path[0] == '\0') {
+        return {};
+    }
+    try {
+        ModelLoadRequest request;
+        request.model_path = transcribe::path_from_utf8(path);
+        const auto inspection = default_registry().inspect(request);
+        const std::string & family = inspection.metadata.family;
+        // Only report families the adapter table actually dispatches; a
+        // framework loader with no Arch entry would otherwise resolve here and
+        // then fail in find_arch() with a less useful status.
+        if (family.empty() || adapter_find_arch(family.c_str()) == nullptr) {
+            return {};
+        }
+        return family;
+    } catch (const std::exception & e) {
+        // No registered loader claims this path. Expected for GGUF and for
+        // unrelated files; the caller falls back to the GGUF error contract.
+        transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_DEBUG,
+                            "adapter: no framework loader claims '%s': %s", path, e.what());
+        return {};
+    }
+}
+
 const Arch * adapter_find_arch(const char * name) {
     if (name == nullptr) {
         return nullptr;
