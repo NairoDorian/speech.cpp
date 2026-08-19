@@ -11,6 +11,24 @@ Dates are the work-session dates recorded in the plan.
 
 ### Fixed
 
+- **The 0.20.2 convergence silently demoted every framework convolution to F16
+  activations; restored as `patches/ggml/0006-conv-im2col-in-weight-type.patch`.**
+  Upstream's `ggml_conv_1d`/`ggml_conv_1d_dw`/`ggml_conv_2d` lower to im2col
+  with dst type `F16` unless the weight is BF16; the audio.cpp fork lowers to
+  the *weight's* type, and every framework audio model loads conv weights as
+  F32. This is the fourth dropped fork delta (after the broadcast, concat and
+  flash-mask ones) and — like 0004 — it carried **no `MINITTS_` marker**, so
+  the R10 marker sweep could not have found it: the marker grep is necessary,
+  not sufficient. It was found numerically: `flashsr_utility_test` checks the
+  FlashSR decoder against onnxruntime-generated fixtures with a 2e-4 bound and
+  failed at 1.7e-3 max / 3.3e-4 mean **identically on CPU and CUDA** (the
+  signature of a backend-independent graph-builder delta, previously misfiled
+  as "missing assets", then as "numeric tolerance"), while the same test built
+  from audio.cpp's fork tree passes on the same machine and compiler.
+  `flashsr_utility_test` is green on both backends for the first time since
+  the convergence; no other test moved. `ggml_conv_2d_dw` is deliberately
+  untouched — the fork kept upstream's hardcoded F16 there.
+
 - **The `patches/ggml/` invariant was broken in practice, not just at risk.**
   `external/ggml` is generated, and `e11e3c5` applied the two-sided broadcast
   restore (`binary-ops.cpp`, `ops.cpp`, `binbcast.cu`, `scale.cu`) **in place
@@ -118,6 +136,38 @@ Dates are the work-session dates recorded in the plan.
 
 ### Added
 
+- **End-to-end ASR transcription is validated: `tests/asr_e2e_wer_test.cpp`.**
+  The first test in the merged tree that checks *text* rather than plumbing:
+  it loads a real GGUF ASR model through the public C ABI (`transcribe_open`),
+  transcribes the four in-tree LibriSpeech fixtures, and gates **corpus WER**
+  (total word edits over total reference words, LibriSpeech-style
+  normalization) at ≤10%. Measured baseline: **1.45%** — 1 edit in 69 words
+  (`FORWARDED`→`VOTED`), consistent with the model's published 4.6% full
+  test-clean WER — at RTF 0.033 on CPU. Links only `transcribe.dll`, like a
+  language binding. Registered under CTest whenever the unified ABI + arch
+  families are built; skips (exit 2) while the model file is absent. See
+  `docs/reports/asr_e2e_wer_gate.md`.
+- **`scripts/fetch_asr_test_model.py`** — fetches the gate's model:
+  moonshine-tiny Q8_0 (34 MB, MIT; Useful Sensors' model, ported and
+  WER-validated by transcribe.cpp; the smallest validated GGUF whose arch is
+  compiled into `src/runtime/arch/`). sha256-pinned to the repo's LFS oid;
+  a mismatched download is deleted, never installed. `models/` stays
+  gitignored — the gate is a download, not a vendored asset. stdlib-only, no
+  venv needed (unlike `fetch_silero_vad.py`, which needs torch).
+- **`tests/abi_test_wav.h`** — the minimal RIFF/WAVE reader that lived inside
+  `abi_stream_hello.cpp`, extracted header-only so `asr_e2e_wer_test` shares
+  it without linking anything beyond the C ABI.
+- **R11 in `TO_DO_UNIFY_AND_IMPROVEMENT_PLAN_V6.md`** — records the
+  end-to-end validation, the fourth dropped fork delta, and the correction to
+  R10: unmarked behavioural deltas exist, so the two audits that close the
+  class are numeric golden gates with implementation-independent references
+  and a hunk-level diff of the fork tree against its upstream base.
+- **`CMakePresets.json`** — one-command configure/build/test for the three
+  validated configurations: `cpu-full` (the CPU test baseline incl. the ABI
+  and WER gates), `cpu-core` (lean fast-iteration, supported per R10.5), and
+  `cuda` (the GPU-certification config). `cmake --preset cpu-full && cmake
+  --build --preset cpu-full && ctest --preset cpu-full` from a vcvars64
+  environment. Closes the "optionally add CMakePresets.json" item.
 - **`patches/ggml/0005-cpu-concat-fastpath.patch`** — restores the fork's
   `MINITTS_CONCAT_FASTPATH` deltas, which the convergence dropped. Upstream still
   walks concat element by element, indexing all four dimensions per element
@@ -185,6 +235,15 @@ Dates are the work-session dates recorded in the plan.
 
 ### Changed
 
+- **`scripts/sync-ggml.sh` normalizes patches to LF before applying them.** The
+  stage it patches is LF (`git archive` honors `eol=lf`), and a patch file
+  freshly written on Windows can carry CRs in its hunk lines that make
+  context matching fail — patch 0006's first sync run died exactly this way
+  while the patch itself was correct (re-materializing it from the index
+  fixed it). Tracked patches are CR-free in the object store, so stripping
+  CRs from the working copy is always content-preserving. Reproducibility
+  re-verified end to end with 0006 in the stack: sync + patches 0001–0006 →
+  `git diff --ignore-cr-at-eol -- external/ggml` empty.
 - **The ggml convergence is certified on a GPU backend, not just on CPU.** The
   full suite builds and runs against CUDA 13.3 on an RTX 4070 (sm_89);
   `scaled_dot_product_attention_test`, which had never executed anywhere, passes.
@@ -220,10 +279,13 @@ Dates are the work-session dates recorded in the plan.
 
 ### Known issues
 
-- **`flashsr_utility_test` fails identically on CPU and CUDA** (case 0:
-  `max_diff` 1.7e-3, `mean_diff` 3.3e-4 against its bound). Pre-existing, and
-  previously filed under "missing assets" — it is in fact a numeric-tolerance
-  failure and needs looking at on its own terms.
+- ~~**`flashsr_utility_test` fails identically on CPU and CUDA**~~ — resolved:
+  it was the dropped conv-im2col fork delta, restored as patch 0006 (see
+  Fixed). The "identical on both backends" symptom was the tell.
+- ~~**No in-tree ASR model / end-to-end transcription unvalidated**~~ —
+  resolved by `asr_e2e_wer_test` + `scripts/fetch_asr_test_model.py` (see
+  Added). The model remains out-of-tree by design; the gate skips until
+  fetched.
 - **`supertonic_vector_convnext_exp_test` asserts a ≥5% wall-clock speedup**, so
   it fails when another build or test suite is running on the same machine. Run
   it uncontended. (Contrast `audio_dsp_test`, whose flakiness was a seeding bug
@@ -233,10 +295,11 @@ Dates are the work-session dates recorded in the plan.
   urgent — but if ggml ever fixes `nb32` indexing in its flash kernels, the
   CPU-only gate in `common_relative_attention.cpp` should be revisited against
   fresh measurements rather than assumed obsolete.
-- **No in-tree ASR model**, so end-to-end transcription is still unvalidated. The
-  bridge tests currently exercise VAD segments, not text; both already accept a
-  model path, and `assets/asr_validation/librispeech/*.txt` is ready for WER
-  scoring.
+- **Streaming ASR text is still unvalidated end to end.** Offline moonshine
+  correctly reports `supports_streaming == false`, so `abi_stream_hello`
+  exercises the streaming surface against `silero_vad` segments only. A
+  pinned streaming-family GGUF small enough to download in CI is the natural
+  follow-up.
 - **`external/ggml` line endings are mixed** — 1145 of 2163 files have CRLF blobs
   while `.gitattributes` declares `* text=auto eol=lf`. Left alone deliberately:
   renormalizing is a 1145-file sweep, and `sync-ggml.sh` currently matches the

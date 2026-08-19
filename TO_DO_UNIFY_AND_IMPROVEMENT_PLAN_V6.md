@@ -303,7 +303,49 @@ failure baseline (see `../progress.md`). What running it actually changed:
    per-target against `AUDIOCPP_LINKED_MODELS`. Appendix I's build-verification
    matrix should treat "lean set + tests ON" as a first-class row.
 
----
+### R11. First end-to-end ASR validation + a fourth dropped fork delta (2026-08-20)
+
+The top blocker after R10 — "no ggml/GGUF ASR model in-tree, end-to-end
+transcription unvalidated" — is closed, and closing it immediately paid for
+itself by catching another convergence regression.
+
+1. **speech.cpp transcribes.** `tests/asr_e2e_wer_test.cpp` loads a real GGUF
+   through `transcribe_open()`, transcribes the four in-tree LibriSpeech
+   fixtures, and gates **corpus WER** against the reference transcripts —
+   the first test in the merged tree that checks *text*, not plumbing.
+   Measured: **1.45% corpus WER** (1 edit in 69 words; the edit is
+   FORWARDED→VOTED, consistent with the model's published 4.6% test-clean
+   WER), RTF 0.033 on CPU. Gate: ≤10% (one word costs 1.45 pp on this corpus;
+   structural breakage lands at 50–100%). See
+   `docs/reports/asr_e2e_wer_gate.md`.
+2. **The model is pinned, not vendored.** moonshine-tiny Q8_0 (34 MB, MIT,
+   the smallest WER-validated GGUF whose arch is in `src/runtime/arch/`) from
+   `handy-computer/moonshine-tiny-gguf`, sha256-pinned in
+   `scripts/fetch_asr_test_model.py`; `models/` stays gitignored. The CTest
+   registration skips (exit 2) while the file is absent, so the gate needs no
+   reconfigure once fetched. This is the Phase-0-scale stand-in for the plan's
+   full golden pipeline (§3 Stage 7); per-family WER corpora still land with
+   their family ports.
+3. **A fourth dropped fork delta, found by the new gate's sibling.** With a
+   trustworthy end-to-end path in hand, `flashsr_utility_test`'s "numeric
+   tolerance" failure (NEXT item 3 in progress.md) was re-examined: it fails
+   at 1.7e-3 max **identically on CPU and CUDA** against onnxruntime-generated
+   fixtures, and the same test against audio.cpp's fork tree passes on the
+   same machine and compiler. Cause: upstream 0.20.2's
+   `ggml_conv_1d`/`ggml_conv_1d_dw`/`ggml_conv_2d` force im2col activations to
+   F16 (unless the weight is BF16); the fork keeps them in the weight's type,
+   and every framework conv weight is F32. Restored as
+   `patches/ggml/0006-conv-im2col-in-weight-type.patch`;
+   `flashsr_utility_test` is green on both backends for the first time since
+   the convergence. (`ggml_conv_2d_dw` deliberately untouched — the fork kept
+   upstream's F16 there.)
+4. **R10 point 2 is corrected, not just extended: the `MINITTS_*` grep is
+   necessary but NOT sufficient.** This delta — like 0004 — was unmarked in
+   the fork. The audits that catch the unmarked class are numeric golden
+   gates with implementation-independent references (onnxruntime fixtures
+   here; the WER gate for ASR), and a hunk-by-hunk diff of the fork tree
+   against its own upstream base. The convergence's residual risk is now
+   *only* what those two audits have not yet covered.
 
 ## 0. Vision Statement
 

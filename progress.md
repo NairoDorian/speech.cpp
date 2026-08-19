@@ -1,11 +1,11 @@
 # Progress — Unified_Audio.cpp (speech.cpp ggml fork) merge & improve
 
-Status snapshot: **The ggml convergence is now certified on CPU *and* CUDA.
-The GPU half of R1 step 2 ran on real hardware, which immediately surfaced two
-more dropped fork deltas and one upstream CUDA limitation that had been hiding
-behind "no GPU on this host". The `patches/ggml/` invariant, which had actually
-been broken, is restored and re-verified.**
-Date: 2026-08-20 (work session log)
+Status snapshot: **speech.cpp transcribes speech, end to end, through the
+public C ABI — and the new gate's first companion investigation found a fourth
+dropped ggml fork delta (unmarked, like 0004), now restored as patch 0006 and
+re-certified on CPU and CUDA. Both suites moved one test greener; the
+sync-ggml invariant is re-verified with six patches in the stack.**
+Date: 2026-08-20 (second work session this date)
 
 ## Repo layout (important, non-obvious)
 `Unified_Audio.cpp/` is a **plain container directory with no git repo of its
@@ -14,237 +14,149 @@ own**. It holds exactly three things, each an independent repository:
 | Folder | Role |
 |---|---|
 | `speech.cpp/` | the active development repo (the ggml/audio.cpp fork). **All merge work, and this log, live here.** Remote: `NairoDorian/speech.cpp`, upstream `0xShug0/audio.cpp`. |
-| `audio.cpp/` | upstream reference — read from, not developed in |
+| `audio.cpp/` | upstream reference — read from, not developed in. This session it also served as the **discriminating experiment host**: same test + same fixtures built against the fork ggml on the same machine/compiler. |
 | `transcribe.cpp/` | merge source — read from, not developed in |
 
-History (2026-08-20): the container was briefly `git init`-ed as a superproject
-tracking the three as gitlinks, with `progress.md` and a duplicate
-`scripts/sync-ggml.sh` at its root. That was undone — the superproject `.git`,
-the root script and this log's old location are gone, and nothing outside the
-three repos is versioned. If you find a reference to a root-level
-`scripts/sync-ggml.sh`, it is stale: the canonical one is
-`speech.cpp/scripts/sync-ggml.sh`, which is the better implementation
-(`--dry-run`, `--check` before applying, staged swap) and is tracked.
+Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
+`sp_bridge` (CPU, full model set, unified ABI + arches, tests), `sp_cuda`
+(CUDA, core set), `audiocpp_flashsr` (audio.cpp reference build, new this
+session). `CMakePresets.json` now reproduces the first two as `cpu-full` /
+`cuda` (plus a `cpu-core` lean preset) for anyone without those dirs.
 
 ## Overall progress (toward "Unified_Audio transcribes on CPU")
 | Area | Status | % |
 |---|---|---|
 | Merge: ggerganov/ggml → bundled `external/ggml` (pin 8c63e709) + fork patches | Done | 100% |
-| Build host: green default-OFF **and** default-On-OpenMP (auto-detected) | Done | 100% |
-| Reproducibility (`sync-ggml.sh` + patches 0001–0005 → empty diff) | **Re-verified after a real break** | 100% |
-| **Phase-2: CPU compute for SAGE_ATTN2 / CONVROT_LINEAR / MUL_MAT_PACK4** | Implemented + numerically validated + patch-tracked | 100% |
-| **CUDA parity run for the same three ops** | **Executed on RTX 4070 / CUDA 13.3** | **100%** |
-| **Convergence build certified on a GPU backend (R1 step 2, GPU half)** | **Done** | **100%** |
-| Fork-delta audit (behavioural relaxations, not just API drift) | **Done — marker-based, 3 found** | 100% |
-| Lean-build health (`AUDIOCPP_MODEL_SET` != full with tests ON) | **Fixed — was broken** | 100% |
-| ABI offline + streaming paths (`transcribe_open`/`run`/`full_text`, `stream_*`) | Verified, real CTest gates | 100% |
-| End-to-end **ASR** transcription validation (needs a real ASR model) | Blocked | 0% |
-| **Project-wide (functional CPU transcribe)** | | **~70%** |
+| Reproducibility (`sync-ggml.sh` + patches **0001–0006** → empty diff) | **Re-verified with 0006; script hardened vs CRLF patches** | 100% |
+| Phase-2 CPU compute + CUDA parity for the three fork-only ops | Done (prior sessions) | 100% |
+| Fork-delta audit | **Corrected: marker grep is necessary, NOT sufficient — 0004/0006 were unmarked. Numeric golden gates are the real audit.** | ongoing by construction |
+| ABI offline + streaming paths | Verified, real CTest gates | 100% |
+| **End-to-end ASR transcription validation (real model, real WER)** | **Done — 1.45% corpus WER through the C ABI** | **100%** |
+| `flashsr_utility_test` (was failing since the convergence) | **Root-caused + fixed (patch 0006), green on CPU and CUDA** | 100% |
+| **Project-wide (functional CPU transcribe)** | | **~85%** |
 
 ## DONE this session
 
-### 1. The CUDA parity run — executed, and it changed conclusions
-`ggml-cuda.lib` was already built from the prior session; linking
-`ggml_fork_ops_cpu_test` against it and running produced the first real
-CPU↔CUDA numbers for the three fork-only ops.
+### 1. End-to-end ASR validation — the top blocker, closed
+`tests/asr_e2e_wer_test.cpp` + CTest gate `asr_e2e_wer_test`: loads a real
+GGUF through `transcribe_open()`, transcribes the four in-tree LibriSpeech
+fixtures, scores **corpus WER** against the references with LibriSpeech-style
+normalization, and gates at 10%. Links ONLY `transcribe.dll`, like a language
+binding. Model: **moonshine-tiny Q8_0** (34 MB, MIT, arch already in
+`src/runtime/arch/moonshine`, transcribe.cpp-validated at 4.60% on the full
+test-clean split), sha256-pinned by the new stdlib-only
+`scripts/fetch_asr_test_model.py` into gitignored `models/`; the test skips
+(exit 2) while the file is absent, so the gate arms itself on fetch with no
+reconfigure.
 
-Five checks failed on the first run. **All five were tolerance-model bugs, not
-kernel bugs**, and each cause was verified in the CUDA sources rather than
-assumed:
+Measured (CPU, i9-13900H, clang-cl Release): **corpus WER 1.45%** — 1 edit in
+69 words (`FORWARDED`→`VOTED`, consistent with the model's published 4.6%),
+RTF 0.033. Report: `docs/reports/asr_e2e_wer_gate.md`. The WAV reader moved
+to header-only `tests/abi_test_wav.h`, shared with `abi_stream_hello`.
 
-- `sage_attn2` and `convrot_linear` were being held to the *CPU reference*
-  tolerances. The CPU kernels deliberately keep activations in F32; the CUDA
-  kernels quantize them — INT8 Q·Kᵀ with FP8 PV
-  (`sage-attn2/qattn/qk_int_sv_f8_cuda_sm89.cuh`) and per-token INT8 by
-  `max_abs/127` (`convrot-linear.cu:112`). Judging a quantizing kernel by a
-  reference kernel's max-abs bound measures the quantizer.
-- `mul_mat_pack4` CPU↔CUDA differed by 6.9e-4 against a 1e-4 bound. Cause:
-  ggml-cuda sets `CUBLAS_TF32_TENSOR_OP_MATH` on every cuBLAS handle
-  (`common.cuh:1502`), so an F32 GEMM there runs on TF32 tensor cores — a
-  10-bit mantissa.
+Offline moonshine reports `supports_streaming == false`, so `abi_stream_hello`
+correctly skips it (streaming stays validated via silero_vad segments); the
+gap that remains is streaming *text* (see NEXT).
 
-The test now carries two tolerance classes (exact-activation vs
-quantized-activation), reports max-abs **and** normalized RMS for every
-comparison, and — the useful part — cross-checks plain `mul_mat` alongside
-`pack4` and asserts the two cross-backend deltas are **equal**. They are, to
-1e-9: both are 6.938e-04. That turns a loosened bound into a real statement,
-namely that the pack4 wrapper contributes nothing of its own.
+### 2. `flashsr_utility_test` — not a tolerance problem: the 4th dropped fork delta
+progress' previous NEXT #3 said "worth a look on its own terms". The look:
 
-Measured CPU↔CUDA (RTX 4070, sm_89, CUDA 13.3), normalized RMS:
-sage_attn2 3.7e-2 / 3.5e-2, convrot_linear 7.4e-3 / 7.8e-3, mul_mat 6.9e-4.
-All consistent with the published SageAttention2 and INT8 error levels.
+- The failure (1.7e-3 max vs a 2e-4 bound) is **identical on CPU and CUDA** —
+  the signature of a backend-independent graph-builder delta, not a kernel bug.
+- The fixtures are onnxruntime-generated (implementation-independent truth)
+  and byte-identical in both trees; the same test **built from audio.cpp's
+  fork ggml passes on this machine and compiler**. That was the discriminating
+  experiment (`audiocpp_flashsr` build).
+- Cause: upstream 0.20.2's `ggml_conv_1d` / `ggml_conv_1d_dw` / `ggml_conv_2d`
+  force im2col activations to **F16** unless the weight is BF16; the fork
+  keeps them in the **weight's type**. Every framework conv weight is F32, so
+  the convergence silently demoted every framework convolution to F16
+  activations.
+- Restored as `patches/ggml/0006-conv-im2col-in-weight-type.patch`, tagged
+  `MINITTS_CONV_IM2COL_WEIGHT_TYPE` (the fork left it UNMARKED — see §4).
+  `ggml_conv_2d_dw` deliberately untouched: the fork kept upstream's F16 there.
+- After the restore: `flashsr_utility_test` green on **both** backends for the
+  first time since the convergence; the WER gate unchanged at 1.45%; no other
+  test moved on either suite.
 
-### 2. Two more lost fork deltas — found cheaply, by grepping for markers
-The prior session found the two-sided-broadcast loss via a crashing test and
-noted this class "has no new symbol to grep for". That is true of the *upstream*
-tree but not of the fork: audio.cpp tags its own ggml deltas with `MINITTS_*`
-markers. Grepping `audio.cpp/external/ggml` for them enumerates the class in
-one command, and should be the first step on any future fork base:
+### 3. Reproducibility re-verified with 0006 — after a self-inflicted scare
+The first `sync-ggml.sh` run died applying 0006. The patch was correct; the
+freshly-written *file* carried CRs in its hunk lines, which cannot match the
+LF stage (`git archive` honors `eol=lf`). Re-materializing the file from the
+index fixed it, and `scripts/sync-ggml.sh` now normalizes every patch to LF
+before applying so the trap is closed for the next author. Final state:
+sync + 0001–0006 → `git diff --ignore-cr-at-eol -- external/ggml` **empty**
+(the plain-diff "13 paths" remain the documented CRLF-only Windows artifact).
 
-| Marker | What | Status |
-|---|---|---|
-| `MINITTS_FLASH_BIAS_WRAPPER` | `ggml_flash_attn_ext_with_bias_mask` | already converged (patch 0002) |
-| `MINITTS_CONCAT_FASTPATH` | contiguous concat fast paths on CPU | **was dropped → patch 0005** |
-| `MINITTS_FLASH_PER_HEAD_MASK` | per-head flash-attention masks on CUDA | **was dropped → deliberately not restored, see §3** |
+### 4. The audit doctrine is corrected (plan R11)
+R10 claimed the `MINITTS_*` grep "enumerates the class" of behavioural fork
+deltas. **It does not**: 0004 (two-sided broadcast) and 0006 (conv im2col
+type) both carried no marker. What actually catches the unmarked class:
+numeric golden gates whose references are implementation-independent
+(onnxruntime fixtures caught 0006; the WER gate now guards ASR the same way),
+and a hunk-level diff of the fork tree against its own upstream base. Recorded
+in `external/ggml/UPSTREAM` and plan R11.
 
-Also confirmed: audio.cpp's ggml history has only 14 commits touching
-`external/ggml`, and none of them touch `binary-ops.cpp` — so the deltas of this
-class live in the *initial* vendored drop, which is why a commit-by-commit read
-of the fork's history misses them.
-
-**`MINITTS_CONCAT_FASTPATH` was not cosmetic.** Upstream still walks concat
-element-by-element ("TODO: smarter multi-theading"); the fork copies contiguous
-planes/rows with two memcpys. The framework concatenates per-head attention
-outputs in a loop, and restoring the fast path is what put
-`supertonic_vector_convnext_exp_test` — which asserts a ≥5% speedup — back in
-the green.
-
-### 3. A dropped delta that must NOT be restored — and the right fix instead
-`MINITTS_FLASH_PER_HEAD_MASK` looked like a straightforward port: upstream
-0.20.2 refuses any mask with `ne[2] != 1`
-(`ggml_cuda_get_best_fattn_kernel` → `BEST_FATTN_KERNEL_NONE`), which made
-`encoder_module_test` abort at `fattn.cu` on the CUDA build, while all three
-CUDA kernels already index the mask per head as `nb32*(head % ne32)`.
-
-Porting it removed the abort — and produced **wrong numbers**. A new test case
-pins it: with a per-head bias mask, the CUDA output matches a reference forced
-to use *bias slice 0 for every head* to within 4.9e-4 (exactly the F16 floor
-measured on the shared-mask control) while diverging from the true per-head
-reference by 9.1e-2. It reproduces with `gqa_ratio == 1`, so head-grouping is
-not the cause: **ggml 0.20.2's CUDA flash-attention simply does not implement
-per-head masks**, and upstream's blanket refusal is load-bearing.
-
-So the ggml patch was reverted and the decision moved one level up:
-`use_specialized_flash_attention()` in
-`src/framework/modules/attention/common_relative_attention.cpp` now keeps that
-lowering on CPU and falls through to the reference lowering elsewhere — the
-same shape as the existing `ggml_backend_supports_op` probe in
-`minimax_h3/dit_denoiser.cpp`.
-
-This is an accuracy **win**, not a workaround. Against the F32 reference, the
-CUDA relative-attention output improved from 3.2e-3 max / 8.0e-4 mean to
-**8.1e-6 / 1.3e-6** — roughly 390x — because the fallback also avoids the CUDA
-flash kernels' conversion of F32 K/V to F16. The test's CUDA bounds were
-tightened to ~10x the measured values so that silently re-enabling the flash
-path fails loudly.
-
-**`encoder_module_test` had a second bug of its own:** it never set
-`ctx.backend_type`, which production populates from
-`execution_context.backend_type()`. Its "cuda" case was therefore building
-CPU-configured graphs and merely running them on a CUDA device — so every
-`ctx.backend_type == Cuda` branch in the framework was untested by it. Fixed in
-`set_runner_backend`, and the two hand-rolled runner setups now go through it.
-
-### 4. The `patches/ggml/` invariant had actually been broken
-`external/ggml` is generated and the UPSTREAM manifest warns that anything added
-by hand is deleted on the next `sync-ggml.sh` run. Commit `e11e3c5` (the
-two-sided broadcast restore: `binary-ops.cpp`, `ops.cpp`, `binbcast.cu`,
-`scale.cu`) was applied **in place and never tracked as a patch** — the next
-sync would have silently deleted it. That is exactly the failure mode the
-manifest describes, and it had already happened.
-
-Now tracked as `patches/ggml/0004-restore-two-sided-broadcast.patch`, with the
-concat fast path as `0005-cpu-concat-fastpath.patch`. Both were generated by
-regenerating a pristine tree and diffing against staged intermediates, so the
-split is exact rather than hand-authored. Re-verified end to end:
-`sync-ggml.sh` + patches 0001–0005 reproduces the tree with an **empty diff**.
-
-Two further traps in the same area, both found rather than assumed:
-
-- **`.gitignore` had `/patches/` ignored wholesale.** Patches 0001–0003 are in
-  the tree only because someone force-added them, so `git add` on a new patch was
-  *silently a no-op* — the same failure mode one level up. Narrowed to
-  `/patches/*` + `!/patches/ggml/`; the directory form cannot be negated, because
-  git does not descend into an excluded directory.
-- **`scripts/sync-ggml.sh` destroyed the UPSTREAM notes.** Only the header
-  (repo/sha/patch list) is generated; everything below it is hand-written — the
-  audit recipe, the per-op status, the deliberately-not-restored decision. The
-  script regenerated the whole file, so one sync deleted 91 lines of exactly the
-  knowledge a sync exists to carry forward. It now carries those notes over.
-  Found by running the script rather than reading it, and only because the root
-  container's *duplicate* copy (which did preserve them) was about to be deleted
-  — the two copies had silently diverged, and the surviving one was the lossy one.
-
-### 5. Lean builds were broken with `ENGINE_BUILD_TESTS=ON`
-`AUDIOCPP_MODEL_SET=core` links **no** models at all, but 11 test targets
-reference model-internal symbols unconditionally, so any lean build failed at
-link. This matters because lean configs are the fast-iteration path.
-
-Gated each on its owning model, following the `vibevoice` precedent already in
-the file: `moss` (4 targets), `dots_tts`, `inflect_v2`, `voxtral_realtime`,
-`supertonic`, `outetts`, `qwen3_forced_aligner`, `citrinet_asr` + `hviske_asr`,
-`parakeet_tdt`. The lean CUDA build now links clean with zero failures.
-
-### 6. `ggml_flash_attn_ext_with_bias_mask` gained numerical coverage
-Of the six converged fork-only APIs, the wrapper had none — the manifest listed
-it as "CPU-functional", which meant "it links". It now has an independent
-reference (softmax over `scale*(QK + bias)`, with the bias read back through F16
-so the mask's own rounding is not counted as kernel error), covering both a
-per-head and a shared mask, plus the "does NOT collapse to bias slice N" guard
-described in §3.
+### 5. Quality-of-life
+- `CMakePresets.json`: `cpu-full` / `cpu-core` / `cuda` configure+build+test
+  presets matching the validated configurations (closes a LEFT-TO-DO item).
+- Fetch-script convention: `uv run scripts/fetch_asr_test_model.py` (uv is
+  the Python runner on this machine; the script is stdlib-only so any
+  Python 3 works).
 
 ## Test suite state
-Both backends sit at the documented pre-existing baseline; nothing regressed.
+Both backends moved one test greener than the documented baseline; nothing
+else changed.
 
-**CUDA build** (`AUDIOCPP_MODEL_SET=core`, `ENGINE_ENABLE_CUDA=ON`, sm_89) —
-46 tests, 4 failures, all pre-existing environment/asset issues:
-`flashsr_utility_test` (numeric tolerance), `model_spec_system_test`,
-`fun_asr_nano_assets_test`, `server_model_installer_test`.
-Newly green here: **`scaled_dot_product_attention_test`** (needs a CUDA backend
-— it had never run), `encoder_module_test`, `supertonic_vector_convnext_exp_test`.
+**CPU build** (`sp_bridge`: full set, unified ABI + arches) — **57 tests**
+(56 + the new WER gate), 5 failures, all pre-existing environment/asset
+issues: `model_spec_system_test`, `fun_asr_nano_assets_test`,
+`scaled_dot_product_attention_test` (needs CUDA, absent here),
+`asr_standalone_gguf_test` (needs citrinet+hviske assets),
+`server_model_installer_test`. Newly green: **`asr_e2e_wer_test`**,
+**`flashsr_utility_test`**.
 
-**CPU build** (`AUDIOCPP_MODEL_SET=full`, unified ABI + transcribe arches) —
-56 tests, 6 failures, all pre-existing: the four above plus
-`scaled_dot_product_attention_test` (needs CUDA, absent from this build) and
-`asr_standalone_gguf_test` (missing assets).
-
-Note: `supertonic_vector_convnext_exp_test` asserts a ≥5% wall-clock speedup and
-does fail when another build or test suite is running on the machine. Run it
-uncontended.
+**CUDA build** (`sp_cuda`: core set, sm_89) — 46 tests, **3 failures** (was
+4): the same `model_spec_system_test`, `fun_asr_nano_assets_test`,
+`server_model_installer_test`. Newly green: **`flashsr_utility_test`**.
 
 ## NEXT (highest value first)
-1. **End-to-end ASR validation** — now the top blocker with no workaround. No
-   ggml/GGUF ASR model is in-tree; only the silero_vad safetensors.
-   `abi_bridge_hello` / `abi_stream_hello` already accept a model path and would
-   become real transcription gates (today they exercise VAD segments, not text),
-   and `assets/asr_validation/librispeech/*.txt` is ready for WER scoring.
-2. **Re-run the marker sweep against any future ggml base.**
-   `grep -rn "MINITTS_" audio.cpp/external/ggml/{src,include}` is the whole
-   audit; it took one command to find what a function-level API inventory
-   missed twice. Recorded in `external/ggml/UPSTREAM`.
-3. **`flashsr_utility_test`** fails identically on CPU and CUDA
-   (max_diff 1.7e-3, mean 3.3e-4 vs its bound) — listed as "missing assets" in
-   the previous log, but it is actually a numeric-tolerance failure and worth a
-   look on its own terms.
-4. **Consider a per-head-mask CUDA kernel fix upstream.** The framework fallback
-   is correct and currently faster/more accurate, so this is optional — but if
-   ggml ever fixes `nb32` indexing in its flash kernels, the CPU-only gate in
-   `common_relative_attention.cpp` should be revisited against measurements.
+1. **Streaming ASR text validation.** The streaming surface is exercised only
+   against silero_vad segments. `src/runtime/arch/moonshine_streaming` exists;
+   find/pin a small streaming-family GGUF (moonshine-streaming-tiny would be
+   ideal if published) and extend the gate — or run `abi_stream_hello`'s
+   model through a streaming arch and compare streamed text to offline text.
+2. **`fun_asr_nano_assets_test` / `model_spec_system_test` /
+   `server_model_installer_test`** — the three failures shared by both
+   backends. Filed as "environment/asset issues" for three sessions now;
+   after this session's flashsr lesson ("missing assets" turned out to be a
+   real numeric regression), each deserves one honest look.
+3. **`asr_standalone_gguf_test`** — needs citrinet_asr + hviske_asr GGUFs;
+   both families have model_specs. Same download-and-pin pattern as the WER
+   gate would make it a real gate too.
+4. **Appendix I build matrix presets** — `cpu-core` preset exists now; wire
+   the lean-build row into whatever CI lands (plan R10.5 wants "lean set +
+   tests ON" first-class).
 
 ## LEFT TO DO (small)
-- [ ] Optionally add `CMakePresets.json` (clang + default-On OpenMP one-command).
 - [ ] Formalize root `.gitmodules` so `git submodule update` works for the 3 embedded repos.
-- [ ] `LNK4217` warnings: the arch static libs see `TRANSCRIBE_API` as
-      `dllimport` for symbols defined in the same DLL. Benign but noisy.
-- [ ] `external/ggml` has 1145 of 2163 files with CRLF blobs while
-      `.gitattributes` declares `* text=auto eol=lf`. Left alone deliberately —
-      renormalizing is a 1145-file sweep, and `sync-ggml.sh` currently matches
-      the committed state on Windows. It does mean the *checkout* step is
-      platform-dependent; a Linux run would produce LF and a large diff.
-- [ ] The testing-infrastructure port from the prior session
-      (`tests/lint_teardown.cmake`, `tests/check_extension_umbrella.cmake`,
-      `tests/golden/`, `tests/tolerances/`, `scripts/dump_reference_silero_vad.py`)
-      is still untracked/uncommitted alongside this session's work.
+- [ ] `LNK4217` warnings: arch static libs see `TRANSCRIBE_API` as `dllimport`
+      for same-DLL symbols. Benign but noisy.
+- [ ] `external/ggml` mixed line endings (1145 CRLF blobs vs `eol=lf`):
+      unchanged posture — leave alone; sync matches committed state on
+      Windows; a Linux run would produce LF + a large diff.
+- [x] ~~CMakePresets.json~~ (this session)
 
 ## Notes / decisions made this session
-- Tolerances are a property of *what a kernel computes*, not of which backend
-  runs it. The fork-op test now names its two classes explicitly rather than
-  branching on the backend name, so a future exact-activation GPU kernel gets
-  held to the reference bounds and passes them.
-- When a bound has to be loosened, prefer adding a second measurement that
-  makes the loosening falsifiable — the `pack4 == plain mul_mat` cross-backend
-  equality is worth more than the 5e-3 bound it sits behind.
-- The convergence's remaining risk is no longer API drift. Both remaining
-  classes are behavioural: fork relaxations that were dropped (findable via
-  `MINITTS_*`), and upstream restrictions that are *correct* and must be
-  respected in the framework rather than patched away in ggml (§3).
+- A failure that is *identical* on CPU and CUDA is prior evidence for a
+  backend-independent (graph-builder or weights-path) cause — that heuristic
+  found patch 0006 and is cheap to apply to any future numeric mystery.
+- "Missing assets" is not a diagnosis. Two of this repo's long-standing
+  "asset" failures have now turned out to be something else entirely
+  (flashsr: a real regression; the WER gap: an unfetched-by-design model).
+- Golden fixtures are only as good as their reference's independence:
+  onnxruntime fixtures caught what per-op CPU↔CUDA parity could not, because
+  both backends inherited the same builder delta.
+- The model-pinning pattern (sha256-pinned fetch script + gitignored
+  `models/` + skip-not-fail test registration) is now established twice
+  (silero_vad, moonshine); reuse it for citrinet/hviske (NEXT #3).
