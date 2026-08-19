@@ -88,9 +88,20 @@ the people already helping shape the project.
 ## News
 
 > [!IMPORTANT]
-> **2026-08-18:** speech.cpp is forked from audio.cpp upstream `main` and is
-> beginning the integration of transcribe.cpp's STT families. The v0.0.1-dev
-> release aligns with audio.cpp 0.6 upstream.
+> **2026-08-18:** `speech.cpp` is forked from `audio.cpp` upstream `main` and is
+> beginning the incremental, one-file-at-a-time absorption of `transcribe.cpp`.
+> This v0.0.1-dev release tracks the `audio.cpp` 0.6.1 baseline.
+>
+> **2026-08-18 - Release 0.6.1** (audio.cpp baseline): This update adds MiniMax
+> Music 3 docs, DotTTS Edit docs, ACE-Step 1.5 XL notes, and WebUI/Docker launch
+> guidance, bringing audio.cpp to **50** total model families and **70+** model
+> variants.
+>
+> **2026-08-13 - Release 0.6** (audio.cpp baseline): This release adds **5** new
+> model families - DotTTS, NeuTTS, MuScriptor, MiniMax-H3, and SenseVoice -
+> bringing audio.cpp to **49** total model families and **70+** model variants,
+> alongside the new native WebUI from [@mirek190](https://github.com/mirek190),
+> expanded GGUF packaging, and more shared framework runtime pieces.
 >
 
 ---
@@ -122,12 +133,12 @@ model download. `Stream` means the family exposes a streaming server/session pat
 
 | Family | Task | Lang | Variants | Runtime |
 |---|---|---|---|---|
-| **ace_step** | Music, Edit | 50+ langs | ACE-Step 1.5 Turbo and Base with acestep-5Hz-lm-1.7B | GGUF 16 |
+| **ace_step** | Music, Edit | 50+ langs | ACE-Step 1.5 Turbo/Base and XL Turbo/SFT with acestep-5Hz-lm-1.7B | GGUF 16 |
 | **bs_roformer** | Sep | lang agnostic | BS-RoFormer vocal separation checkpoints | GGUF Q8 |
 | **chatterbox** | TTS, Clone, VC| ar, da, de, el, en, es, fi, fr, hi, it, ko, ms, nl, no, pl, pt, sv, sw, tr | Chatterbox with 0.5B backbone | GGUF 16/Q8 |
 | **confucius4_tts** | Clone | zh, en, ja, ko, de, fr, es, id, it, th, pt, ru, ms, vi | Confucius4-TTS multilingual voice cloning | GGUF F32, Stream |
 | **citrinet_asr** | ASR | en | Citrinet-256 | GGUF Q8 |
-| **dots_tts** | TTS, Clone, Ctrl | multilingual | DotTTS SOAR and MeanFlow | GGUF 16/Q8, Stream |
+| **dots_tts** | TTS, Clone, Edit, Ctrl | multilingual | DotTTS SOAR, MeanFlow, and Edit | GGUF 16/Q8, Stream |
 | **dramabox** | TTS, Clone | en | DramaBox expressive TTS and voice cloning | GGUF Q8 |
 | **fish_audio** | TTS, Clone, Ctrl | auto, en, zh | Fish Audio S2 Pro | GGUF 16/Q8 |
 | **fun_asr_nano** | ASR | auto, zh, en, ja | Fun-ASR-Nano-2512 | GGUF 16/Q8 |
@@ -139,6 +150,7 @@ model download. `Stream` means the family exposes a streaming server/session pat
 | **marblenet_vad** | VAD | lang agnostic | MarbleNet VAD | Bundled |
 | **mel_band_roformer** | Sep | lang agnostic | Mel-Band RoFormer MLX vocal separation variants | GGUF 16/Q8 |
 | **minimax_h3** | Video, Music, TTS/Dialogue | auto | MiniMax-H3 Q4_K with optional INT8 ConvRot DiT | GGUF Q4/INT8 |
+| **minimax_music3** | Music | auto | MiniMax Music 3 text-to-music generation with lyrics conditioning | GGUF Q4/Q8 |
 | **miocodec** | Codec, VC | lang agnostic | MioCodec v2, 25 Hz, 44.1 kHz | GGUF 16/Q8 |
 | **miotts** | TTS, Clone | en, ja | MioTTS-1.7B | GGUF 16/Q8 |
 | **muscriptor** | MIDI | music | MuScriptor Small audio-to-symbolic transcription | GGUF F32, Stream |
@@ -228,6 +240,7 @@ community-model expectations and current entries.
 | **inflect_v2** | TTS | en | GGUF FP32 | [@JanWerder](https://github.com/JanWerder) | [Inflect Micro v2 and Nano v2](docs/community_models/inflect_v2.md) native offline synthesis |
 | **kroko_asr** | ASR | de, en, es, fr, it, he, nl, pt, sv, tr | Safetensors, GGUF Q8 | [@mirek190](https://github.com/mirek190) | [Kroko Community ASR](docs/community_models/kroko_asr.md) native offline/streaming Zipformer2/RNN-T transcription with word timestamps |
 | **minimax_h3** | Video, Music, TTS/Dialogue | auto | GGUF Q4/INT8 | [@0xShug0](https://github.com/0xShug0) | [MiniMax-H3](docs/community_models/minimax_h3.md) text-to-audio/video generation with Q4_K and optional INT8 ConvRot DiT |
+| **minimax_music3** | Music | auto | GGUF Q4/Q8 | [@0xShug0](https://github.com/0xShug0) | [MiniMax Music 3](docs/community_models/minimax_music3.md) text-to-music generation with lyrics conditioning |
 | **moss_tts_local** | TTS, Clone, Ctrl | auto, optional language hint | GGUF | [@justinjohn0306](https://github.com/justinjohn0306) | MOSS-TTS-Local Transformer v1.5 support |
 | **outetts** | TTS, Clone | en, ar, zh, nl, fr, de, it, ja, ko, lt, ru, es, pt, be, bn, ka, hu, lv, fa, pl, sw, ta, uk | GGUF | [@mirek190](https://github.com/mirek190) | Llama-OuteTTS-1.0-1B TTS and voice cloning support |
 | **parakeet_tdt** | ASR | auto, bg, cs, da, de, el, en, es, et, fi, fr, hr, hu, it, lt, lv, mt, nl, pl, pt, ro, ru, sk, sl, sv, uk | GGUF F32/16/Q8, Stream | [@dleiferives](https://github.com/dleiferives) | [Parakeet-TDT 0.6B v3](docs/community_models/parakeet_tdt.md) offline, long-form, and buffered-streaming ASR support |
@@ -274,15 +287,15 @@ and alignment workflows. The production UI is compiled into the server binary, s
 using it requires neither Python nor separate frontend files:
 
 ```bash
-audiocpp_server --ui --backend cuda
+audiocpp_server --ui --ui-management --backend cuda
 ```
 
-Open `http://127.0.0.1:8080`. Starting with `--ui` and no server config enables
-on-demand model load/unload and temporary browser uploads. Existing static server
-configurations also expose the UI by default; in that mode the UI only offers
-models declared by the server config. Add `--ui-management` when that instance
-should permit catalog browsing, downloads, temporary uploads, and dynamic model
-switching.
+Open `http://127.0.0.1:8080`. For the easiest path, start with `--ui-management`
+and no server config; this enables on-demand model load/unload, temporary browser
+uploads, catalog browsing, downloads, and dynamic model switching without writing
+a config file first. For a locked-down instance, start with `--ui` and a server
+config instead; the UI then only offers models declared by the config unless
+management is enabled.
 
 The native UI also exposes background model download/preparation, long-text
 split-and-merge synthesis, a browser-local saved voice library, microphone
