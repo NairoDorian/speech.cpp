@@ -174,11 +174,12 @@ if (ENGINE_ENABLE_CUDA AND NOT ENGINE_ENABLE_HIP)
     endif()
 endif()
 if (ENGINE_ENABLE_OPENMP)
-    # Auto-resolve LLVM libomp on Clang/Windows: CMake's FindOpenMP does not
-    # auto-detect clang's OpenMP on Windows, which otherwise makes a plain
-    # `cmake -B build` fail (find_package OpenMP REQUIRED is not satisfied).
-    # MSVC and Linux/clang-on-Linux are unaffected (auto-detected by FindOpenMP).
-    if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND NOT MSVC)
+    # Auto-resolve LLVM libomp on Clang/Windows — covers both `clang++` (ID "Clang")
+    # and `clang-cl` (ID "ClangCl"). CMake's FindOpenMP does not auto-detect clang's
+    # OpenMP on Windows, so a plain `cmake -B build` would otherwise fail
+    # (find_package OpenMP REQUIRED is not satisfied). MSVC and Linux/clang-on-Linux
+    # are unaffected (auto-detected by FindOpenMP).
+    if ((CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "ClangCl") AND NOT MSVC)
         get_filename_component(_AUDIOCPP_LLVM_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
         get_filename_component(_AUDIOCPP_LLVM_ROOT "${_AUDIOCPP_LLVM_BIN_DIR}" DIRECTORY)
         if (EXISTS "${_AUDIOCPP_LLVM_ROOT}/lib/libomp.lib")
@@ -189,6 +190,12 @@ if (ENGINE_ENABLE_OPENMP)
             set(OpenMP_C_LIB_NAMES "libomp" CACHE STRING "OpenMP C lib names" FORCE)
             set(OpenMP_libomp_LIBRARY "${_AUDIOCPP_LLVM_ROOT}/lib/libomp.lib" CACHE FILEPATH "libomp library" FORCE)
             set(OpenMP_libomp_C_LIBRARY "${_AUDIOCPP_LLVM_ROOT}/lib/libomp.lib" CACHE FILEPATH "libomp C library" FORCE)
+            if (EXISTS "${_AUDIOCPP_LLVM_ROOT}/bin/libomp.dll")
+                message(STATUS "OpenMP: remember ${_AUDIOCPP_LLVM_ROOT}/bin must be on PATH at run time (libomp.dll)")
+            endif()
+        else()
+            message(WARNING "OpenMP: enabled, but LLVM libomp not found under ${_AUDIOCPP_LLVM_ROOT}; "
+                            "pass -DOpenMP_CXX_FLAGS/-DOpenMP_libomp_LIBRARY manually or use -DENGINE_ENABLE_OPENMP=OFF")
         endif()
     endif()
     find_package(OpenMP REQUIRED COMPONENTS CXX)
