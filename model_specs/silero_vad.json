@@ -1,0 +1,67 @@
+{
+  "family": "silero_vad",
+  "display_name": "Silero VAD",
+  "description": "Silero Voice Activity Detection (VAD) - a 4-layer CNN + decoder-head VAD model for speech/silence detection in 16kHz audio.",
+  "category": "vad",
+  "status": "supported",
+  "tasks": [
+    "vad"
+  ],
+  "modes": [
+    "offline",
+    "streaming"
+  ],
+  "languages": [
+    "multi"
+  ],
+  "capabilities": {},
+  "runtime": {
+    "tags": [
+      "safetensors"
+    ],
+    "version": "v6.2",
+    "version_source": "Silero VAD upstream release family (snakers4/silero-vad tag v6.2, GitHub)",
+    "source_url": "https://github.com/snakers4/silero-vad",
+    "frame_ms": 30,
+    "sample_rate": 16000,
+    "engine_note": "Engine runtime (src/models/silero_vad/runtime.cpp) loads safetensors with tinygrad-style keys (stft_conv.weight, conv1.weight, ..., lstm_cell.weight_ih/hh, ..., final_conv.bias). Bundled safetensors generated from the official v6.2 jit checkpoint (silero_vad_v62.jit) via scripts/fetch_silero_vad.py. NOTE: upstream tinygrad safetensors (silero_vad_16k.safetensors on snakers4 master, added 2025-12-10) is a divergent export that does NOT match v6.2 jit weights (see snakers4/silero-vad issue #768); the bundled asset must stay the generated v6.2 one."
+  },
+  "ui": {
+    "recommended_package": "silero_vad_16k",
+    "tags": [
+      "VAD"
+    ],
+    "docs": [
+      "docs/audio_tools.md"
+    ]
+  },
+  "packages": [
+    {
+      "id": "silero_vad_16k",
+      "display_name": "Silero VAD 16k",
+      "default": true,
+      "format": "safetensors",
+      "precision": "f32",
+      "target_directory": "silero_vad",
+      "files": [
+        "silero_vad_16k.safetensors"
+      ],
+      "strip_prefix": "silero_vad"
+    }
+  ],
+  "sources": [
+    {
+      "format": "safetensors",
+      "roots": {
+        "model": "."
+      },
+      "tensors": {
+        "weights": "model:silero_vad_16k.safetensors"
+      }
+    }
+  ],
+  "asset": {
+    "format": "safetensors",
+    "sha256": "D7FB67A5B4DE0414A0178270EE81439B9E3067C883C304AA758C247D50FFD79D"
+  }
+}
