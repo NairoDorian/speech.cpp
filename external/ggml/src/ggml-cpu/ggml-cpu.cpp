@@ -451,7 +451,29 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
                 op->type != GGML_TYPE_IQ1_S   &&
                 op->type != GGML_TYPE_IQ1_M; // missing type_traits.from_float
         case GGML_OP_MUL_MAT:
+        case GGML_OP_MUL_MAT_PACK4:
             return src1->type == GGML_TYPE_F32 || src1->type == ggml_get_type_traits_cpu(src0->type)->vec_dot_type;
+        // AudioCPP fork-only ops. Report the constraints the CPU kernels
+        // actually enforce, so an unsupported graph is rejected while the
+        // scheduler can still act on it rather than aborting mid-compute.
+        case GGML_OP_SAGE_ATTN2:
+            return src0->type == GGML_TYPE_F16 &&
+                   src1->type == GGML_TYPE_F16 &&
+                   op->src[2] && op->src[2]->type == GGML_TYPE_F16 &&
+                   op->type == GGML_TYPE_F16 &&
+                   (src0->ne[0] == 64 || src0->ne[0] == 128);
+        case GGML_OP_CONVROT_LINEAR:
+            return src0->type == GGML_TYPE_I8 &&
+                   src1->type == GGML_TYPE_F32 &&
+                   op->src[2] && op->src[2]->type == GGML_TYPE_F32 &&
+                   (op->src[3] == NULL || op->src[3]->type == GGML_TYPE_F32) &&
+                   op->type == GGML_TYPE_F32 &&
+                   ggml_is_contiguous(src0) &&
+                   ggml_is_contiguous(src1) &&
+                   ggml_is_contiguous(op->src[2]) &&
+                   (op->src[3] == NULL || ggml_is_contiguous(op->src[3])) &&
+                   ggml_get_op_params_i32(op, 0) == 256 &&
+                   src0->ne[0] % 256 == 0;
         case GGML_OP_SOFT_MAX_BACK: {
             if (op->src[0]->type != GGML_TYPE_F32 || op->src[1]->type != GGML_TYPE_F32) {
                 return false;

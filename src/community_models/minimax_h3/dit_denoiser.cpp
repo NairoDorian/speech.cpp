@@ -181,9 +181,6 @@ core::TensorValue dit_linear_projection(
         if (scale == nullptr) {
             throw std::runtime_error("MiniMax-H3 ConvRot INT8 tensor is missing scale: " + prefix + ".weight_scale");
         }
-        if (ctx.backend_type != core::BackendType::Cuda) {
-            throw std::runtime_error("MiniMax-H3 ConvRot INT8 DiT requires CUDA backend");
-        }
         core::validate_rank_between(x, 1, core::kMaxTensorRank, "input");
         core::validate_last_dim(x, in_features, "input");
         core::validate_shape(weight, core::TensorShape::from_dims({out_features, in_features}), "weight");
@@ -211,6 +208,15 @@ core::TensorValue dit_linear_projection(
             scale->tensor,
             bias_value == nullptr ? nullptr : bias_value->tensor,
             256);
+        // CUDA runs the fused rotate+INT8 kernel; CPU runs the reference kernel
+        // added with the ggml convergence. Ask the backend rather than testing
+        // for CUDA by name, so a backend that has neither reports it here
+        // instead of aborting inside the scheduler.
+        if (!ggml_backend_supports_op(weights.execution.backend(), raw)) {
+            throw std::runtime_error(
+                "MiniMax-H3 ConvRot INT8 DiT is not supported by the active backend "
+                "(needs CUDA sm_75+ or the CPU backend); use a non-INT8 checkpoint instead");
+        }
         auto projected = core::wrap_tensor(
             raw,
             core::TensorShape::from_dims({matrix_shape.at(0), out_features}),

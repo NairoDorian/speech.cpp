@@ -2036,6 +2036,18 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_flash_attn_ext(params, tensor);
             } break;
+        case GGML_OP_SAGE_ATTN2:
+            {
+                ggml_compute_forward_sage_attn2(params, tensor);
+            } break;
+        case GGML_OP_CONVROT_LINEAR:
+            {
+                ggml_compute_forward_convrot_linear(params, tensor);
+            } break;
+        case GGML_OP_MUL_MAT_PACK4:
+            {
+                ggml_compute_forward_mul_mat(params, tensor);
+            } break;
         case GGML_OP_FLASH_ATTN_BACK:
             {
                 int32_t t = ggml_get_op_params_i32(tensor, 0);
@@ -2363,8 +2375,11 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_GROUP_NORM:
         case GGML_OP_CONCAT:
         case GGML_OP_MUL_MAT:
+        case GGML_OP_MUL_MAT_PACK4:
         case GGML_OP_MUL_MAT_ID:
         case GGML_OP_OUT_PROD:
+        case GGML_OP_SAGE_ATTN2:
+        case GGML_OP_CONVROT_LINEAR:
             {
                 n_tasks = n_threads;
             } break;
@@ -2886,6 +2901,7 @@ struct ggml_cplan ggml_graph_plan(
                         cur = ggml_type_size(node->type)*n_tasks;
                     } break;
                 case GGML_OP_MUL_MAT:
+                case GGML_OP_MUL_MAT_PACK4:
                     {
                         const enum ggml_type vec_dot_type = type_traits_cpu[node->src[0]->type].vec_dot_type;
 
@@ -2999,6 +3015,20 @@ struct ggml_cplan ggml_graph_plan(
                         size_t decode   = sizeof(float)*(neq2*n_chunks*(2+DV) + n_tasks*(DK + 2*DV));
 
                         cur += MAX(prefill, decode);
+                    } break;
+                case GGML_OP_CONVROT_LINEAR:
+                    {
+                        // Per-thread workspace: the rotated activation row (k) +
+                        // radix-4 butterfly scratch (group_size).
+                        const int64_t k          = node->src[0]->ne[0];
+                        const int64_t group_size = ggml_get_op_params_i32(node, 0);
+                        cur += sizeof(float) * (k + group_size) * n_tasks;
+                    } break;
+                case GGML_OP_SAGE_ATTN2:
+                    {
+                        // Per-thread workspace: K * sizeof(float) for attention scores
+                        const int64_t K = node->src[1]->ne[1];
+                        cur += sizeof(float) * K * n_tasks;
                     } break;
                 case GGML_OP_FLASH_ATTN_BACK:
                     {

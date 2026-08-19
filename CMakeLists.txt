@@ -1822,6 +1822,18 @@ if (ENGINE_BUILD_TESTS)
         COMMAND audio_dsp_test
     )
 
+    # Numerical parity for the audio.cpp fork-only ggml ops that gained CPU
+    # kernels during the merge (SAGE_ATTN2, CONVROT_LINEAR, MUL_MAT_PACK4).
+    # Links ggml directly — no engine_runtime dependency, so it stays runnable
+    # in a minimal ggml-only configuration.
+    add_executable(ggml_fork_ops_cpu_test tests/unittests/test_ggml_fork_ops_cpu.cpp)
+    target_link_libraries(ggml_fork_ops_cpu_test PRIVATE ggml)
+
+    add_test(
+        NAME ggml_fork_ops_cpu_test
+        COMMAND ggml_fork_ops_cpu_test
+    )
+
     add_engine_unittest(dots_tts_vocoder_parity tests/dots_tts/dots_tts_vocoder_parity.cpp)
 
     add_engine_unittest(midi_file_test tests/unittests/test_midi_file.cpp)

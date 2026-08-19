@@ -12012,3 +12012,272 @@ void ggml_compute_forward_lightning_indexer(
         }
     }
 }
+
+// ============================================================================
+// Phase 0.L.6 — CPU compute forwards for audio.cpp fork-only ops
+// ============================================================================
+
+// SAGE_ATTN2: CPU reference (non-INT8) scaled dot-product attention with F16 I/O.
+//   Q: [D, N, HQ, NB] F16 | K: [D, K, HK, NB] F16 | V: [D, K, HK, NB] F16
+//   dst: [D, HQ, N, NB] F16 | op_params: [0]=scale(f32), [1]=causal(i32)
+void ggml_compute_forward_sage_attn2(const struct ggml_compute_params * params, struct ggml_tensor * dst) {
+    const struct ggml_tensor * q = dst->src[0];
+    const struct ggml_tensor * k = dst->src[1];
+    const struct ggml_tensor * v = dst->src[2];
+
+    GGML_TENSOR_LOCALS(int64_t, neq, q,   ne)
+    GGML_TENSOR_LOCALS(size_t,  nbq, q,   nb)
+    GGML_TENSOR_LOCALS(int64_t, nek, k,   ne)
+    GGML_TENSOR_LOCALS(size_t,  nbk, k,   nb)
+    GGML_TENSOR_LOCALS(int64_t, nev, v,   ne)
+    GGML_TENSOR_LOCALS(size_t,  nbv, v,   nb)
+    GGML_TENSOR_LOCALS(int64_t, ne,  dst, ne)
+    GGML_TENSOR_LOCALS(size_t,  nb,  dst, nb)
+
+    float scale;
+    memcpy(&scale, (const float *) dst->op_params + 0, sizeof(float));
+    const bool causal = ((const int32_t *) dst->op_params)[1] != 0;
+
+    const int64_t D  = neq0;  // head_dim
+    const int64_t N  = neq1;  // seq (queries)
+    const int64_t HQ = neq2;  // n_head
+    const int64_t NB = neq3;  // batch
+    const int64_t K  = nek1;  // seq_kv (keys)
+    const int64_t HK = nek2;  // n_head_kv
+
+    GGML_ASSERT(q->type == GGML_TYPE_F16);
+    GGML_ASSERT(k->type == GGML_TYPE_F16);
+    GGML_ASSERT(v->type == GGML_TYPE_F16);
+    GGML_ASSERT(dst->type == GGML_TYPE_F16);
+    GGML_ASSERT(neq0 == nek0);         // D == D
+    GGML_ASSERT(nev0 == nek0);         // DV == D
+    GGML_ASSERT(nek1 == nev1);         // K == K
+    GGML_ASSERT(nek2 == nev2);         // HK == HK
+    GGML_ASSERT(neq3 == nek3 && neq3 == nev3);
+    GGML_ASSERT(neq2 % nek2 == 0);     // HQ divisible by HK (GQA group)
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    // Split (batch * HQ * N) work items across threads
+    const int64_t total = NB * HQ * N;
+    const int64_t chunk = (total + nth - 1) / nth;
+    const int64_t start = (int64_t) ith * chunk;
+    const int64_t end   = (start + chunk > total) ? total : start + chunk;
+
+    // Per-thread workspace: K floats for attention scores
+    float * scores = (float *) ((char *) params->wdata + (size_t) ith * (size_t) K * sizeof(float));
+
+    for (int64_t idx = start; idx < end; idx++) {
+        const int64_t b     = idx / (HQ * N);
+        const int64_t rem   = idx % (HQ * N);
+        const int64_t h     = rem / N;
+        const int64_t q_pos = rem % N;
+
+        // Grouped-query attention: each KV head shared by HQ/HK query heads
+        const int64_t hk = (int64_t) h * HK / HQ;
+
+        // --- Compute attention scores: Q[d,q,h,b] @ K[d,k,hk,b] * scale ---
+        float max_score = -FLT_MAX;
+        for (int64_t ki = 0; ki < K; ki++) {
+            float s = 0.0f;
+            for (int64_t d = 0; d < D; d++) {
+                const ggml_fp16_t * qp = (const ggml_fp16_t *) ((const char *) q->data
+                    + d*nbq0 + q_pos*nbq1 + h*nbq2 + b*nbq3);
+                const ggml_fp16_t * kp = (const ggml_fp16_t *) ((const char *) k->data
+                    + d*nbk0 + ki*nbk1 + hk*nbk2 + b*nbk3);
+                s += GGML_CPU_FP16_TO_FP32(*qp) * GGML_CPU_FP16_TO_FP32(*kp);
+            }
+            s *= scale;
+            if (causal && q_pos < ki) {
+                s = -FLT_MAX;
+            }
+            scores[ki] = s;
+            if (s > max_score) max_score = s;
+        }
+
+        // --- Softmax (numerically stable) ---
+        float sum_exp = 0.0f;
+        for (int64_t ki = 0; ki < K; ki++) {
+            scores[ki] = expf(scores[ki] - max_score);
+            sum_exp += scores[ki];
+        }
+        if (sum_exp == 0.0f) {
+            // All scores were -INF; fall back to uniform distribution
+            for (int64_t ki = 0; ki < K; ki++) scores[ki] = 1.0f;
+            sum_exp = (float) K;
+        }
+        for (int64_t ki = 0; ki < K; ki++) {
+            scores[ki] /= sum_exp;
+        }
+
+        // --- Compute output: dst[d,h,q,b] = sum_k(softmax[k] * V[d,k,hk,b]) ---
+        for (int64_t d = 0; d < D; d++) {
+            float out = 0.0f;
+            for (int64_t ki = 0; ki < K; ki++) {
+                const ggml_fp16_t * vp = (const ggml_fp16_t *) ((const char *) v->data
+                    + d*nbv0 + ki*nbv1 + hk*nbv2 + b*nbv3);
+                out += scores[ki] * GGML_CPU_FP16_TO_FP32(*vp);
+            }
+            *(ggml_fp16_t *) ((char *) dst->data
+                + d*nb0 + h*nb1 + q_pos*nb2 + b*nb3) = GGML_CPU_FP32_TO_FP16(out);
+        }
+    }
+}
+
+// CONVROT_LINEAR: CPU reference for the rotated-INT8 linear layer.
+//
+//   weight_i8: [k, n] I8   (row j at data + j*k; stored ALREADY ROTATED)
+//   input:     [k, ...] F32 (contiguous; tokens = ne1*ne2*ne3)
+//   weight_scale: n F32 (per-output-feature)
+//   bias:      n F32 (nullable)
+//   dst:       [n, ...] F32
+//   op_params[0] = group_size (i32, must be 256)
+//
+// The "rot" in convrot is a QuaRot-style orthonormal rotation: the weights are
+// rotated offline, so the activations must be rotated online before the matmul
+// (R is orthonormal, so (W R^T)(R x) == W x). The CUDA kernel fuses that
+// rotation with a per-token INT8 activation quantization; this reference applies
+// the identical rotation but keeps the activations in F32 and dequantizes the
+// weight instead. That is strictly *more* accurate than the CUDA path (it drops
+// only the lossy activation quantization), which is what a golden reference
+// wants — CUDA is then validated against it within tolerance.
+//
+// The rotation is a 4-stage radix-4 butterfly over each contiguous group of 256
+// input features (4^4 == 256), each stage applying the orthonormal matrix
+//     [  1  1  1 -1 ]
+//     [  1  1 -1  1 ]  * 1/2
+//     [  1 -1  1  1 ]
+//     [ -1  1  1  1 ]
+// with strides 1, 4, 16, 64 — bit-for-bit the same sequence as
+// convrot_quantize_activation_fused_f32() in ggml-cuda/convrot-linear.cu.
+
+static inline float ggml_convrot_h4_row_dot(int d, float x0, float x1, float x2, float x3) {
+    switch (d) {
+        case 0:  return  x0 + x1 + x2 - x3;
+        case 1:  return  x0 + x1 - x2 + x3;
+        case 2:  return  x0 - x1 + x2 + x3;
+        default: return -x0 + x1 + x2 + x3;
+    }
+}
+
+// In-place rotation of one group of `group` (== 256) contiguous floats.
+// `tmp` is scratch of the same length.
+static void ggml_convrot_rotate_group(float * v, float * tmp, int group) {
+    float * src = v;
+    float * dst = tmp;
+    for (int stage = 0; stage < 4; ++stage) {
+        const int stride = stage == 0 ? 1 : stage == 1 ? 4 : stage == 2 ? 16 : 64;
+        for (int lane = 0; lane < group; ++lane) {
+            const int d          = (lane / stride) & 3;
+            const int local_base = lane - d * stride;
+            dst[lane] = 0.5f * ggml_convrot_h4_row_dot(
+                d,
+                src[local_base],
+                src[local_base + stride],
+                src[local_base + 2 * stride],
+                src[local_base + 3 * stride]);
+        }
+        float * next = src;
+        src = dst;
+        dst = next;
+    }
+    // 4 swaps starting from src == v leave the result back in v.
+    GGML_ASSERT(src == v);
+    GGML_UNUSED(src);
+}
+
+void ggml_compute_forward_convrot_linear(const struct ggml_compute_params * params, struct ggml_tensor * dst) {
+    const struct ggml_tensor * weight_i8    = dst->src[0];
+    const struct ggml_tensor * input        = dst->src[1];
+    const struct ggml_tensor * weight_scale = dst->src[2];
+    const struct ggml_tensor * bias         = dst->src[3];
+
+    const int32_t group_size = ggml_get_op_params_i32(dst, 0);
+
+    GGML_ASSERT(weight_i8->type == GGML_TYPE_I8);
+    GGML_ASSERT(input->type == GGML_TYPE_F32);
+    GGML_ASSERT(weight_scale->type == GGML_TYPE_F32);
+    GGML_ASSERT(bias == NULL || bias->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous(weight_i8));
+    GGML_ASSERT(ggml_is_contiguous(input));
+    GGML_ASSERT(ggml_is_contiguous(weight_scale));
+    GGML_ASSERT(bias == NULL || ggml_is_contiguous(bias));
+    GGML_ASSERT(weight_i8->ne[0] == input->ne[0]);
+    GGML_ASSERT(ggml_nelements(weight_scale) == weight_i8->ne[1]);
+    GGML_ASSERT(bias == NULL || bias->ne[0] == weight_i8->ne[1]);
+    GGML_ASSERT(group_size == 256);
+
+    const int64_t k        = weight_i8->ne[0];
+    const int64_t n        = weight_i8->ne[1];
+    const int64_t n_tokens = input->ne[1] * input->ne[2] * input->ne[3];
+
+    GGML_ASSERT(k % group_size == 0);
+    GGML_ASSERT(n_tokens > 0);
+    GGML_ASSERT(dst->ne[0] == n);
+    GGML_ASSERT(dst->ne[1] * dst->ne[2] * dst->ne[3] == n_tokens);
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    // Split output features across threads. The rotation of a token row is
+    // O(4k) against O(k*n) for its matmul, so recomputing it per thread costs
+    // ~nth/n of the work — negligible for the n >= 1024 layers this op targets,
+    // and it keeps the kernel barrier-free.
+    const int64_t n_per_task = (n + nth - 1) / nth;
+    const int64_t j_start    = (int64_t) ith * n_per_task;
+    const int64_t j_end      = MIN(j_start + n_per_task, n);
+
+    // Per-thread workspace: k floats for the rotated row + group_size scratch.
+    const size_t stride_wdata = (size_t) (k + group_size) * sizeof(float);
+    float * rot = (float *) ((char *) params->wdata + (size_t) ith * stride_wdata);
+    float * tmp = rot + k;
+
+    const int8_t * w = (const int8_t *) weight_i8->data;
+    const float  * s = (const float *)  weight_scale->data;
+    const float  * b = bias ? (const float *) bias->data : NULL;
+
+    const size_t nb_in1 = input->nb[1];
+    const size_t nb_in2 = input->nb[2];
+    const size_t nb_in3 = input->nb[3];
+    const size_t nb_d1  = dst->nb[1];
+    const size_t nb_d2  = dst->nb[2];
+    const size_t nb_d3  = dst->nb[3];
+
+    const int64_t n_in1 = input->ne[1];
+    const int64_t n_in2 = input->ne[2];
+
+    if (j_start >= j_end) {
+        return;
+    }
+
+    for (int64_t t = 0; t < n_tokens; ++t) {
+        const int64_t it1 = t % n_in1;
+        const int64_t it2 = (t / n_in1) % n_in2;
+        const int64_t it3 = t / (n_in1 * n_in2);
+
+        const float * x_row = (const float *) ((const char *) input->data
+            + it1*nb_in1 + it2*nb_in2 + it3*nb_in3);
+        float * o_row = (float *) ((char *) dst->data
+            + it1*nb_d1 + it2*nb_d2 + it3*nb_d3);
+
+        memcpy(rot, x_row, (size_t) k * sizeof(float));
+        for (int64_t g = 0; g < k; g += group_size) {
+            ggml_convrot_rotate_group(rot + g, tmp, group_size);
+        }
+
+        for (int64_t j = j_start; j < j_end; ++j) {
+            const int8_t * w_row = w + j * k;
+            float sum = 0.0f;
+            for (int64_t i = 0; i < k; ++i) {
+                sum += rot[i] * (float) w_row[i];
+            }
+            sum *= s[j];
+            if (b) {
+                sum += b[j];
+            }
+            o_row[j] = sum;
+        }
+    }
+}

@@ -872,11 +872,15 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
                 split_state = handle_per_row(src_ss);
             } break;
             case GGML_OP_MUL_MAT:
+            case GGML_OP_MUL_MAT_PACK4:
             case GGML_OP_MUL_MAT_ID: {
                 split_state = handle_mul_mat(src_ss);
             } break;
             case GGML_OP_OUT_PROD: {
                 split_state = handle_generic(src_ss, /*scalar_only =*/ true);
+            } break;
+            case GGML_OP_CONVROT_LINEAR: {
+                split_state = handle_generic(src_ss, /*scalar_only =*/ false);
             } break;
             case GGML_OP_SCALE: {
                 split_state = handle_generic(src_ss, /*scalar_only =*/ false);
@@ -965,6 +969,9 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             } break;
             case GGML_OP_FLASH_ATTN_EXT: {
                 split_state = handle_flash_attn_ext(src_ss);
+            } break;
+            case GGML_OP_SAGE_ATTN2: {
+                split_state = handle_generic(src_ss, /*scalar_only =*/ false);
             } break;
             case GGML_OP_FLASH_ATTN_BACK: {
                 split_state = handle_generic(src_ss, /*scalar_only =*/ true);

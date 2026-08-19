@@ -6948,7 +6948,8 @@ static void ggml_compute_backward(
                 ggml_add_or_set(ctx, cgraph, isrc0, ggml_rms_norm_back(ctx, grad, src0, eps));
             }
         } break;
-        case GGML_OP_MUL_MAT: {
+        case GGML_OP_MUL_MAT:
+        case GGML_OP_MUL_MAT_PACK4: {
             // https://cs231n.github.io/optimization-2/#staged
             // # forward pass
             // s0 = np.random.randn(5, 10)
