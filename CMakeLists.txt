@@ -1468,6 +1468,12 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
     add_executable(abi_stream_hello tests/abi_stream_hello.cpp)
     target_link_libraries(abi_stream_hello PRIVATE transcribe)
 
+    # End-to-end WER gate. Builds in every unified-ABI configuration (it links
+    # only the C ABI, like the hello tests); its CTest registration below is
+    # gated on the arch families being compiled in.
+    add_executable(asr_e2e_wer_test tests/asr_e2e_wer_test.cpp)
+    target_link_libraries(asr_e2e_wer_test PRIVATE transcribe)
+
     if (ENGINE_BUILD_TESTS)
         # Both bridge tests skip (exit 2) without a model. Point them at the
         # in-tree silero_vad safetensors + a LibriSpeech fixture so they are
@@ -1494,6 +1500,24 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
 
         # Exit 2 means "skipped", not "failed" -- CTest needs telling.
         set_tests_properties(abi_bridge_hello abi_stream_hello PROPERTIES SKIP_RETURN_CODE 2)
+
+        # End-to-end ASR WER gate: transcribes the in-tree LibriSpeech
+        # fixtures through the public C ABI and scores word error rate against
+        # their reference transcripts — the first gate that checks TEXT rather
+        # than plumbing. The model is not in-tree (models/ is gitignored);
+        # fetch it with scripts/fetch_asr_test_model.py. The test is
+        # registered unconditionally and skips (exit 2) while the model file
+        # is absent, so dropping the model in later needs no reconfigure.
+        # Registration requires the arch families: with TRANSCRIBE_ARCHES=OFF
+        # the runtime cannot load any ASR GGUF and the gate would fail, not
+        # skip, in an otherwise-supported configuration.
+        if (SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES)
+            add_test(NAME asr_e2e_wer_test
+                     COMMAND asr_e2e_wer_test
+                         "${CMAKE_CURRENT_SOURCE_DIR}/models/moonshine-tiny-Q8_0.gguf"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
+            set_tests_properties(asr_e2e_wer_test PROPERTIES SKIP_RETURN_CODE 2)
+        endif()
 
         # -------------------------------------------------------------------
         # Phase 0 lint gates ported from transcribe.cpp (testing infrastructure

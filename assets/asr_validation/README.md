@@ -19,3 +19,11 @@ Each example includes:
 
 The manifest rows include source metadata, split, speaker/chapter ids, duration,
 audio path, transcript path, and the reference text.
+
+## Consumers
+
+- `asr_e2e_wer_test` transcribes every `.wav`/`.txt` pair here through the
+  public C ABI and gates corpus WER against the references (see
+  `docs/reports/asr_e2e_wer_gate.md`; model fetched by
+  `scripts/fetch_asr_test_model.py`).
+- `abi_stream_hello` uses the first test-clean WAV as its streaming input.

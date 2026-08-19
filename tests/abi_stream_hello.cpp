@@ -43,9 +43,10 @@
 // Deliberately links ONLY the public C ABI — no engine_runtime, no ggml — so
 // it exercises the same surface a language binding sees, and so the shipped
 // shared library is proven self-sufficient for a streaming consumer. That is
-// why the WAV parsing below is local rather than reusing
+// why WAV parsing comes from the header-only tests/abi_test_wav.h rather than
 // engine/framework/audio/wav_reader.h.
 
+#include "abi_test_wav.h"
 #include "transcribe.h"
 
 #include <algorithm>
@@ -102,85 +103,12 @@ std::vector<float> make_burst_pcm(int n_bursts, double burst_s, double gap_s) {
     return pcm;
 }
 
-uint32_t read_u32(const unsigned char * p) {
-    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8)
-         | (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
-}
-
-uint16_t read_u16(const unsigned char * p) {
-    return static_cast<uint16_t>(static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8));
-}
-
-// Minimal RIFF/WAVE reader: PCM16 or float32, any channel count, downmixed to
-// mono. Enough for the fixtures in assets/asr_validation/.
-std::vector<float> read_wav_mono_f32(const std::string & path, int & sample_rate_out) {
-    std::ifstream in(path, std::ios::binary);
-    require(in.good(), "cannot open audio file: " + path);
-    std::vector<unsigned char> buf((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    require(buf.size() > 44 && std::memcmp(buf.data(), "RIFF", 4) == 0
-                && std::memcmp(buf.data() + 8, "WAVE", 4) == 0,
-            "not a RIFF/WAVE file: " + path);
-
-    uint16_t format = 0, channels = 0, bits = 0;
-    uint32_t rate = 0;
-    size_t   data_off = 0, data_len = 0;
-
-    size_t pos = 12;
-    while (pos + 8 <= buf.size()) {
-        const char *   id   = reinterpret_cast<const char *>(buf.data() + pos);
-        const uint32_t size = read_u32(buf.data() + pos + 4);
-        const size_t   body = pos + 8;
-        if (std::memcmp(id, "fmt ", 4) == 0 && size >= 16 && body + 16 <= buf.size()) {
-            format   = read_u16(buf.data() + body + 0);
-            channels = read_u16(buf.data() + body + 2);
-            rate     = read_u32(buf.data() + body + 4);
-            bits     = read_u16(buf.data() + body + 14);
-        } else if (std::memcmp(id, "data", 4) == 0) {
-            data_off = body;
-            data_len = std::min<size_t>(size, buf.size() - body);
-        }
-        pos = body + size + (size & 1u);  // chunks are word-aligned
-    }
-    require(data_off != 0 && channels > 0, "WAV has no usable fmt/data chunk: " + path);
-    sample_rate_out = static_cast<int>(rate);
-
-    std::vector<float> interleaved;
-    if (format == 1 && bits == 16) {
-        const size_t n = data_len / 2;
-        interleaved.reserve(n);
-        for (size_t i = 0; i < n; ++i) {
-            const auto s = static_cast<int16_t>(read_u16(buf.data() + data_off + i * 2));
-            interleaved.push_back(static_cast<float>(s) / 32768.0f);
-        }
-    } else if (format == 3 && bits == 32) {
-        const size_t n = data_len / 4;
-        interleaved.resize(n);
-        std::memcpy(interleaved.data(), buf.data() + data_off, n * 4);
-    } else {
-        throw std::runtime_error("unsupported WAV encoding (format=" + std::to_string(format)
-                                 + " bits=" + std::to_string(bits) + "): " + path);
-    }
-
-    if (channels == 1) {
-        return interleaved;
-    }
-    std::vector<float> mono(interleaved.size() / channels);
-    for (size_t i = 0; i < mono.size(); ++i) {
-        float acc = 0.0f;
-        for (uint16_t c = 0; c < channels; ++c) {
-            acc += interleaved[i * channels + c];
-        }
-        mono[i] = acc / static_cast<float>(channels);
-    }
-    return mono;
-}
-
 std::vector<float> load_audio(const std::string & path) {
     if (path.empty()) {
         return make_burst_pcm(3, 0.6, 0.4);
     }
     int rate = 0;
-    std::vector<float> pcm = read_wav_mono_f32(path, rate);
+    std::vector<float> pcm = abi_test::read_wav_mono_f32(path, rate);
     require(rate == kSampleRate,
             "test audio must be 16 kHz (got " + std::to_string(rate) + "); v1 links no resampler");
     return pcm;
