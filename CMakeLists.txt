@@ -1459,11 +1459,41 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
     # exits 2 (skipped) without one so it is CTest-safe without model assets.
     add_executable(abi_bridge_hello tests/abi_bridge_hello.cpp)
     target_link_libraries(abi_bridge_hello PRIVATE transcribe)
+
+    # Streaming counterpart: begin/feed/finalize with deliberately misaligned
+    # feed sizes, checking the adapter's re-blocking, cursor algebra and
+    # segment folding, plus streaming-vs-offline agreement. Links only the C
+    # ABI, like a language binding. Same skip-without-a-model contract as
+    # abi_bridge_hello (exit 2).
+    add_executable(abi_stream_hello tests/abi_stream_hello.cpp)
+    target_link_libraries(abi_stream_hello PRIVATE transcribe)
+
     if (ENGINE_BUILD_TESTS)
-        add_test(
-            NAME abi_bridge_hello
-            COMMAND abi_bridge_hello
-        )
+        # Both bridge tests skip (exit 2) without a model. Point them at the
+        # in-tree silero_vad safetensors + a LibriSpeech fixture so they are
+        # real gates under CTest rather than permanent skips; the argv/env
+        # overrides stay available for running them against a bigger model.
+        set(SPEECHCPP_BRIDGE_TEST_MODEL
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets/framework/models/silero_vad/silero_vad_16k.safetensors")
+        set(SPEECHCPP_BRIDGE_TEST_AUDIO
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech/librispeech_test_clean_6930-75918-0000.wav")
+
+        if (EXISTS "${SPEECHCPP_BRIDGE_TEST_MODEL}")
+            add_test(NAME abi_bridge_hello COMMAND abi_bridge_hello "${SPEECHCPP_BRIDGE_TEST_MODEL}")
+            if (EXISTS "${SPEECHCPP_BRIDGE_TEST_AUDIO}")
+                add_test(NAME abi_stream_hello
+                         COMMAND abi_stream_hello "${SPEECHCPP_BRIDGE_TEST_MODEL}" "${SPEECHCPP_BRIDGE_TEST_AUDIO}")
+            else()
+                add_test(NAME abi_stream_hello COMMAND abi_stream_hello "${SPEECHCPP_BRIDGE_TEST_MODEL}")
+            endif()
+        else()
+            message(STATUS "abi bridge tests: in-tree silero_vad asset missing; tests will skip (exit 2)")
+            add_test(NAME abi_bridge_hello COMMAND abi_bridge_hello)
+            add_test(NAME abi_stream_hello COMMAND abi_stream_hello)
+        endif()
+
+        # Exit 2 means "skipped", not "failed" -- CTest needs telling.
+        set_tests_properties(abi_bridge_hello abi_stream_hello PROPERTIES SKIP_RETURN_CODE 2)
     endif()
 endif()
 
