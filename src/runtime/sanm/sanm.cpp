@@ -58,22 +58,38 @@ ggml_tensor * fsmn_branch(ggml_context * ctx,
     // transpose back.
     ggml_tensor * v_t = ggml_cont(ctx, ggml_transpose(ctx, v_in));  // [T, d_model, B]
 
+    // Direct single-op depthwise via ggml_conv_2d_dw_direct (H=1) for the
+    // batched case (B>1) and, by default, the single-shot case (B==1). For
+    // B==1 this avoids conv_1d_dw_f32's im2col path, which materializes a
+    // [kernel, T, d_model] scratch (a kernel-wide expansion — 11x for the
+    // default SAN-M kernel=11) and then runs a degenerate per-channel
+    // [1 x kernel] matmul afterwards. TRANSCRIBE_CONV_NO_DIRECT_DW=1 opts
+    // back into the im2col path (e.g. for a backend with no CONV_2D_DW
+    // support). Same escape hatch as the conformer granite / parakeet /
+    // canary in-block sites.
+    static const bool conv_dw_direct =
+        conf::resolve_conv_direct("TRANSCRIBE_CONV_DIRECT_DW",
+                                  "TRANSCRIBE_CONV_NO_DIRECT_DW",
+                                  /*backend_default=*/true);
     ggml_tensor * fsmn;
-    if (B > 1) {
-        // Batched depthwise conv. conv_1d_dw_f32 (im2col) collapses the
-        // batch axis, so use the direct depthwise-2D op (W=T, H=1, C=d_model,
-        // N=B), which threads the utterance batch at ne[3]. Kernel
-        // [K, 1, d_model] -> [K, 1, 1, d_model].
-        ggml_tensor * knl  = ggml_reshape_4d(ctx, fsmn_w, kernel, 1, 1, d_model);
-        ggml_tensor * data = ggml_reshape_4d(ctx, v_t, v_t->ne[0], 1, d_model, B);
-        fsmn               = ggml_conv_2d_dw_direct(ctx, knl, data,
-                                                    /*s0=*/1, /*s1=*/1,
-                                                    /*p0=*/padding, /*p1=*/0,
-                                                    /*d0=*/1, /*d1=*/1);
+    if (B > 1 || conv_dw_direct) {
+        // Kernel [K, 1, d_model] -> [K, 1, 1, d_model]. Cast to F32 for
+        // ggml_conv_2d_dw_direct (it misbehaves for non-f32 kernels; the
+        // depthwise kernel is tiny so the cast is negligible).
+        ggml_tensor * knl  = fsmn_w;
+        if (knl->type != GGML_TYPE_F32) {
+            knl = ggml_cast(ctx, knl, GGML_TYPE_F32);
+        }
+        knl                  = ggml_reshape_4d(ctx, knl, kernel, 1, 1, d_model);
+        ggml_tensor * data   = ggml_reshape_4d(ctx, v_t, v_t->ne[0], 1, d_model, B);
+        fsmn                 = ggml_conv_2d_dw_direct(ctx, knl, data,
+                                                      /*s0=*/1, /*s1=*/1,
+                                                      /*p0=*/padding, /*p1=*/0,
+                                                      /*d0=*/1, /*d1=*/1);
         // [T, 1, d_model, B] -> [T, d_model, B].
-        fsmn               = ggml_reshape_3d(ctx, fsmn, fsmn->ne[0], d_model, B);
+        fsmn                 = ggml_reshape_3d(ctx, fsmn, fsmn->ne[0], d_model, B);
     } else {
-        // Single-shot: im2col path.
+        // im2col fallback (TRANSCRIBE_CONV_NO_DIRECT_DW=1).
         fsmn = conf::conv_1d_dw_f32(ctx, fsmn_w, v_t,
                                     /*stride=*/1, /*padding=*/padding,
                                     /*dilation=*/1);
