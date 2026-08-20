@@ -410,6 +410,26 @@ void run_case(const SdpaCase & test_case) {
 }  // namespace
 
 int main() try {
+    // Every case in this test builds CUDA-configured graphs on a CUDA device —
+    // it exists to pin the CUDA SDPA lowerings. Without a CUDA device this is
+    // a skip (exit 2, like the model-gated gates), not a failure: a CPU-only
+    // build is a supported configuration, and the CUDA build runs this as a
+    // hard gate.
+    {
+        bool has_cuda_device = false;
+        for (const auto & device : engine::core::list_backend_devices()) {
+            if (device.backend == "CUDA") {
+                has_cuda_device = true;
+                break;
+            }
+        }
+        if (!has_cuda_device) {
+            std::cerr << "scaled_dot_product_attention_test: skipped (no CUDA device registered "
+                         "in this build)\n";
+            return 2;
+        }
+    }
+
     run_manual_repeat_parity_cases();
 
     const std::vector<SdpaCase> cases = {

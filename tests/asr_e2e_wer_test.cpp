@@ -30,17 +30,14 @@
 // a language binding ships.
 
 #include "abi_test_wav.h"
+#include "asr_test_text.h"
 #include "transcribe.h"
 
 #include <algorithm>
-#include <cctype>
 #include <chrono>
 #include <cstdlib>
-#include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -76,95 +73,9 @@ void require(bool condition, const std::string & message) {
     }
 }
 
-// LibriSpeech-style normalization: uppercase, keep [A-Z0-9'], everything else
-// is a separator. Typographic apostrophes (U+2018/U+2019) fold to ASCII '
-// before filtering so "DON’T" == "DON'T"; other non-ASCII bytes separate.
-// Tokens are stripped of leading/trailing apostrophes ("'CAUSE" from a
-// quoting model still mismatches TRUE 'CAUSE — acceptable for a gate; the
-// references here contain internal apostrophes only).
-std::vector<std::string> normalize_words(const std::string & text) {
-    std::string mapped;
-    mapped.reserve(text.size());
-    for (size_t i = 0; i < text.size(); ++i) {
-        const unsigned char c = static_cast<unsigned char>(text[i]);
-        if (c == 0xE2 && i + 2 < text.size() && static_cast<unsigned char>(text[i + 1]) == 0x80
-            && (static_cast<unsigned char>(text[i + 2]) == 0x98
-                || static_cast<unsigned char>(text[i + 2]) == 0x99)) {
-            mapped.push_back('\'');
-            i += 2;
-            continue;
-        }
-        if (c >= 0x80) {
-            mapped.push_back(' ');
-        } else if (std::isalnum(c) != 0) {
-            mapped.push_back(static_cast<char>(std::toupper(c)));
-        } else if (c == '\'') {
-            mapped.push_back('\'');
-        } else {
-            mapped.push_back(' ');
-        }
-    }
-
-    std::vector<std::string> words;
-    std::istringstream       iss(mapped);
-    std::string              token;
-    while (iss >> token) {
-        size_t begin = 0, end = token.size();
-        while (begin < end && token[begin] == '\'') {
-            ++begin;
-        }
-        while (end > begin && token[end - 1] == '\'') {
-            --end;
-        }
-        if (end > begin) {
-            words.push_back(token.substr(begin, end - begin));
-        }
-    }
-    return words;
-}
-
-// Word-level Levenshtein distance (substitutions + deletions + insertions),
-// two-row DP. Utterances here are tens of words, so O(ref*hyp) is nothing.
-size_t word_edit_distance(const std::vector<std::string> & ref, const std::vector<std::string> & hyp) {
-    std::vector<size_t> prev(hyp.size() + 1);
-    std::vector<size_t> cur(hyp.size() + 1);
-    for (size_t j = 0; j <= hyp.size(); ++j) {
-        prev[j] = j;
-    }
-    for (size_t i = 1; i <= ref.size(); ++i) {
-        cur[0] = i;
-        for (size_t j = 1; j <= hyp.size(); ++j) {
-            const size_t sub = prev[j - 1] + (ref[i - 1] == hyp[j - 1] ? 0 : 1);
-            cur[j]           = std::min({ prev[j] + 1, cur[j - 1] + 1, sub });
-        }
-        std::swap(prev, cur);
-    }
-    return prev[hyp.size()];
-}
-
-std::string read_text_file(const fs::path & path) {
-    std::ifstream in(path, std::ios::binary);
-    require(in.good(), "cannot open reference transcript: " + path.string());
-    std::ostringstream ss;
-    ss << in.rdbuf();
-    return ss.str();
-}
-
-std::string join_words(const std::vector<std::string> & words) {
-    std::string out;
-    for (const auto & w : words) {
-        if (!out.empty()) {
-            out.push_back(' ');
-        }
-        out += w;
-    }
-    return out;
-}
-
-struct Fixture {
-    fs::path wav;
-    fs::path txt;
-};
+// Text normalization, word-level edit distance, and fixture scanning live in
+// tests/asr_test_text.h, shared with asr_stream_text_wer_test so the two
+// gates score text identically.
 
 }  // namespace
 
@@ -197,19 +108,7 @@ int main(int argc, char ** argv) {
             max_wer_pct = std::stod(bound_arg);
         }
 
-        std::vector<Fixture> fixtures;
-        for (const auto & entry : fs::directory_iterator(fixture_dir)) {
-            if (!entry.is_regular_file() || entry.path().extension() != ".wav") {
-                continue;
-            }
-            fs::path txt = entry.path();
-            txt.replace_extension(".txt");
-            if (fs::exists(txt)) {
-                fixtures.push_back({ entry.path(), txt });
-            }
-        }
-        std::sort(fixtures.begin(), fixtures.end(),
-                  [](const Fixture & a, const Fixture & b) { return a.wav.filename() < b.wav.filename(); });
+        const std::vector<asr_test::Fixture> fixtures = asr_test::collect_fixtures(fixture_dir);
         require(!fixtures.empty(), "no .wav/.txt fixture pairs in " + fixture_dir);
 
         struct transcribe_model_load_params load_params;
@@ -255,14 +154,14 @@ int main(int argc, char ** argv) {
             require(raw != nullptr, "transcribe_full_text returned NULL on " + fixture.wav.filename().string());
             const std::string hypothesis = raw;
 
-            const std::vector<std::string> ref_words = normalize_words(read_text_file(fixture.txt));
-            const std::vector<std::string> hyp_words = normalize_words(hypothesis);
+            const std::vector<std::string> ref_words = asr_test::normalize_words(asr_test::read_text_file(fixture.txt));
+            const std::vector<std::string> hyp_words = asr_test::normalize_words(hypothesis);
             require(!ref_words.empty(), "reference transcript is empty: " + fixture.txt.string());
             if (hyp_words.empty()) {
                 any_empty_hyp = true;
             }
 
-            const size_t edits = word_edit_distance(ref_words, hyp_words);
+            const size_t edits = asr_test::word_edit_distance(ref_words, hyp_words);
             total_ref_words += ref_words.size();
             total_edits += edits;
 
@@ -276,8 +175,8 @@ int main(int argc, char ** argv) {
                       << " word edits (WER " << wer << "%), " << audio_s << " s audio in " << decode_s
                       << " s\n";
             if (edits != 0) {
-                std::cout << "    ref: " << join_words(ref_words) << "\n"
-                          << "    hyp: " << join_words(hyp_words) << "\n";
+                std::cout << "    ref: " << asr_test::join_words(ref_words) << "\n"
+                          << "    hyp: " << asr_test::join_words(hyp_words) << "\n";
             }
         }
 

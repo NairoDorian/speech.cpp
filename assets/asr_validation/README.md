@@ -24,6 +24,9 @@ audio path, transcript path, and the reference text.
 
 - `asr_e2e_wer_test` transcribes every `.wav`/`.txt` pair here through the
   public C ABI and gates corpus WER against the references (see
-  `docs/reports/asr_e2e_wer_gate.md`; model fetched by
+  `docs/reports/asr_e2e_wer_gate.md`; models fetched by
   `scripts/fetch_asr_test_model.py`).
+- `asr_stream_text_wer_test` streams the same pairs through the C ABI
+  streaming surface and gates the streamed text the same way (same report
+  and fetch script; second pinned model).
 - `abi_stream_hello` uses the first test-clean WAV as its streaming input.

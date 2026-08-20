@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -13,6 +14,13 @@ namespace minitts::server {
 class ModelInstaller {
 public:
     ModelInstaller(std::filesystem::path repository_root, std::filesystem::path models_root);
+
+    // Cancels any active job (writes its cancellation marker) and joins every
+    // worker thread before returning, so no helper subprocess outlives the
+    // installer. Detached workers used to race process exit — on Windows a
+    // worker terminated inside CreateProcess leaves a permanently suspended
+    // child cmd.exe pinning the inherited stdio handles (observed as a CTest
+    // hang) — and raced the job directory cleanup against their redirections.
     ~ModelInstaller();
 
     ModelInstaller(const ModelInstaller &) = delete;
@@ -34,6 +42,11 @@ public:
 
 private:
     struct State;
+
+    // Runs body on a tracked worker thread; finished workers are reaped on
+    // every launch so the tracking list stays small on long-lived servers.
+    void launch_worker(std::function<void()> body);
+
     std::shared_ptr<State> state_;
 };
 

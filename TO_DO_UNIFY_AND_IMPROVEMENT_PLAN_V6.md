@@ -2,9 +2,11 @@
 
 **Status:** Active — Phase 0 kickoff ready. V6 = V5 merged with
 `UNIFY_AND_IMPROVEMENT_PLAN.md` (2026-08-19). See §0.0 for the merge log and
-binding refinements (R1–R10). The ggml convergence (R1) is certified on CPU and
-CUDA as of R10 (2026-08-20); the live blocker is now an in-tree ASR model for
-end-to-end WER validation.
+binding refinements (R1–R12). The ggml convergence (R1) is certified on CPU
+and CUDA (R10, 2026-08-20); end-to-end ASR text is validated offline (R11)
+and streaming (R12), and the residual test-failure ledger is empty — the CPU
+suite is 100% green. The live front is now family porting and consolidation
+(Phases 1–3).
 
 This document is the master plan for evolving `speech.cpp` (a fork of
 `audio.cpp`) by systematically absorbing the architecture, model families,
@@ -346,6 +348,60 @@ itself by catching another convergence regression.
    here; the WER gate for ASR), and a hunk-by-hunk diff of the fork tree
    against its own upstream base. The convergence's residual risk is now
    *only* what those two audits have not yet covered.
+
+### R12. Streaming text validated end to end; the "environment/asset" failure ledger emptied (2026-08-20)
+
+Both of progress.md's top NEXT items closed, and closing the second one
+followed R11's script exactly: none of the long-standing "environment/asset"
+failures was actually about assets.
+
+1. **Streaming ASR text is validated through the public C ABI.**
+   `tests/asr_stream_text_wer_test.cpp` + CTest gate `asr_stream_text_wer_test`
+   stream the four LibriSpeech fixtures (odd-sized ~100–400 ms feeds →
+   finalize → `transcribe_stream_get_text().full_text`) into
+   **moonshine-streaming-tiny Q8_0** — the exact model R11 hoped would be
+   published: 48 MB, MIT, transcribe.cpp-validated at 4.52% offline / 4.54%
+   streamed on full test-clean, arch already in
+   `src/runtime/arch/moonshine_streaming`. Measured: **streamed corpus WER
+   4.35% = offline corpus WER 4.35%, streamed-vs-offline divergence 0 words**,
+   streamed RTF 0.55 CPU. Gates: both WERs ≤ 10%, divergence ≤ 3 words (same
+   weights ⇒ divergence is a streaming-path defect by construction). The
+   fixture set runs offline and streaming on ONE session per fixture, so
+   run/stream mode switching and `stream_reset` are proven with real text.
+   `scripts/fetch_asr_test_model.py` now fetches/pins both gate models
+   (sha256 930e4622…a869e, 50,462,816 bytes, HF revision `85ddff6`); text
+   scoring is shared via `tests/asr_test_text.h`. Report:
+   `docs/reports/asr_e2e_wer_gate.md`.
+2. **All five residual non-CUDA test failures are gone; the CPU suite is
+   100% green (58/58) for the first time.** The "one honest look" at the
+   documented failures found zero missing assets:
+   - `model_spec_system_test`, `fun_asr_nano_assets_test`,
+     `asr_standalone_gguf_test`: model-spec resolution walks UP from the
+     working directory, so they only ever passed from build trees inside the
+     repo. Fixed with `WORKING_DIRECTORY` registrations.
+     `asr_standalone_gguf_test` needs NO citrinet/hviske downloads — its
+     fixtures are synthetic; the old NEXT #3 "download-and-pin citrinet/hviske"
+     recommendation was based on this misdiagnosis and is withdrawn (a real
+     citrinet/hviske WER gate is separate, optional work).
+   - `server_model_installer_test` exposed two real product bugs, both now
+     fixed: (a) **`AUDIOCPP_PYTHON` never worked on Windows** — `cmd /c`
+     strips the first+last quote when the command starts with a quoted
+     program path; all `ModelInstaller` helper invocations now go through a
+     wrap that neutralizes the strip; (b) **`ModelInstaller` teardown raced
+     its detached workers** — a worker terminated by `ExitProcess` inside
+     `CreateProcess` leaves a permanently suspended child `cmd.exe` pinning
+     inherited pipes (observed: CTest waited 22 min for a 15 s test) and
+     leaked ~40 temp job dirs across past runs. Workers are now tracked,
+     cancelled, and joined in the destructor — the first application of the
+     D7 teardown doctrine to audio.cpp app-layer code.
+   - `scaled_dot_product_attention_test` is a CUDA-lowering gate and now
+     skips (exit 2) on builds with no CUDA device instead of failing the
+     supported CPU-only configuration.
+3. **Rule reaffirmed (now 5-for-5): "missing assets" has never once been the
+   true diagnosis in this repo.** flashsr (real regression, 0006), the WER
+   gap (unfetched-by-design model), and now three registration/product
+   defects. Treat every "environment/asset issue" label as unverified until
+   a failure has been reproduced and root-caused once.
 
 ## 0. Vision Statement
 

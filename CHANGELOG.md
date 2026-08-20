@@ -11,6 +11,61 @@ Dates are the work-session dates recorded in the plan.
 
 ### Fixed
 
+- **`AUDIOCPP_PYTHON` never worked on Windows: `cmd.exe` mangled every quoted
+  program path.** `ModelInstaller` builds helper commands as
+  `"<python>" -u "<script>" ... > "<log>" 2>&1` and runs them through
+  `std::system`, i.e. `cmd /c <string>`. When that string *begins* with a
+  quote, cmd strips the first and the LAST quote character on the line,
+  mis-tokenizing everything between ("The filename, directory name, or volume
+  label syntax is incorrect") — which is why `python_command()` returns the
+  bare word `python` by default but the `AUDIOCPP_PYTHON` override (shell-
+  quoted) could never have worked. All helper invocations now go through
+  `run_shell_command()`, which wraps the whole line in one extra pair of
+  quotes on Windows so cmd's strip is a no-op (verified by an isolated
+  `std::system` reproduction: unwrapped fails, wrapped runs, and the wrap is
+  also a no-op for the unquoted default). Found because
+  `server_model_installer_test` needs a real interpreter and `python` on this
+  machine is the Microsoft Store stub; the test's CTest registration now
+  passes CMake's `Python3_EXECUTABLE` through `AUDIOCPP_PYTHON` when one is
+  found, which is what finally exercised the override path.
+- **`ModelInstaller` teardown raced its own workers; on Windows the race
+  parks a child `cmd.exe` in a permanently suspended state.** Install and
+  size-scan workers were detached `std::thread`s, so nothing stopped the
+  process from exiting while a worker sat inside `std::system` —
+  `ExitProcess` then terminates the worker at an arbitrary instruction, and a
+  thread killed inside `CreateProcess` (after the child exists, before its
+  initial thread is resumed) leaves a suspended orphan that never runs and
+  never exits. Observed live: `server_model_installer_test` finished its
+  asserts, but a suspended orphan `cmd.exe` kept the inherited stdout pipe
+  open and CTest waited 22 minutes for a 15-second test (the same race also
+  leaked ~40 `audiocpp-model-installer-*` temp directories across past runs,
+  because `~State`'s `remove_all(job_root)` ran while workers still had
+  redirection files open in it). Workers are now tracked and joined:
+  `~ModelInstaller` writes the cancellation marker for any active job (the
+  preparation helper polls it and exits early) and joins every worker before
+  the job directory is cleaned up; finished workers are reaped on each new
+  launch so the tracking list stays small. The detached-thread pattern is
+  exactly the teardown-discipline class the plan's D7/safe_* doctrine exists
+  for — this is its first application to audio.cpp's app-layer code.
+- **Three "environment/asset" test failures were really test-infrastructure
+  defects — none needed any asset.** `model_spec_system_test`,
+  `fun_asr_nano_assets_test`, and `asr_standalone_gguf_test` all resolve
+  production model specs by walking UP from the current working directory
+  (`discover_workspace_model_spec`), which finds `model_specs/<family>.json`
+  only when the build tree lives inside the repo; the documented scratch
+  builds live outside it, so all three failed with "model contract spec not
+  found". They are now registered with `WORKING_DIRECTORY` at the source
+  root. `asr_standalone_gguf_test` in particular had been filed as "needs
+  citrinet+hviske assets" for three sessions — it builds synthetic fixtures
+  and needs no model download at all (progress.md's NEXT item recommending a
+  download-and-pin for it was based on that misdiagnosis).
+- **`scaled_dot_product_attention_test` failed CPU-only builds instead of
+  skipping.** Every case in it builds CUDA-configured graphs on a CUDA
+  device — it exists to pin the CUDA SDPA lowerings (R10). It now probes
+  `list_backend_devices()` and skips (exit 2, `SKIP_RETURN_CODE 2`) when no
+  CUDA device is registered, keeping it a hard gate on CUDA builds while a
+  CPU-only build — a supported configuration — stays green.
+
 - **The 0.20.2 convergence silently demoted every framework convolution to F16
   activations; restored as `patches/ggml/0006-conv-im2col-in-weight-type.patch`.**
   Upstream's `ggml_conv_1d`/`ggml_conv_1d_dw`/`ggml_conv_2d` lower to im2col
@@ -136,6 +191,31 @@ Dates are the work-session dates recorded in the plan.
 
 ### Added
 
+- **Streaming ASR text is validated end to end:
+  `tests/asr_stream_text_wer_test.cpp`.** The streaming counterpart of the
+  WER gate, closing the last unvalidated path in "speech.cpp transcribes":
+  it streams the four LibriSpeech fixtures into a real streaming-family
+  model through the public C ABI (begin → odd-sized ~100–400 ms feeds →
+  finalize → `transcribe_stream_get_text().full_text`, asserting the
+  documented finalize contract that tentative text is empty) and scores the
+  STREAMED text against the references, next to the same model's offline
+  text and the divergence between the two. Model: **moonshine-streaming-tiny
+  Q8_0** (48 MB, MIT, `handy-computer/moonshine-streaming-tiny-gguf`,
+  transcribe.cpp-validated at 4.52% offline / 4.54% streamed on full
+  test-clean; the arch was already in `src/runtime/arch/moonshine_streaming`)
+  — exactly the model the previous session's NEXT item hoped existed.
+  Measured baseline (CPU, 2026-08-20): **streamed corpus WER 4.35% = offline
+  corpus WER 4.35% (3/69: FORWARDED→VOTED plus "I AM"→"I'M"), divergence 0
+  words**, streamed RTF 0.55. Gates: both WERs ≤ 10%, divergence ≤ 3 words —
+  same weights, so divergence is a streaming-path defect by construction.
+  Every fixture runs offline then streaming on ONE session, so run/stream
+  mode switching and `stream_reset` are proven with real text, not just
+  segment counts. Skips (exit 2) while the model is absent, like its
+  sibling. `scripts/fetch_asr_test_model.py` now carries a pinned-model
+  table and fetches both gate models (`--only streaming` selects one);
+  `tests/asr_test_text.h` holds the normalization/edit-distance/fixture
+  scanning shared by both gates (extracted from asr_e2e_wer_test, the same
+  move abi_test_wav.h made). Report: `docs/reports/asr_e2e_wer_gate.md`.
 - **End-to-end ASR transcription is validated: `tests/asr_e2e_wer_test.cpp`.**
   The first test in the merged tree that checks *text* rather than plumbing:
   it loads a real GGUF ASR model through the public C ABI (`transcribe_open`),
@@ -295,11 +375,10 @@ Dates are the work-session dates recorded in the plan.
   urgent — but if ggml ever fixes `nb32` indexing in its flash kernels, the
   CPU-only gate in `common_relative_attention.cpp` should be revisited against
   fresh measurements rather than assumed obsolete.
-- **Streaming ASR text is still unvalidated end to end.** Offline moonshine
-  correctly reports `supports_streaming == false`, so `abi_stream_hello`
-  exercises the streaming surface against `silero_vad` segments only. A
-  pinned streaming-family GGUF small enough to download in CI is the natural
-  follow-up.
+- ~~**Streaming ASR text is still unvalidated end to end.**~~ — resolved by
+  `asr_stream_text_wer_test` + the pinned moonshine-streaming-tiny Q8_0 (see
+  Added): streamed text scores 4.35% corpus WER, word-identical to the same
+  model's offline text on this corpus.
 - **`external/ggml` line endings are mixed** — 1145 of 2163 files have CRLF blobs
   while `.gitattributes` declares `* text=auto eol=lf`. Left alone deliberately:
   renormalizing is a 1145-file sweep, and `sync-ggml.sh` currently matches the

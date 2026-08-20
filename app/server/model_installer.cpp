@@ -1,6 +1,7 @@
 #include "model_installer.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cstdlib>
@@ -12,6 +13,8 @@
 #include <stdexcept>
 #include <string_view>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace minitts::server {
 namespace {
@@ -93,6 +96,18 @@ std::string python_command() {
     return "python";
 #else
     return "python3";
+#endif
+}
+
+int run_shell_command(const std::string & command) {
+#ifdef _WIN32
+    // cmd.exe strips the first and the last quote character of the /c payload
+    // when it begins with one, which mis-tokenizes every command whose program
+    // path is quoted (any AUDIOCPP_PYTHON value). Wrapping the whole line in
+    // one extra pair of quotes turns that strip into a no-op either way.
+    return std::system(("\"" + command + "\"").c_str());
+#else
+    return std::system(command.c_str());
 #endif
 }
 
@@ -212,11 +227,19 @@ struct ModelInstaller::State {
         uint64_t total_bytes = 0;
     };
 
+    // A worker thread plus its completion flag; done is set as the thread's
+    // final act so finished workers can be reaped without blocking.
+    struct Worker {
+        std::thread                        thread;
+        std::shared_ptr<std::atomic<bool>> done;
+    };
+
     std::filesystem::path repository_root;
     std::filesystem::path models_root;
     std::filesystem::path job_root;
     mutable std::mutex mutex;
     std::map<std::string, Job> jobs;
+    std::vector<Worker> workers;
     std::string size_state = "idle";
     std::string size_message = "Package sizes have not been checked";
     std::filesystem::path size_output_path;
@@ -243,7 +266,58 @@ ModelInstaller::ModelInstaller(
     state_->installed_output_path = state_->job_root / "installed-packages.json";
 }
 
-ModelInstaller::~ModelInstaller() = default;
+ModelInstaller::~ModelInstaller() {
+    std::vector<State::Worker> workers;
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        // Cancel whatever is still active so the joins below are prompt: the
+        // preparation helper polls its cancellation marker and exits early.
+        for (auto & [id, job] : state_->jobs) {
+            (void) id;
+            if (job.state == "queued" || job.state == "running" || job.state == "cancelling") {
+                job.cancel_requested = true;
+                std::ofstream marker(job.cancel_path, std::ios::binary | std::ios::trunc);
+                if (marker) {
+                    marker << "cancel\n";
+                }
+            }
+        }
+        workers = std::move(state_->workers);
+    }
+    for (auto & worker : workers) {
+        if (worker.thread.joinable()) {
+            worker.thread.join();
+        }
+    }
+}
+
+void ModelInstaller::launch_worker(std::function<void()> body) {
+    auto        done = std::make_shared<std::atomic<bool>>(false);
+    std::thread worker([body = std::move(body), done]() {
+        body();
+        done->store(true);
+    });
+    std::vector<std::thread> finished;
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        auto & workers = state_->workers;
+        for (auto it = workers.begin(); it != workers.end();) {
+            if (it->done->load()) {
+                finished.push_back(std::move(it->thread));
+                it = workers.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        workers.push_back(State::Worker{ std::move(worker), std::move(done) });
+    }
+    // done was the thread's final statement, so these joins return at once.
+    for (auto & thread : finished) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+}
 
 bool ModelInstaller::has_active_jobs() const {
     std::lock_guard<std::mutex> lock(state_->mutex);
@@ -325,8 +399,8 @@ std::string ModelInstaller::start(
     }
 
     const auto shared = state_;
-    std::thread([shared, package_id, source_file_path, output_file_path, source_path, variant, overwrite,
-                 legacy_conversion, script, log_path, cancel_path]() {
+    launch_worker([shared, package_id, source_file_path, output_file_path, source_path, variant, overwrite,
+                   legacy_conversion, script, log_path, cancel_path]() {
         try {
             {
                 std::lock_guard<std::mutex> lock(shared->mutex);
@@ -361,7 +435,7 @@ std::string ModelInstaller::start(
             }
             command += " > " + shell_quote(log_path.string()) + " 2>&1";
 
-            const int result = std::system(command.c_str());
+            const int result = run_shell_command(command);
             const auto log = inspect_log(log_path);
             std::lock_guard<std::mutex> lock(shared->mutex);
             auto & job = shared->jobs.at(package_id);
@@ -390,7 +464,7 @@ std::string ModelInstaller::start(
             job.exit_code = -1;
             job.finished_at_ms = now_ms();
         }
-    }).detach();
+    });
 
     return status(package_id);
 }
@@ -506,7 +580,7 @@ std::string ModelInstaller::clean_partial(const std::string & package_id) {
         " clean-partial " + shell_quote(package_id) +
         " --models-root " + shell_quote(state_->models_root.string()) +
         " > " + shell_quote(log_path.string()) + " 2>&1";
-    const int result = std::system(command.c_str());
+    const int result = run_shell_command(command);
     std::string message = read_log_tail_text(log_path);
     while (!message.empty() && std::isspace(static_cast<unsigned char>(message.back()))) {
         message.pop_back();
@@ -550,7 +624,7 @@ std::string ModelInstaller::remove(const std::string & package_id) {
         " uninstall " + shell_quote(package_id) +
         " --models-root " + shell_quote(state_->models_root.string()) +
         " > " + shell_quote(log_path.string()) + " 2>&1";
-    const int result = std::system(command.c_str());
+    const int result = run_shell_command(command);
     std::string message = read_log_tail_text(log_path);
     while (!message.empty() && std::isspace(static_cast<unsigned char>(message.back()))) {
         message.pop_back();
@@ -606,20 +680,20 @@ std::string ModelInstaller::package_sizes() {
             }
         } else {
             const auto shared = state_;
-            std::thread([shared, script, scan_generation, size_output_path, size_error_path,
-                         installed_output_path]() {
+            launch_worker([shared, script, scan_generation, size_output_path, size_error_path,
+                           installed_output_path]() {
                 try {
                     std::string installed_command = python_command() + " -u " + shell_quote(script.string()) +
                         " installed --json --models-root " + shell_quote(shared->models_root.string()) +
                         " > " + shell_quote(installed_output_path.string()) +
                         " 2>> " + shell_quote(size_error_path.string());
-                    const int installed_result = std::system(installed_command.c_str());
+                    const int installed_result = run_shell_command(installed_command);
                     (void) installed_result;
                     std::string command = python_command() + " -u " + shell_quote(script.string()) +
                         " sizes --json --models-root " + shell_quote(shared->models_root.string()) +
                         " > " + shell_quote(size_output_path.string()) +
                         " 2> " + shell_quote(size_error_path.string());
-                    const int result = std::system(command.c_str());
+                    const int result = run_shell_command(command);
                     std::string output = read_log_tail_text(size_output_path);
                     while (!output.empty() && std::isspace(static_cast<unsigned char>(output.back()))) {
                         output.pop_back();
@@ -646,7 +720,7 @@ std::string ModelInstaller::package_sizes() {
                         shared->size_message = error.what();
                     }
                 }
-            }).detach();
+            });
         }
     }
 

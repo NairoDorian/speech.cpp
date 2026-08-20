@@ -1474,6 +1474,12 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
     add_executable(asr_e2e_wer_test tests/asr_e2e_wer_test.cpp)
     target_link_libraries(asr_e2e_wer_test PRIVATE transcribe)
 
+    # Streaming-text counterpart: streams the same fixtures through
+    # begin/feed/finalize and scores the STREAMED text (plus the streaming
+    # model's offline text and their divergence).
+    add_executable(asr_stream_text_wer_test tests/asr_stream_text_wer_test.cpp)
+    target_link_libraries(asr_stream_text_wer_test PRIVATE transcribe)
+
     if (ENGINE_BUILD_TESTS)
         # Both bridge tests skip (exit 2) without a model. Point them at the
         # in-tree silero_vad safetensors + a LibriSpeech fixture so they are
@@ -1517,6 +1523,15 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
                          "${CMAKE_CURRENT_SOURCE_DIR}/models/moonshine-tiny-Q8_0.gguf"
                          "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
             set_tests_properties(asr_e2e_wer_test PROPERTIES SKIP_RETURN_CODE 2)
+
+            # Streaming-text gate: same fetch script, second pinned model
+            # (moonshine-streaming-tiny Q8_0). Skips identically while the
+            # model is absent.
+            add_test(NAME asr_stream_text_wer_test
+                     COMMAND asr_stream_text_wer_test
+                         "${CMAKE_CURRENT_SOURCE_DIR}/models/moonshine-streaming-tiny-Q8_0.gguf"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
+            set_tests_properties(asr_stream_text_wer_test PROPERTIES SKIP_RETURN_CODE 2)
         endif()
 
         # -------------------------------------------------------------------
@@ -2207,9 +2222,13 @@ if (ENGINE_BUILD_TESTS)
     add_engine_unittest(model_spec_system_test tests/unittests/test_model_spec_system.cpp)
     target_include_directories(model_spec_system_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
 
+    # Runs from the source root: the production-catalog subtests resolve
+    # model_specs/<family>.json by walking up from the working directory, which
+    # only finds the repo when the build tree lives inside it.
     add_test(
         NAME model_spec_system_test
         COMMAND model_spec_system_test
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
 
     if (qwen3_forced_aligner IN_LIST AUDIOCPP_LINKED_MODELS)
@@ -2226,9 +2245,12 @@ if (ENGINE_BUILD_TESTS)
     target_sources(fun_asr_nano_assets_test PRIVATE src/models/fun_asr_nano/assets.cpp)
     target_include_directories(fun_asr_nano_assets_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
 
+    # Same source-root requirement as model_spec_system_test: loading the
+    # fun_asr_nano family resolves its model spec from the working directory.
     add_test(
         NAME fun_asr_nano_assets_test
         COMMAND fun_asr_nano_assets_test
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
 
     add_engine_unittest(fun_asr_nano_frontend_probe tests/fun_asr_nano/fun_asr_nano_frontend_probe.cpp)
@@ -2440,10 +2462,13 @@ if (ENGINE_BUILD_TESTS)
 
     add_engine_unittest(scaled_dot_product_attention_test tests/unittests/test_scaled_dot_product_attention.cpp)
 
+    # A CUDA-lowering gate: skips (exit 2) on builds without a CUDA device
+    # instead of failing a supported CPU-only configuration.
     add_test(
         NAME scaled_dot_product_attention_test
         COMMAND scaled_dot_product_attention_test
     )
+    set_tests_properties(scaled_dot_product_attention_test PROPERTIES SKIP_RETURN_CODE 2)
 
     # Covers both standalone-GGUF ASR families, so it needs both linked.
     if (citrinet_asr IN_LIST AUDIOCPP_LINKED_MODELS AND hviske_asr IN_LIST AUDIOCPP_LINKED_MODELS)
@@ -2453,9 +2478,13 @@ if (ENGINE_BUILD_TESTS)
             ENGINE_TEST_ASSET_ROOT="${ENGINE_UNITTEST_ASSET_ROOT}"
         )
 
+        # Runs from the source root: default_spec_path() resolves the citrinet
+        # and hviske model specs by walking up from the working directory (the
+        # fixtures themselves are synthetic — no real model download needed).
         add_test(
             NAME asr_standalone_gguf_test
             COMMAND asr_standalone_gguf_test
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         )
     endif()
 
@@ -2584,6 +2613,15 @@ if (ENGINE_BUILD_TESTS)
         NAME server_model_installer_test
         COMMAND server_model_installer_test
     )
+    # The installer shells out to `python`, which on Windows is often the
+    # Microsoft Store stub. Point it at a real interpreter through the
+    # AUDIOCPP_PYTHON override the installer already honors; hosts with a
+    # working `python` on PATH are unaffected when none is found here.
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if (Python3_Interpreter_FOUND)
+        set_tests_properties(server_model_installer_test PROPERTIES
+            ENVIRONMENT "AUDIOCPP_PYTHON=${Python3_EXECUTABLE}")
+    endif()
 endif()
 
 if (ENGINE_BUILD_EXAMPLES)
