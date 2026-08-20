@@ -88,6 +88,25 @@ It exists to pin the CUDA SDPA lowerings (R10) and hard-required a CUDA
 device, failing CPU-only builds. Now probes `list_backend_devices()` and
 skips (exit 2, `SKIP_RETURN_CODE 2`); stays a hard gate on CUDA builds.
 
+### 5. Performance pass on transcribe.cpp runtime families
+Closed the last depthwise-1D-conv im2col sites in the runtime and a couple
+of decode/frontend hotspots, all with env-override kill switches and
+numerical parity:
+- **Granite + Granite-NAR encoders** (`src/runtime/arch/{granite,granite_nar}/encoder.cpp`):
+  in-block depthwise conv now uses `ggml_conv_2d_dw_direct` instead of
+  `conv_1d_dw_f32`'s B==1 im2col path (15x scratch expansion avoided; ~2.2 s
+  of a 29 s CPU clip). Matches parakeet/canary/etc.
+- **SAN-M FSMN branch** (`src/runtime/sanm/sanm.cpp`): B==1 single-shot path
+  now uses direct dw conv (was im2col); B>1 already was. 11x expansion
+  avoided for kernel=11. Affects sensevoice + fun_asr_nano arch.
+- **Parakeet decoder** (`src/runtime/arch/parakeet/decoder.cpp`): frame-batched
+  joint window (`JointGraphBatch`) fuses the RNN-T/TDT joint op across frames
+  instead of per-frame dispatch.
+- **Mel frontend** (`src/runtime/transcribe-mel.cpp`): nonzero mel-band skip
+  (`fb_begin_`/`fb_end_`) across both FFT + scalar paths; scalar fallback
+  threaded (`run_threaded`). Bit-exact.
+This was the uncommitted `WORKSPACE` work, committed in two passes.
+
 ## Test suite state
 **CPU build** (`sp_bridge`: full set, unified ABI + arches) — **58 tests,
 0 failures, 100% green** (was 57 tests / 5 failures at session start).

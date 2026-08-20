@@ -187,7 +187,27 @@ Dates are the work-session dates recorded in the plan.
 - **MiniMax Music3 LM-head input precision on Metal** (port from upstream audio.cpp
   `4e973b1`). The Metal path now uses `GGML_TYPE_F32` for the LM head input instead of
   the Vulkan-shared `GGML_TYPE_F16`, eliminating BF16 convolution corruption on Metal;
-  now identical to audio.cpp's converged path.
+   now identical to audio.cpp's converged path.
+
+### Performance
+
+- **Direct depthwise-conv dispatch across all transcribe.php runtime encoder
+  families.** Granite and Granite-NAR encoders (`src/runtime/arch/{granite,granite_nar}/encoder.cpp`)
+  and the SAN-M FSMN branch (`src/runtime/sanm/sanm.cpp`) were the only runtime
+  sites still routed through `conv_1d_dw_f32`'s B==1 im2col path (a k-wide
+  scratch expansion + degenerate per-channel matmul). Switched to
+  `ggml_conv_2d_dw_direct`, matching parakeet/canary/etc., gated by the
+  `TRANSCRIBE_CONV_NO_DIRECT_DW` kill switch. Granite measured 2.2 s of a 29 s
+  CPU encode; SAN-M avoids the same 11x expansion (kernel=11) for the
+  common single-utterance path. Pointwise convs were already direct (`mul_mat`).
+- **Frame-batched Parakeet RNN-T/TDT joint window** (`src/runtime/arch/parakeet/decoder.cpp`).
+  The greedy decode loop fuses the joint-network op across consecutive frames
+  via `JointGraphBatch` instead of dispatching once per frame, with a
+  `joint_batch_check` serial-vs-batched parity verifier.
+- **Mel frontend nonzero-band skip + threaded scalar path** (`src/runtime/transcribe-mel.cpp`).
+  `fb_begin_`/`fb_end_` bounds skip trailing-zero columns in the filterbank
+  sum across both the FFT and scalar paths; the no-BLAS scalar fallback is now
+  threaded (`run_threaded`). Bit-exact to the reference.
 
 ### Added
 
