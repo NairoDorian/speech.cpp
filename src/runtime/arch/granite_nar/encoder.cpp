@@ -36,6 +36,22 @@ namespace transcribe::granite_nar {
 
 namespace {
 
+// In-block depthwise dispatch. Direct ggml_conv_2d_dw_direct on every
+// backend, as at parakeet's, canary's, canary_qwen's, gigaam's, medasr's and
+// sortformer's in-block site: the vendored ggml implements CONV_2D_DW for an
+// f32 kernel / f32 data / f32 output on CPU, CUDA, Vulkan AND Metal
+// (ggml-metal-device.m supports_op), which is exactly what the branch below
+// builds. Metal picks its pipeline by `use_tiled = (nb12 < nb10)`
+// (ggml-metal-ops.cpp); the reshape below leaves nb12 = 4*T > nb10 = 4, so
+// this lands on the same non-tiled kernel_conv_2d_dw_f32_f32 those families
+// already exercise there — not merely a supported op, the identical kernel.
+//
+// TRANSCRIBE_CONV_NO_DIRECT_DW is the kill switch back to im2col.
+static bool detect_conv_dw_direct() {
+    return transcribe::conformer::resolve_conv_direct("TRANSCRIBE_CONV_DIRECT_DW", "TRANSCRIBE_CONV_NO_DIRECT_DW",
+                                                      /*backend_default=*/true);
+}
+
 constexpr float kLayerNormEps = 1e-5f;
 
 ggml_tensor * named(ggml_tensor * t, const char * name) {
@@ -165,7 +181,8 @@ ggml_tensor * conv_module(ggml_context *             ctx,
                           ggml_tensor *              bn_fused_scale,
                           ggml_tensor *              bn_fused_bias,
                           int                        conv_kernel,
-                          int                        inner_dim) {
+                          int                        inner_dim,
+                          bool                       conv_dw_direct) {
     const int64_t d_model = x->ne[0];
     const int64_t T       = x->ne[1];
 
@@ -182,8 +199,24 @@ ggml_tensor * conv_module(ggml_context *             ctx,
     }
     x                 = ggml_cont(ctx, ggml_permute(ctx, x, 1, 0, 2, 3));
     const int padding = (conv_kernel - 1) / 2;
-    x                 = transcribe::conformer::conv_1d_dw_f32(ctx, b.conv_depthwise_w, x,
-                                                              /*stride=*/1, /*padding=*/padding, /*dilation=*/1);
+    if (conv_dw_direct) {
+        ggml_tensor * knl = b.conv_depthwise_w;
+        if (knl->type != GGML_TYPE_F32) {
+            // ggml_conv_2d_dw_direct misbehaves for non-f32 kernels; the
+            // depthwise kernel is tiny, so cast to f32.
+            knl = ggml_cast(ctx, knl, GGML_TYPE_F32);
+        }
+        knl              = ggml_reshape_4d(ctx, knl, conv_kernel, 1, 1, inner_dim);
+        ggml_tensor * d4 = ggml_reshape_4d(ctx, x, x->ne[0], 1, inner_dim, 1);
+        x                = ggml_conv_2d_dw_direct(ctx, knl, d4,
+                                                  /*s0=*/1, /*s1=*/1,
+                                                  /*p0=*/padding, /*p1=*/0,
+                                                  /*d0=*/1, /*d1=*/1);
+        x                = ggml_reshape_3d(ctx, x, x->ne[0], inner_dim, 1);
+    } else {
+        x = transcribe::conformer::conv_1d_dw_f32(ctx, b.conv_depthwise_w, x,
+                                                  /*stride=*/1, /*padding=*/padding, /*dilation=*/1);
+    }
     x                 = transcribe::conformer::fused_batch_norm(ctx, x, bn_fused_scale, bn_fused_bias);
     x                 = ggml_silu(ctx, x);
     x                 = ggml_cont(ctx, ggml_permute(ctx, x, 1, 0, 2, 3));
@@ -289,8 +322,11 @@ EncoderBuild build_encoder_graph(ggml_context *            ctx,
             transcribe::debug::mark_tensor_for_dump(x);
         }
 
+        // Direct depthwise conv dispatch (TRANSCRIBE_CONV_NO_DIRECT_DW to opt out).
+        static const bool conv_dw_direct = detect_conv_dw_direct();
         ggml_tensor * conv_out =
-            conv_module(ctx, x, b, b.conv_bn_fused_scale, b.conv_bn_fused_bias, conv_k, static_cast<int>(inner_dim));
+            conv_module(ctx, x, b, b.conv_bn_fused_scale, b.conv_bn_fused_bias, conv_k, static_cast<int>(inner_dim),
+                        conv_dw_direct);
         x = ggml_add(ctx, x, conv_out);
         if (i == 0) {
             named(x, "enc.block.0.post_conv");

@@ -162,6 +162,8 @@ class MelFrontend {
     int                 n_freq_;  // n_fft/2 + 1
     std::vector<double> window_;  // [n_fft], periodic hann zero-padded
     std::vector<float>  mel_fb_;  // [num_mels * n_freq] row-major, Slaney
+    std::vector<int>    fb_begin_; // nonzero support start per mel band
+    std::vector<int>    fb_end_;   // nonzero support end per mel band
 
     // sin/cos LUT for the mixed-radix FFT. Sized to n_fft so that every
     // recursion-level N (n_fft, n_fft/2, n_fft/4, ..., odd leaf) divides
