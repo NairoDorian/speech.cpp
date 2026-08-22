@@ -1,0 +1,79 @@
+diff --git a/include/ggml-cuda.h b/include/ggml-cuda.h
+index 37c06f7..87fbaa1 100644
+--- a/include/ggml-cuda.h
++++ b/include/ggml-cuda.h
+@@ -23,6 +23,8 @@ extern "C" {
+ GGML_BACKEND_API ggml_backend_t ggml_backend_cuda_init(int device);
+ 
+ GGML_BACKEND_API bool ggml_backend_is_cuda(ggml_backend_t backend);
++GGML_BACKEND_API void ggml_backend_cuda_trim_pools(ggml_backend_t backend);
++GGML_BACKEND_API void ggml_backend_cuda_clear_graph(ggml_backend_t backend, const struct ggml_cgraph * graph);
+ 
+ // device buffer
+ GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_cuda_buffer_type(int device);
+diff --git a/src/ggml-cuda/common.cuh b/src/ggml-cuda/common.cuh
+index cf39bd3..79053a8 100644
+--- a/src/ggml-cuda/common.cuh
++++ b/src/ggml-cuda/common.cuh
+@@ -1131,6 +1131,9 @@ struct ggml_cuda_pool {
+ 
+     virtual void * alloc(size_t size, size_t * actual_size) = 0;
+     virtual void free(void * ptr, size_t size) = 0;
++    // Release cached device memory back to the driver. Buffers handed out by
++    // alloc() are unaffected; only idle cached capacity is dropped.
++    virtual void clear() {}
+ };
+ 
+ template<typename T>
+diff --git a/src/ggml-cuda/ggml-cuda.cu b/src/ggml-cuda/ggml-cuda.cu
+index 44b3cd9..ea67a93 100644
+--- a/src/ggml-cuda/ggml-cuda.cu
++++ b/src/ggml-cuda/ggml-cuda.cu
+@@ -5034,6 +5038,21 @@ bool ggml_backend_is_cuda(ggml_backend_t backend) {
+     return backend != NULL && ggml_guid_matches(backend->guid, ggml_backend_cuda_guid());
+ }
+ 
++void ggml_backend_cuda_trim_pools(ggml_backend_t backend) {
++    if (!ggml_backend_is_cuda(backend)) {
++        return;
++    }
++    ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
++    CUDA_CHECK(cudaDeviceSynchronize());
++    for (int device = 0; device < GGML_CUDA_MAX_DEVICES; ++device) {
++        for (int stream = 0; stream < GGML_CUDA_MAX_STREAMS; ++stream) {
++            if (cuda_ctx->pools[device][stream] != nullptr) {
++                cuda_ctx->pools[device][stream]->clear();
++            }
++        }
++    }
++}
++
++void ggml_backend_cuda_clear_graph(ggml_backend_t backend, const ggml_cgraph * graph) {
++#ifdef USE_CUDA_GRAPH
++    if (!ggml_backend_is_cuda(backend) || graph == nullptr || graph->n_nodes <= 0) {
++        return;
++    }
++    const void * graph_key = graph->nodes[0];
++    ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
++    cuda_ctx->cuda_graphs.erase(graph_key);
++#else
++    GGML_UNUSED(backend);
++    GGML_UNUSED(graph);
++#endif
++}
++
+ int ggml_backend_cuda_get_device_count() {
+     return ggml_cuda_info().device_count;
+ }
+@@ -5854,6 +5873,12 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
+     if (strcmp(name, "ggml_backend_get_features") == 0) {
+         return (void *)ggml_backend_cuda_get_features;
+     }
++    if (strcmp(name, "ggml_backend_cuda_clear_graph") == 0) {
++        return (void *)ggml_backend_cuda_clear_graph;
++    }
++    if (strcmp(name, "ggml_backend_cuda_trim_pools") == 0) {
++        return (void *)ggml_backend_cuda_trim_pools;
++    }
+     return nullptr;
+ }

@@ -606,6 +606,23 @@ audiocpp_add_model(inflect_v2
         engine::models::inflect_v2::make_inflect_v2_loader
 )
 
+audiocpp_add_model(f5_tts
+    SOURCES
+        src/community_models/f5_tts/session.cpp
+        src/community_models/f5_tts/runtime.cpp
+        src/community_models/f5_tts/weights.cpp
+        src/community_models/f5_tts/dit_modules.cpp
+        src/community_models/f5_tts/synthesize.cpp
+    INCLUDES
+        engine/community_models/f5_tts/session.h
+        engine/community_models/f5_tts/runtime.h
+    LOADERS
+        engine::models::f5_tts::make_f5_tts_loader
+    ALIASES
+        habibi
+        habibi_tts
+)
+
 audiocpp_add_model(minimax_h3
     SOURCES
         src/community_models/minimax_h3/assets.cpp
@@ -751,6 +768,23 @@ audiocpp_add_model(moss
     ALIASES
         moss_tts_local
         moss_tts_nano
+)
+
+audiocpp_add_model(moss_voicegen
+    SOURCES
+        src/community_models/moss_voicegen/assets.cpp
+        src/community_models/moss_voicegen/backbone.cpp
+        src/community_models/moss_voicegen/delay_decoder.cpp
+        src/community_models/moss_voicegen/heads.cpp
+        src/community_models/moss_voicegen/loader.cpp
+        src/community_models/moss_voicegen/session.cpp
+        src/community_models/moss_voicegen/tokenizer_text.cpp
+    INCLUDES
+        engine/community_models/moss_voicegen/loader.h
+    LOADERS
+        engine::models::moss_voicegen::make_moss_voicegen_loader
+    DEPENDS
+        moss
 )
 
 audiocpp_add_model(muscriptor
@@ -1131,6 +1165,19 @@ audiocpp_add_model(qwen3_forced_aligner
         engine::models::qwen3_forced_aligner::make_qwen3_forced_aligner_loader
     DEPENDS
         qwen3_asr
+)
+
+audiocpp_add_model(mms_forced_aligner
+    SOURCES
+        src/community_models/mms_forced_aligner/assets.cpp
+        src/community_models/mms_forced_aligner/ctc_alignment.cpp
+        src/community_models/mms_forced_aligner/emissions.cpp
+        src/community_models/mms_forced_aligner/session.cpp
+        src/community_models/mms_forced_aligner/text_processor.cpp
+    INCLUDES
+        engine/community_models/mms_forced_aligner/session.h
+    LOADERS
+        engine::community_models::mms_forced_aligner::make_mms_forced_aligner_loader
 )
 
 audiocpp_add_model(sortformer_diar
@@ -1875,7 +1922,25 @@ if (vibevoice IN_LIST AUDIOCPP_LINKED_MODELS)
     endif()
 endif()
 
-# These four reference model-internal symbols (MossAudioTokenizer*,
+# F5/Habibi tests: parity harnesses + e2e sample generator. Only when the
+# f5_tts model is linked (they call model-internal symbols) AND test hooks
+# are explicitly enabled — F5_MEL_TEST must never leak into production
+# model libraries (PR #275 review feedback).
+option(ENGINE_F5_TEST_HOOKS "Build F5-TTS test hooks (f5_test_* symbols) and parity binaries" OFF)
+if (f5_tts IN_LIST AUDIOCPP_LINKED_MODELS AND ENGINE_F5_TEST_HOOKS)
+    target_compile_definitions(engine_model_f5_tts PRIVATE F5_MEL_TEST=1)
+    foreach(f5_test IN ITEMS f5_e2e f5_parity f5_cfg_parity f5_tokenizer)
+        add_executable(${f5_test} tests/${f5_test}_main.cpp)
+        target_compile_definitions(${f5_test} PRIVATE F5_MEL_TEST=1)
+        target_link_libraries(${f5_test} PRIVATE engine_runtime ggml)
+        target_include_directories(${f5_test} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        if (ENGINE_ENABLE_OPENMP)
+            target_link_libraries(${f5_test} PRIVATE OpenMP::OpenMP_CXX)
+        endif()
+    endforeach()
+endif()
+
+# These reference model-internal symbols (MossAudioTokenizer*,
 # load_moss_tts_local_assets, ...), which only exist when the moss model is in
 # the selected composite -- same reason vibevoice_finetune_overlay_check is
 # gated above. Without the gate, any lean build (AUDIOCPP_MODEL_SET=core, or a
@@ -1906,6 +1971,51 @@ if (ENGINE_BUILD_TESTS AND moss IN_LIST AUDIOCPP_LINKED_MODELS)
     target_link_libraries(codec_decode_parity PRIVATE engine_runtime ggml)
     if (ENGINE_ENABLE_OPENMP)
         target_link_libraries(codec_decode_parity PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+
+    add_executable(moss_voicegen_codec_parity
+        tests/moss_voicegen/codec_decode_parity.cpp
+    )
+
+    target_link_libraries(moss_voicegen_codec_parity PRIVATE engine_runtime ggml)
+    if (ENGINE_ENABLE_OPENMP)
+        target_link_libraries(moss_voicegen_codec_parity PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+
+    add_executable(moss_voicegen_smoke
+        tests/moss_voicegen/voicegen_smoke.cpp
+    )
+
+    target_link_libraries(moss_voicegen_smoke PRIVATE engine_runtime ggml)
+    if (ENGINE_ENABLE_OPENMP)
+        target_link_libraries(moss_voicegen_smoke PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+
+    add_executable(moss_voicegen_generation_parity
+        tests/moss_voicegen/generation_parity.cpp
+    )
+
+    target_link_libraries(moss_voicegen_generation_parity PRIVATE engine_runtime ggml)
+    if (ENGINE_ENABLE_OPENMP)
+        target_link_libraries(moss_voicegen_generation_parity PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+
+    add_executable(moss_voicegen_backbone_parity
+        tests/moss_voicegen/backbone_parity.cpp
+    )
+
+    target_link_libraries(moss_voicegen_backbone_parity PRIVATE engine_runtime ggml)
+    if (ENGINE_ENABLE_OPENMP)
+        target_link_libraries(moss_voicegen_backbone_parity PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+
+    add_executable(moss_voicegen_prompt_parity
+        tests/moss_voicegen/prompt_parity.cpp
+    )
+
+    target_link_libraries(moss_voicegen_prompt_parity PRIVATE engine_runtime ggml)
+    if (ENGINE_ENABLE_OPENMP)
+        target_link_libraries(moss_voicegen_prompt_parity PRIVATE OpenMP::OpenMP_CXX)
     endif()
 
     add_executable(codec_encode_parity
@@ -1976,6 +2086,7 @@ if (ENGINE_BUILD_WARMBENCH)
     add_engine_warmbench(pocket_tts_warm_bench tests/pocket_tts/pocket_tts_warm_bench.cpp)
     add_engine_warmbench(qwen3_asr_warm_bench tests/qwen3_asr/qwen3_asr_warm_bench.cpp)
     add_engine_warmbench(qwen3_forced_aligner_warm_bench tests/qwen3_forced_aligner/qwen3_forced_aligner_warm_bench.cpp)
+    add_engine_warmbench(mms_forced_aligner_warm_bench tests/mms_forced_aligner/mms_forced_aligner_warm_bench.cpp)
     add_engine_warmbench(qwen3_tts_warm_bench tests/qwen3_tts/qwen3_tts_warm_bench.cpp)
     add_engine_warmbench(seed_vc_warm_bench tests/seed_vc/seed_vc_warm_bench.cpp)
     add_engine_warmbench(silero_vad_warm_bench tests/silero_vad/silero_vad_warm_bench.cpp)
@@ -2348,6 +2459,71 @@ if (ENGINE_BUILD_TESTS)
         add_test(
             NAME qwen3_forced_aligner_processor_test
             COMMAND qwen3_forced_aligner_processor_test
+        )
+    endif()
+
+    if (mms_forced_aligner IN_LIST AUDIOCPP_LINKED_MODELS)
+        add_engine_unittest(mms_forced_aligner_assets_test tests/unittests/test_mms_forced_aligner_assets.cpp)
+        target_sources(mms_forced_aligner_assets_test PRIVATE src/community_models/mms_forced_aligner/assets.cpp)
+        target_include_directories(mms_forced_aligner_assets_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
+
+        add_test(
+            NAME mms_forced_aligner_assets_test
+            COMMAND mms_forced_aligner_assets_test
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        )
+
+        add_engine_unittest(mms_hubert_positional_conv_test tests/unittests/test_mms_hubert_positional_conv.cpp)
+        target_include_directories(mms_hubert_positional_conv_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
+
+        add_test(
+            NAME mms_hubert_positional_conv_test
+            COMMAND mms_hubert_positional_conv_test
+        )
+
+        add_engine_unittest(mms_emissions_test tests/unittests/test_mms_emissions.cpp)
+        target_sources(mms_emissions_test PRIVATE src/community_models/mms_forced_aligner/emissions.cpp)
+        target_include_directories(mms_emissions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
+
+        add_test(
+            NAME mms_emissions_test
+            COMMAND mms_emissions_test
+        )
+
+        add_engine_unittest(mms_text_processor_test tests/unittests/test_mms_text_processor.cpp)
+        target_sources(mms_text_processor_test PRIVATE src/community_models/mms_forced_aligner/text_processor.cpp)
+        target_include_directories(mms_text_processor_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests
+            ${CMAKE_CURRENT_SOURCE_DIR}/external/llama_tokenizer)
+
+        add_test(
+            NAME mms_text_processor_test
+            COMMAND mms_text_processor_test
+        )
+
+        add_engine_unittest(mms_ctc_alignment_test tests/unittests/test_mms_ctc_alignment.cpp)
+        target_sources(mms_ctc_alignment_test PRIVATE src/community_models/mms_forced_aligner/ctc_alignment.cpp)
+        target_include_directories(mms_ctc_alignment_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
+
+        add_test(
+            NAME mms_ctc_alignment_test
+            COMMAND mms_ctc_alignment_test
+        )
+
+        add_engine_unittest(mms_forced_aligner_session_test tests/unittests/test_mms_forced_aligner_session.cpp)
+        target_sources(mms_forced_aligner_session_test PRIVATE
+            src/community_models/mms_forced_aligner/ctc_alignment.cpp
+            src/community_models/mms_forced_aligner/emissions.cpp
+            src/community_models/mms_forced_aligner/session.cpp
+            src/community_models/mms_forced_aligner/text_processor.cpp)
+        target_include_directories(mms_forced_aligner_session_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests
+            ${CMAKE_CURRENT_SOURCE_DIR}/external/llama_tokenizer)
+
+        add_test(
+            NAME mms_forced_aligner_session_test
+            COMMAND mms_forced_aligner_session_test
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         )
     endif()
 

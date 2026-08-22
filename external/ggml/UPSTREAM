@@ -7,6 +7,7 @@ patches:
   patches/ggml/0004-restore-two-sided-broadcast.patch
   patches/ggml/0005-cpu-concat-fastpath.patch
   patches/ggml/0006-conv-im2col-in-weight-type.patch
+  patches/ggml/0007-cuda-trim-pools-and-clear-graph.patch
 
 This directory is generated from the upstream ggml tree at the SHA above, minus
 .github/ and .pi/, with the listed downstream patches applied in order. Do not
