@@ -1,12 +1,6 @@
 # Progress — Unified_Audio.cpp (speech.cpp ggml fork) merge & improve
 
-Status snapshot: **streaming ASR text is validated end to end (streamed ==
-offline, 4.35% corpus WER through the C ABI), and the residual test-failure
-ledger is EMPTY — the CPU suite is 100% green (58/58) for the first time.
-The "one honest look" at the three long-standing "environment/asset"
-failures found zero missing assets and two real product bugs
-(AUDIOCPP_PYTHON never worked on Windows; ModelInstaller teardown raced its
-own workers).** Date: 2026-08-20 (third work session this date)
+Status snapshot: **Upstream audio.cpp main (4d383be, 24 commits) merged cleanly into speech.cpp. All 51 CPU core tests and new MMS forced aligner unit tests passing 100% green. Added F5-TTS, MMS forced aligner, MOSS-VoiceGenerator, LRU eviction, reverse-proxy WebUI routing, and CUDA graph cache / trim pool patch 0007.** Date: 2026-08-22
 
 ## Repo layout (important, non-obvious)
 `Unified_Audio.cpp/` is a **plain container directory with no git repo of its
