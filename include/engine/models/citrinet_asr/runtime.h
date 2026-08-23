@@ -39,10 +39,14 @@ public:
     CitrinetInferenceResult infer_audio(const runtime::AudioBuffer & audio);
     CitrinetTranscriptionResult transcribe_features(const std::vector<float> & features, int64_t frames);
     CitrinetTranscriptionResult transcribe_audio(const runtime::AudioBuffer & audio);
+    // Batched transcription: one shared conv graph processes all clips padded
+    // to the longest frame count. Result[i] corresponds to audios[i].
+    std::vector<CitrinetTranscriptionResult>
+    transcribe_audio_batch(const std::vector<runtime::AudioBuffer> & audios);
 
 private:
     class Graph;
-    Graph & ensure_graph(int64_t frames);
+    Graph & ensure_graph(int64_t frames, int64_t n_seqs);
 
     std::shared_ptr<const CitrinetWeights> weights_;
     std::shared_ptr<const CitrinetBackendWeights> backend_weights_;

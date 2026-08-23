@@ -28,6 +28,13 @@ public:
         const Qwen3ASRAudioEmbeddings & audio_embeddings,
         const Qwen3ASRGenerationOptions & options);
 
+    // Batched generation: per-utterance prefill, then one shared lockstep
+    // decode graph across all utterances. Result[i] matches inputs[i].
+    std::vector<Qwen3ASRGeneratedTokens> generate_batch(
+        const std::vector<Qwen3ASRPrompt> & prompts,
+        const std::vector<Qwen3ASRAudioEmbeddings> & audio_embeddings,
+        const Qwen3ASRGenerationOptions & options);
+
     std::vector<int32_t> classify_prompt(
         const Qwen3ASRPrompt & prompt,
         const Qwen3ASRAudioEmbeddings & audio_embeddings);

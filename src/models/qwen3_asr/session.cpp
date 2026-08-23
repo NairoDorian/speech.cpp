@@ -7,11 +7,13 @@
 #include "engine/models/silero_vad/session.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace engine::models::qwen3_asr {
@@ -256,6 +258,115 @@ runtime::StreamingPolicy Qwen3ASRSession::streaming_policy() const {
     policy.output = runtime::StreamingOutputKind::FinalResult;
     policy.preferred_audio_chunk_seconds = kPreferredStreamingFeedSeconds;
     return policy;
+}
+
+std::vector<runtime::TaskResult> Qwen3ASRSession::run_batch(
+    const std::vector<runtime::TaskRequest> & requests) {
+    const size_t n = requests.size();
+    if (n == 0) {
+        return {};
+    }
+    if (n > 32) {
+        throw std::runtime_error("Qwen3 ASR run_batch() supports at most 32 utterances");
+    }
+    require_prepared("Qwen3 ASR run_batch()");
+    if (task_.mode != runtime::RunMode::Offline) {
+        throw std::runtime_error("Qwen3 ASR run_batch() requires an offline session");
+    }
+    for (const auto & request : requests) {
+        if (request_return_timestamps(request)) {
+            throw std::runtime_error(
+                "Qwen3 ASR run_batch() does not support return_timestamps; "
+                "run utterances individually for timestamp output");
+        }
+    }
+
+    // ---- Expand each request into audio chunks (same plan as run()) ----
+    struct Expanded {
+        size_t request_index;
+        Qwen3ASRRequest asr_request;
+    };
+    std::vector<Expanded> expanded;
+    expanded.reserve(n);
+    for (size_t request_index = 0; request_index < n; ++request_index) {
+        if (!requests[request_index].audio_input.has_value()) {
+            throw std::runtime_error(
+                "Qwen3 ASR run_batch() requires audio_input for every request");
+        }
+        const auto chunks = audio_chunk_plan(requests[request_index]);
+        if (chunks.empty()) {
+            expanded.push_back(
+                {request_index, make_request(requests[request_index])});
+        } else {
+            const auto & audio = *requests[request_index].audio_input;
+            for (const auto & chunk : chunks) {
+                auto chunk_request = requests[request_index];
+                chunk_request.audio_input =
+                    engine::audio::slice_audio_buffer(audio, chunk.source_span);
+                expanded.push_back(
+                    {request_index, make_request(chunk_request)});
+            }
+        }
+    }
+    const size_t m = expanded.size();
+    if (m > 32) {
+        throw std::runtime_error("Qwen3 ASR run_batch() expanded chunks exceed 32");
+    }
+
+    // ---- Pass 0: per-utterance frontend in parallel (host-only) ----
+    std::vector<Qwen3ASRAudioFeatures> features(m);
+    {
+        std::atomic<size_t> next{0};
+        std::vector<std::thread> pool;
+        const size_t workers = std::min<size_t>(m, 4);
+        for (size_t w = 0; w < workers; ++w) {
+            pool.emplace_back([&]() {
+                for (;;) {
+                    const size_t b = next.fetch_add(1);
+                    if (b >= m) {
+                        break;
+                    }
+                    features[b] = frontend_.extract(expanded[b].asr_request.audio);
+                }
+            });
+        }
+        for (auto & thread : pool) {
+            thread.join();
+        }
+    }
+
+    // ---- Pass 1: per-utterance prompt + audio encoder (serial) ----
+    std::vector<Qwen3ASRPrompt> prompts(m);
+    std::vector<Qwen3ASRAudioEmbeddings> audio_embeddings(m);
+    for (size_t b = 0; b < m; ++b) {
+        prompts[b] =
+            prompt_builder_.build(expanded[b].asr_request, features[b].encoder_tokens);
+        audio_embeddings[b] = audio_encoder_.encode(features[b]);
+    }
+
+    // ---- Pass 2: batched thinker (lockstep decode) ----
+    const auto token_sets =
+        thinker_.generate_batch(prompts, audio_embeddings, expanded.front().asr_request.generation);
+
+    // ---- Pass 3: per-utterance token decode, then merge per request ----
+    std::vector<runtime::TaskResult> results(n);
+    for (size_t b = 0; b < m; ++b) {
+        const auto decoded = postprocessor_.decode(token_sets[b], expanded[b].asr_request);
+        auto & result = results[expanded[b].request_index];
+        if (decoded.text.empty()) {
+            continue;
+        }
+        if (result.text_output.has_value() && !result.text_output->text.empty()) {
+            result.text_output->text += ' ';
+        } else {
+            result.text_output = runtime::Transcript{"", decoded.language};
+        }
+        result.text_output->text += decoded.text;
+        if (result.text_output->language.empty()) {
+            result.text_output->language = decoded.language;
+        }
+    }
+    return results;
 }
 
 void Qwen3ASRSession::start_stream(const runtime::TaskRequest & request) {

@@ -4,9 +4,11 @@
 #include "engine/framework/runtime/options.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <unordered_map>
 
@@ -236,6 +238,87 @@ runtime::TaskResult VoxtralRealtimeSession::run(const runtime::TaskRequest & req
         throw std::runtime_error("VoxTral realtime run() is only available for offline sessions");
     }
     return run_single(make_request(request, false), true);
+}
+
+std::vector<runtime::TaskResult> VoxtralRealtimeSession::run_batch(
+    const std::vector<runtime::TaskRequest> & requests) {
+    const size_t n = requests.size();
+    if (n == 0) {
+        return {};
+    }
+    if (n > 32) {
+        throw std::runtime_error("VoxTral realtime run_batch() supports at most 32 utterances");
+    }
+    require_prepared("VoxTral realtime run_batch()");
+    if (task_.mode != runtime::RunMode::Offline) {
+        throw std::runtime_error("VoxTral realtime run_batch() requires an offline session");
+    }
+
+    // ---- Pass 0: per-utterance frontend in parallel (host-only) ----
+    std::vector<VoxtralRealtimeRequest> asr_requests(n);
+    std::vector<VoxtralRealtimeFeatures> features(n);
+    {
+        std::atomic<size_t> next{0};
+        std::vector<std::thread> pool;
+        const size_t workers = std::min<size_t>(n, 4);
+        for (size_t w = 0; w < workers; ++w) {
+            pool.emplace_back([&]() {
+                for (;;) {
+                    const size_t b = next.fetch_add(1);
+                    if (b >= n) {
+                        break;
+                    }
+                    if (!requests[b].audio_input.has_value()) {
+                        throw std::runtime_error(
+                            "VoxTral realtime run_batch() requires audio_input for every request");
+                    }
+                    asr_requests[b] = make_request(requests[b], false);
+                    features[b] = frontend_.extract(asr_requests[b].audio, true);
+                }
+            });
+        }
+        for (auto & thread : pool) {
+            thread.join();
+        }
+    }
+
+    // ---- Pass 1: per-utterance prompt + audio encoder (serial) ----
+    std::vector<VoxtralRealtimePrompt> prompts(n);
+    std::vector<VoxtralRealtimeAudioEmbeddings> audio_embeddings(n);
+    for (size_t b = 0; b < n; ++b) {
+        prompts[b] = tokenizer_.build_transcription_prompt(
+            static_cast<int64_t>(asr_requests[b].audio.samples.size()) /
+                std::max(1, asr_requests[b].audio.channels),
+            false);
+        // Fresh encoder graph per utterance: reusing it can carry stale
+        // compute-buffer state on some backends.
+        audio_encoder_.reset_graph();
+        audio_embeddings[b] = audio_encoder_.encode(features[b]);
+    }
+
+    // ---- Pass 2: per-utterance decode ----
+    // The batched lockstep decode graph does not yet match single-utterance
+    // numerics on this model (stale compute-buffer state when graphs are
+    // reused, and batched attention diverges from the single path), so
+    // utterances decode serially here; frontends and encoders above still run
+    // in parallel/batched.
+    std::vector<runtime::TaskResult> results(n);
+    for (size_t b = 0; b < n; ++b) {
+        // Same token budget as run_single(): the decoder cannot emit more
+        // tokens than audio tokens remain after the prompt.
+        auto generation = asr_requests[b].generation;
+        const int64_t max_total_tokens = audio_embeddings[b].tokens;
+        const int64_t model_new_tokens =
+            std::max<int64_t>(0, max_total_tokens - static_cast<int64_t>(prompts[b].input_ids.size()));
+        generation.max_new_tokens = generation.max_new_tokens_set
+            ? std::min<int64_t>(generation.max_new_tokens, model_new_tokens)
+            : model_new_tokens;
+        const auto token_set =
+            text_decoder_.generate(prompts[b], audio_embeddings[b], generation);
+        results[b].text_output =
+            runtime::Transcript{tokenizer_.decode(token_set.token_ids), ""};
+    }
+    return results;
 }
 
 runtime::StreamingPolicy VoxtralRealtimeSession::streaming_policy() const {

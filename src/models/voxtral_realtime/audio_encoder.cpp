@@ -868,6 +868,10 @@ struct VoxtralRealtimeAudioEncoderRuntime::Impl {
             this->assets->config.audio.sliding_window);
     }
 
+    void reset_graph() {
+        graph.reset();
+    }
+
     VoxtralRealtimeAudioEmbeddings encode(const VoxtralRealtimeFeatures & features) {
         const auto total_start = Clock::now();
         bool rebuilt = false;
@@ -954,6 +958,10 @@ VoxtralRealtimeAudioEncoderRuntime::~VoxtralRealtimeAudioEncoderRuntime() = defa
 
 VoxtralRealtimeAudioEmbeddings VoxtralRealtimeAudioEncoderRuntime::encode(const VoxtralRealtimeFeatures & features) {
     return impl_->encode(features);
+}
+
+void VoxtralRealtimeAudioEncoderRuntime::reset_graph() {
+    impl_->reset_graph();
 }
 
 VoxtralRealtimeAudioEncoderStreamState VoxtralRealtimeAudioEncoderRuntime::make_stream_state() const {

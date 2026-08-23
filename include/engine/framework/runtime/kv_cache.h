@@ -109,6 +109,10 @@ public:
     int64_t current_end() const noexcept;
     int64_t cache_steps() const noexcept;
 
+    size_t layers_count() const noexcept { return layers_.size(); }
+    const core::TensorValue & key_tensor(size_t layer) const { return layers_.at(layer).key_tensor; }
+    const core::TensorValue & value_tensor(size_t layer) const { return layers_.at(layer).value_tensor; }
+
 private:
     struct LayerCache {
         core::TensorValue key_tensor;

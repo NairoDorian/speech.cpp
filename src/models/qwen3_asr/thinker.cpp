@@ -226,6 +226,19 @@ int32_t argmax_index(const std::vector<float> & values) {
     return static_cast<int32_t>(best);
 }
 
+int32_t argmax_index_ptr(const float * values, size_t count) {
+    if (values == nullptr || count == 0) {
+        throw std::runtime_error("Qwen3 ASR thinker cannot select from empty logits");
+    }
+    size_t best = 0;
+    for (size_t i = 1; i < count; ++i) {
+        if (values[i] > values[best]) {
+            best = i;
+        }
+    }
+    return static_cast<int32_t>(best);
+}
+
 bool is_eos(const Qwen3ASRTextDecoderConfig & config, int32_t token) {
     return std::find(config.eos_token_ids.begin(), config.eos_token_ids.end(), static_cast<int64_t>(token)) !=
         config.eos_token_ids.end();
@@ -728,6 +741,187 @@ private:
     ggml_backend_buffer_t buffer_ = nullptr;
 };
 
+// Batched decode-step graph (transcribe.cpp run_batch style): n_seqs
+// utterances share one step graph. Each sequence has its own KV slab inside
+// the per-layer [n_seqs, cache_steps, kv_heads, head_dim] caches, its own
+// cache_slot and its own visible-prefix mask, and produces one row of
+// [n_seqs, output_size] logits per step. The per-utterance prefill K/V is
+// imported into each sequence's slab before the step loop.
+class DecodeGraphBatched {
+public:
+    DecodeGraphBatched(
+        std::shared_ptr<ThinkerWeightsRuntime> runtime,
+        int64_t cache_steps,
+        int64_t n_seqs,
+        size_t graph_arena_bytes)
+        : runtime_(std::move(runtime)),
+          cache_steps_(cache_steps),
+          n_seqs_(n_seqs) {
+        if (cache_steps_ <= 0) {
+            throw std::runtime_error("Qwen3 ASR batched thinker requires positive cache length");
+        }
+        if (n_seqs_ <= 0) {
+            throw std::runtime_error("Qwen3 ASR batched thinker requires positive n_seqs");
+        }
+        const auto build_start = Clock::now();
+        ggml_init_params params{graph_arena_bytes, nullptr, true};
+        ctx_.reset(ggml_init(params));
+        if (ctx_ == nullptr) {
+            throw std::runtime_error("failed to initialize Qwen3 ASR batched thinker graph context");
+        }
+        const auto & config = runtime_->assets().config.text_decoder;
+        const auto & weights = runtime_->weights();
+        core::ModuleBuildContext ctx{ctx_.get(), "qwen3_asr.thinker.decode.batched", runtime_->backend_type()};
+        token_ids_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, n_seqs_);
+        ggml_set_input(token_ids_);
+        auto token_ids = core::wrap_tensor(token_ids_, core::TensorShape::from_dims({n_seqs_}), GGML_TYPE_I32);
+        auto x = modules::EmbeddingModule({config.vocab_size, config.hidden_size})
+                     .build(ctx, token_ids, weights.token_embedding);
+        x = core::reshape_tensor(ctx, x, core::TensorShape::from_dims({n_seqs_, 1, config.hidden_size}));
+        positions_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, n_seqs_);
+        ggml_set_input(positions_);
+        auto positions = core::wrap_tensor(positions_, core::TensorShape::from_dims({n_seqs_}), GGML_TYPE_I32);
+        cache_slot_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, n_seqs_);
+        ggml_set_input(cache_slot_);
+        auto cache_slot = core::wrap_tensor(cache_slot_, core::TensorShape::from_dims({n_seqs_}), GGML_TYPE_I32);
+        attention_mask_ = ggml_new_tensor_4d(ctx_.get(), GGML_TYPE_F16, cache_steps_, 1, 1, n_seqs_);
+        ggml_set_input(attention_mask_);
+        auto attention_mask = core::wrap_tensor(
+            attention_mask_,
+            core::TensorShape::from_dims({n_seqs_, 1, 1, cache_steps_}),
+            GGML_TYPE_F16);
+        graph_ = ggml_new_graph_custom(ctx_.get(), 65536, false);
+        auto decoder_out = modules::QwenCausalDecoderModule(
+                               make_qwen_decoder_config(config, modules::QwenCausalDecoderLogitsMode::LastStep))
+                               .build_static_cache_tail_batched(
+                                   ctx,
+                                   graph_,
+                                   x,
+                                   positions,
+                                   make_qwen_decoder_weights(weights),
+                                   cache_steps_,
+                                   attention_mask,
+                                   cache_slot);
+        cache_ = std::move(decoder_out.cache);
+        if (cache_.layers_count() != static_cast<size_t>(config.num_hidden_layers)) {
+            throw std::runtime_error("Qwen3 ASR batched thinker layer count mismatch");
+        }
+        logits_ = decoder_out.logits.tensor;
+        ggml_set_output(logits_);
+        ggml_build_forward_expand(graph_, logits_);
+        buffer_ = ggml_backend_alloc_ctx_tensors(ctx_.get(), runtime_->backend());
+        if (buffer_ == nullptr) {
+            throw std::runtime_error("failed to allocate Qwen3 ASR batched thinker graph");
+        }
+        attention_mask_values_.assign(
+            static_cast<size_t>(cache_steps_) * static_cast<size_t>(n_seqs_),
+            ggml_fp32_to_fp16(-INFINITY));
+        debug::timing_log_scalar("qwen3_asr.thinker.decode_batched.graph.build_ms", engine::debug::elapsed_ms(build_start, Clock::now()));
+        debug::trace_log_scalar("qwen3_asr.thinker.decode_batched_cache_steps", cache_steps_);
+    }
+
+    ~DecodeGraphBatched() {
+        engine::core::release_backend_graph_resources(runtime_->backend(), graph_);
+        if (buffer_ != nullptr) {
+            ggml_backend_buffer_free(buffer_);
+        }
+    }
+
+    int64_t cache_steps() const noexcept {
+        return cache_steps_;
+    }
+
+    // Import one utterance's prefill K/V (host, [valid_steps, kv_heads,
+    // head_dim] per layer) into sequence `seq`'s slab.
+    void import_state(int64_t seq, const runtime::TransformerKVState & state) {
+        const auto & config = runtime_->assets().config.text_decoder;
+        const int64_t step_elems = config.num_key_value_heads * head_dim(config);
+        const int64_t valid = state.layers.empty() ? 0 : state.layers.front().valid_steps;
+        if (valid > cache_steps_) {
+            throw std::runtime_error("Qwen3 ASR batched thinker import exceeds cache capacity");
+        }
+        const size_t bytes = static_cast<size_t>(valid * step_elems) * sizeof(float);
+        const size_t slab = static_cast<size_t>(seq) * static_cast<size_t>(cache_steps_) *
+            static_cast<size_t>(step_elems) * sizeof(float);
+        for (size_t layer = 0; layer < cache_.layers_count(); ++layer) {
+            const auto & src = state.layers[layer];
+            if (src.key.size() != src.value.size() ||
+                src.key.size() != static_cast<size_t>(valid * step_elems)) {
+                throw std::runtime_error("Qwen3 ASR batched thinker import size mismatch");
+            }
+            ggml_backend_tensor_set(cache_.key_tensor(layer).tensor, src.key.data(), slab, bytes);
+            ggml_backend_tensor_set(cache_.value_tensor(layer).tensor, src.value.data(), slab, bytes);
+        }
+    }
+
+    // One lockstep step. tokens/positions/slots are per-sequence; visible[b]
+    // is each sequence's visible prefix length (its own prefill length + steps
+    // so far). Returns [n_seqs, output_size] logits.
+    std::vector<float> run_step(
+        const std::vector<int32_t> & tokens,
+        const std::vector<int32_t> & positions,
+        const std::vector<int32_t> & slots,
+        const std::vector<int64_t> & visible) {
+        const auto & config = runtime_->assets().config.text_decoder;
+        if (static_cast<int64_t>(tokens.size()) != n_seqs_ ||
+            static_cast<int64_t>(positions.size()) != n_seqs_ ||
+            static_cast<int64_t>(slots.size()) != n_seqs_ ||
+            static_cast<int64_t>(visible.size()) != n_seqs_) {
+            throw std::runtime_error("Qwen3 ASR batched thinker step input size mismatch");
+        }
+        for (int64_t b = 0; b < n_seqs_; ++b) {
+            if (slots[static_cast<size_t>(b)] >= cache_steps_) {
+                throw std::runtime_error("Qwen3 ASR batched thinker cache exhausted");
+            }
+        }
+        ggml_backend_tensor_set(token_ids_, tokens.data(), 0, tokens.size() * sizeof(int32_t));
+        ggml_backend_tensor_set(positions_, positions.data(), 0, positions.size() * sizeof(int32_t));
+        // FastKVSetRows indexes the flat [n_seqs * cache_steps, row_elems]
+        // cache with row = batch * cache_steps + slot, so per-sequence slots
+        // must carry the batch offset.
+        std::vector<int32_t> set_slots(static_cast<size_t>(n_seqs_));
+        for (int64_t b = 0; b < n_seqs_; ++b) {
+            set_slots[static_cast<size_t>(b)] =
+                slots[static_cast<size_t>(b)] + static_cast<int32_t>(b) * static_cast<int32_t>(cache_steps_);
+        }
+        ggml_backend_tensor_set(cache_slot_, set_slots.data(), 0, set_slots.size() * sizeof(int32_t));
+        // Mask: sequence b sees [0, visible[b]) plus its current slot.
+        for (int64_t b = 0; b < n_seqs_; ++b) {
+            auto * row = attention_mask_values_.data() + static_cast<size_t>(b) * static_cast<size_t>(cache_steps_);
+            std::fill(row, row + cache_steps_, ggml_fp32_to_fp16(-INFINITY));
+            for (int64_t k = 0; k < visible[static_cast<size_t>(b)]; ++k) {
+                row[k] = ggml_fp32_to_fp16(0.0F);
+            }
+            row[slots[static_cast<size_t>(b)]] = ggml_fp32_to_fp16(0.0F);
+        }
+        ggml_backend_tensor_set(attention_mask_, attention_mask_values_.data(), 0, attention_mask_values_.size() * sizeof(ggml_fp16_t));
+        core::set_backend_threads(runtime_->backend(), runtime_->threads());
+        const ggml_status status = engine::core::compute_backend_graph(runtime_->backend(), graph_);
+        ggml_backend_synchronize(runtime_->backend());
+        if (status != GGML_STATUS_SUCCESS) {
+            throw std::runtime_error("Qwen3 ASR batched thinker step graph compute failed");
+        }
+        std::vector<float> logits(static_cast<size_t>(n_seqs_) * static_cast<size_t>(config.output_size));
+        ggml_backend_tensor_get(logits_, logits.data(), 0, logits.size() * sizeof(float));
+        return logits;
+    }
+
+private:
+    std::shared_ptr<ThinkerWeightsRuntime> runtime_;
+    int64_t cache_steps_ = 0;
+    int64_t n_seqs_ = 0;
+    std::unique_ptr<ggml_context, GgmlContextDeleter> ctx_;
+    ggml_tensor * token_ids_ = nullptr;
+    ggml_tensor * positions_ = nullptr;
+    ggml_tensor * cache_slot_ = nullptr;
+    ggml_tensor * attention_mask_ = nullptr;
+    ggml_tensor * logits_ = nullptr;
+    std::vector<ggml_fp16_t> attention_mask_values_;
+    runtime::TransformerBatchedKVCache cache_;
+    ggml_cgraph * graph_ = nullptr;
+    ggml_backend_buffer_t buffer_ = nullptr;
+};
+
 }  // namespace
 
 struct Qwen3ASRThinkerRuntime::Impl {
@@ -864,6 +1058,109 @@ struct Qwen3ASRThinkerRuntime::Impl {
         return token_ids;
     }
 
+    // Batched generation (transcribe.cpp run_batch style): each utterance is
+    // prefilled serially through the shape-cached prefill graph, then all
+    // sequences decode in lockstep through one shared batched step graph.
+    std::vector<Qwen3ASRGeneratedTokens> generate_batch(
+        const std::vector<Qwen3ASRPrompt> & prompts,
+        const std::vector<Qwen3ASRAudioEmbeddings> & audio_embeddings,
+        const Qwen3ASRGenerationOptions & options) {
+        const auto & config = weights->assets().config.text_decoder;
+        const size_t n = prompts.size();
+        if (n == 0) {
+            return {};
+        }
+        if (n > 32) {
+            throw std::runtime_error("Qwen3 ASR batched thinker supports at most 32 utterances");
+        }
+        if (options.max_new_tokens <= 0) {
+            throw std::runtime_error("Qwen3 ASR max_new_tokens must be positive");
+        }
+        if (audio_embeddings.size() != n) {
+            throw std::runtime_error("Qwen3 ASR batched thinker input count mismatch");
+        }
+
+        // ---- Per-utterance prefill (serial; reuses the cached prefill graph) ----
+        std::vector<runtime::TransformerKVState> kv_states(n);
+        std::vector<std::vector<float>> first_logits(n);
+        std::vector<int64_t> prompt_steps(n);
+        int64_t max_cache_steps = 0;
+        for (size_t b = 0; b < n; ++b) {
+            const auto & prompt = prompts[b];
+            const auto & audio = audio_embeddings[b];
+            if (prompt.input_ids.empty()) {
+                throw std::runtime_error("Qwen3 ASR batched thinker prompt is empty");
+            }
+            const int64_t steps = static_cast<int64_t>(prompt.input_ids.size());
+            if (steps + options.max_new_tokens > config.max_position_embeddings) {
+                throw std::runtime_error("Qwen3 ASR batched thinker request exceeds max_position_embeddings");
+            }
+            validate_prompt_audio(prompt, audio);
+            if (prefill_graph == nullptr ||
+                !prefill_graph->matches(*weights, steps, audio.tokens)) {
+                prefill_graph = std::make_unique<PrefillGraph>(
+                    weights, steps, audio.tokens, prefill_graph_arena_bytes);
+            }
+            auto prefill = prefill_graph->run(
+                prompt.input_ids, audio.values, prompt.audio_token_positions);
+            kv_states[b] = std::move(prefill.kv_state);
+            first_logits[b] = std::move(prefill.logits);
+            prompt_steps[b] = steps;
+            max_cache_steps =
+                std::max(max_cache_steps, steps + options.max_new_tokens);
+        }
+
+        // ---- Shared batched step graph ----
+        DecodeGraphBatched decode(weights, std::max<int64_t>(max_cache_steps, 1),
+                                  static_cast<int64_t>(n), decode_graph_arena_bytes);
+        for (size_t b = 0; b < n; ++b) {
+            decode.import_state(static_cast<int64_t>(b), kv_states[b]);
+        }
+
+        // ---- Lockstep generation ----
+        std::vector<Qwen3ASRGeneratedTokens> out(n);
+        std::vector<int32_t> tokens(n, 0), positions(n, 0), slots(n, 0);
+        std::vector<int64_t> visible(n, 0);
+        std::vector<char> finished(n, 0);
+        int64_t active = static_cast<int64_t>(n);
+        for (size_t b = 0; b < n; ++b) {
+            const int32_t tok = argmax_index(first_logits[b]);
+            positions[b] = static_cast<int32_t>(prompt_steps[b]);
+            slots[b] = static_cast<int32_t>(prompt_steps[b]);
+            visible[b] = prompt_steps[b];
+            if (is_eos(config, tok)) {
+                finished[b] = 1;
+                --active;
+            } else {
+                out[b].token_ids.push_back(tok);
+            }
+            tokens[b] = tok;
+        }
+        for (int64_t step = 1; step < options.max_new_tokens && active > 0; ++step) {
+            const auto logits_batch = decode.run_step(tokens, positions, slots, visible);
+            for (size_t b = 0; b < n; ++b) {
+                if (finished[b]) {
+                    continue;
+                }
+                const float * row = logits_batch.data() + b * static_cast<size_t>(config.output_size);
+                const int32_t tok = argmax_index_ptr(row, static_cast<size_t>(config.output_size));
+                if (is_eos(config, tok)) {
+                    finished[b] = 1;
+                    --active;
+                } else {
+                    out[b].token_ids.push_back(tok);
+                }
+                tokens[b] = tok;
+            }
+            for (size_t b = 0; b < n; ++b) {
+                ++positions[b];
+                ++slots[b];
+                ++visible[b];
+            }
+        }
+        return out;
+    }
+
     std::shared_ptr<ThinkerWeightsRuntime> weights;
     size_t prefill_graph_arena_bytes = 0;
     size_t decode_graph_arena_bytes = 0;
@@ -894,6 +1191,13 @@ Qwen3ASRGeneratedTokens Qwen3ASRThinkerRuntime::generate(
     const Qwen3ASRAudioEmbeddings & audio_embeddings,
     const Qwen3ASRGenerationOptions & options) {
     return impl_->generate(prompt, audio_embeddings, options);
+}
+
+std::vector<Qwen3ASRGeneratedTokens> Qwen3ASRThinkerRuntime::generate_batch(
+    const std::vector<Qwen3ASRPrompt> & prompts,
+    const std::vector<Qwen3ASRAudioEmbeddings> & audio_embeddings,
+    const Qwen3ASRGenerationOptions & options) {
+    return impl_->generate_batch(prompts, audio_embeddings, options);
 }
 
 std::vector<int32_t> Qwen3ASRThinkerRuntime::classify_prompt(

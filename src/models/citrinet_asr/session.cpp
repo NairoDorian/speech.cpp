@@ -141,6 +141,37 @@ runtime::TaskResult CitrinetASRSession::run(const runtime::TaskRequest & request
     return result;
 }
 
+std::vector<runtime::TaskResult> CitrinetASRSession::run_batch(
+    const std::vector<runtime::TaskRequest> & requests) {
+    const size_t n = requests.size();
+    if (n == 0) {
+        return {};
+    }
+    if (n > 32) {
+        throw std::runtime_error("Citrinet ASR run_batch() supports at most 32 utterances");
+    }
+    require_prepared("Citrinet ASR run_batch()");
+    std::vector<runtime::AudioBuffer> audios;
+    audios.reserve(n);
+    for (const auto & request : requests) {
+        if (!request.audio_input.has_value()) {
+            throw std::runtime_error("Citrinet ASR run_batch() requires audio_input for every request");
+        }
+        audios.push_back(*request.audio_input);
+    }
+    const auto transcriptions = runtime_.transcribe_audio_batch(audios);
+    if (transcriptions.size() != n) {
+        throw std::runtime_error("Citrinet ASR run_batch() returned the wrong result count");
+    }
+    std::vector<runtime::TaskResult> results(n);
+    for (size_t b = 0; b < n; ++b) {
+        results[b].text_output = runtime::Transcript{
+            transcriptions[b].text,
+            requests[b].text_input.has_value() ? requests[b].text_input->language : ""};
+    }
+    return results;
+}
+
 CitrinetASRLoadedModel::CitrinetASRLoadedModel(
     runtime::ModelMetadata metadata,
     runtime::CapabilitySet capabilities,

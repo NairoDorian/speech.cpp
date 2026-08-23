@@ -23,6 +23,10 @@ public:
     ~VoxtralRealtimeAudioEncoderRuntime();
 
     VoxtralRealtimeAudioEmbeddings encode(const VoxtralRealtimeFeatures & features);
+    // Drops the cached encoder graph so the next encode() rebuilds it. Used by
+    // the batched path, where reusing a graph across utterances can carry
+    // stale compute-buffer state on some backends.
+    void reset_graph();
     VoxtralRealtimeAudioEncoderStreamState make_stream_state() const;
     VoxtralRealtimeAudioEmbeddings encode_stream_chunk(
         const VoxtralRealtimeFeatures & features,

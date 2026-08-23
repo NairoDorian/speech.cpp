@@ -23,6 +23,11 @@ public:
     runtime::RunMode run_mode() const override;
     void prepare(const runtime::SessionPreparationRequest & request) override;
     runtime::TaskResult run(const runtime::TaskRequest & request) override;
+    // Batched offline ASR: features are computed in parallel and all clips are
+    // transcribed through one shared conv graph. Result[i] corresponds to
+    // requests[i].
+    std::vector<runtime::TaskResult>
+    run_batch(const std::vector<runtime::TaskRequest> & requests) override;
 
 private:
     runtime::TaskSpec task_;

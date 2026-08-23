@@ -10,6 +10,7 @@
 #include <ggml.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -22,6 +23,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -648,6 +650,204 @@ runtime::TaskResult VibeVoiceASRSession::run(const runtime::TaskRequest & reques
         merged.text_output->text = text.str();
     }
     return merged;
+}
+
+std::vector<runtime::TaskResult> VibeVoiceASRSession::run_batch(
+    const std::vector<runtime::TaskRequest> & requests) {
+    const size_t n = requests.size();
+    if (n == 0) {
+        return {};
+    }
+    if (n > 32) {
+        throw std::runtime_error("VibeVoice-ASR run_batch() supports at most 32 utterances");
+    }
+    require_prepared("VibeVoice-ASR run_batch()");
+    if (task_.mode != runtime::RunMode::Offline) {
+        throw std::runtime_error("VibeVoice-ASR run_batch() only supports Offline run mode");
+    }
+    for (const auto & request : requests) {
+        if (!request.audio_input.has_value()) {
+            throw std::runtime_error("VibeVoice-ASR run_batch() requires audio_input for every request");
+        }
+        if (make_request(request).generation.num_beams > 1) {
+            throw std::runtime_error(
+                "VibeVoice-ASR run_batch() does not support beam search; "
+                "run utterances individually for num_beams > 1");
+        }
+    }
+
+    // ---- Expand each request into audio chunks (same plan as run()) ----
+    struct Expanded {
+        size_t request_index;
+        VibeVoiceASRRequest asr_request;
+    };
+    std::vector<Expanded> expanded;
+    expanded.reserve(n);
+    for (size_t request_index = 0; request_index < n; ++request_index) {
+        const auto chunks = audio_chunk_plan(requests[request_index]);
+        if (chunks.empty()) {
+            expanded.push_back({request_index, make_request(requests[request_index])});
+        } else {
+            const auto & audio = *requests[request_index].audio_input;
+            for (const auto & chunk : chunks) {
+                auto chunk_request = requests[request_index];
+                chunk_request.audio_input =
+                    engine::audio::slice_audio_buffer(audio, chunk.source_span);
+                expanded.push_back({request_index, make_request(chunk_request)});
+            }
+        }
+    }
+    const size_t m = expanded.size();
+    if (m > 32) {
+        throw std::runtime_error("VibeVoice-ASR run_batch() expanded chunks exceed 32");
+    }
+
+    // ---- Pass 0: per-utterance frontend in parallel (host-only) ----
+    std::vector<runtime::AudioBuffer> normalized_audio(m);
+    {
+        std::atomic<size_t> next{0};
+        std::vector<std::thread> pool;
+        const size_t workers = std::min<size_t>(m, 4);
+        for (size_t w = 0; w < workers; ++w) {
+            pool.emplace_back([&]() {
+                for (;;) {
+                    const size_t b = next.fetch_add(1);
+                    if (b >= m) {
+                        break;
+                    }
+                    normalized_audio[b] =
+                        frontend_.normalize(expanded[b].asr_request.audio);
+                }
+            });
+        }
+        for (auto & thread : pool) {
+            thread.join();
+        }
+    }
+
+    // ---- Pass 1: per-utterance speech encoder, prompt, prefill (serial) ----
+    std::vector<VibeVoiceASRPrompt> prompts(m);
+    std::vector<runtime::TransformerKVState> prefill_states(m);
+    std::vector<std::vector<float>> first_logits(m);
+    std::vector<int64_t> prompt_tokens(m);
+    int64_t max_cache_steps = 0;
+    for (size_t b = 0; b < m; ++b) {
+        const auto & asr_request = expanded[b].asr_request;
+        const auto speech = speech_encoder_.encode(normalized_audio[b], asr_request.generation.seed);
+        auto prompt_request = asr_request;
+        prompt_request.audio = normalized_audio[b];
+        prompts[b] = tokenizer_.build_prompt(prompt_request, speech.frames);
+        auto prefill = text_decoder_.prefill_prompt(
+            prompts[b].input_ids, speech.values, prompts[b].speech_positions);
+        prefill_states[b] = std::move(prefill.state);
+        first_logits[b] = std::move(prefill.result.logits.values);
+        prompt_tokens[b] = static_cast<int64_t>(prompts[b].input_ids.size());
+        max_cache_steps = std::max<int64_t>(
+            max_cache_steps,
+            prompt_tokens[b] + asr_request.generation.max_new_tokens);
+    }
+
+    // ---- Pass 2: batched greedy decode (lockstep) ----
+    VibeVoiceDecoderCachedStateBatched batched_state;
+    text_decoder_.reset_batched_state(batched_state, std::move(prefill_states));
+    std::vector<std::vector<int32_t>> generated(m);
+    std::vector<std::mt19937> rngs;
+    rngs.reserve(m);
+    for (size_t b = 0; b < m; ++b) {
+        rngs.emplace_back(static_cast<uint32_t>(expanded[b].asr_request.generation.seed));
+    }
+    std::vector<std::vector<uint8_t>> seen(m);
+    std::vector<int32_t> positions(m), slots(m);
+    std::vector<int64_t> visible(m);
+    std::vector<char> finished(m, 0);
+    std::vector<std::vector<float>> logits(m);
+    int64_t active = static_cast<int64_t>(m);
+    std::vector<float> embeddings;
+    const int64_t hidden = static_cast<int64_t>(assets_->config.decoder.hidden_size);
+    const int64_t vocab = static_cast<int64_t>(assets_->config.decoder.vocab_size);
+    for (size_t b = 0; b < m; ++b) {
+        logits[b] = std::move(first_logits[b]);
+        positions[b] = static_cast<int32_t>(prompt_tokens[b]);
+        slots[b] = static_cast<int32_t>(prompt_tokens[b]);
+        visible[b] = prompt_tokens[b];
+    }
+    for (int64_t step = 0; step < max_cache_steps && active > 0; ++step) {
+        for (size_t b = 0; b < m; ++b) {
+            if (finished[b]) {
+                continue;
+            }
+            const auto & generation = expanded[b].asr_request.generation;
+            apply_repetition_penalty(
+                logits[b],
+                prompts[b].input_ids,
+                generated[b],
+                generation.repetition_penalty,
+                seen[b]);
+            const int32_t next = generation.temperature > 0.0F
+                ? sample_token(
+                      logits[b],
+                      generation.temperature,
+                      generation.top_p,
+                      generation.top_k,
+                      generation.seed,
+                      (static_cast<uint64_t>(expanded[b].asr_request.generation.seed) + 3ull) / 4ull +
+                          static_cast<uint64_t>(step),
+                      sampling_policy_,
+                      rngs[b],
+                      greedy_compare_bf16_)
+                : argmax_token(logits[b], false);
+            generated[b].push_back(next);
+            if (next == tokenizer_.eos_id()) {
+                finished[b] = 1;
+                --active;
+            }
+        }
+        if (active <= 0) {
+            break;
+        }
+        embeddings.clear();
+        embeddings.reserve(m * static_cast<size_t>(hidden));
+        for (size_t b = 0; b < m; ++b) {
+            if (finished[b]) {
+                embeddings.insert(embeddings.end(), static_cast<size_t>(hidden), 0.0F);
+                continue;
+            }
+            const auto next_embedding = text_decoder_.embed_tokens({generated[b].back()});
+            embeddings.insert(
+                embeddings.end(), next_embedding.values.begin(), next_embedding.values.end());
+        }
+        const auto result = text_decoder_.batched_cached_step(
+            embeddings, positions, slots, visible, batched_state, max_cache_steps);
+        for (size_t b = 0; b < m; ++b) {
+            if (finished[b]) {
+                continue;
+            }
+            logits[b].assign(
+                result.logits.begin() + static_cast<ptrdiff_t>(b * vocab),
+                result.logits.begin() + static_cast<ptrdiff_t>((b + 1) * vocab));
+            ++positions[b];
+            ++slots[b];
+            ++visible[b];
+        }
+    }
+
+    // ---- Pass 3: per-utterance token decode, then merge per request ----
+    std::vector<runtime::TaskResult> results(n);
+    for (size_t b = 0; b < m; ++b) {
+        const auto decoded = postprocessor_.decode(
+            VibeVoiceASRGeneratedTokens{std::move(generated[b]), {}});
+        auto & result = results[expanded[b].request_index];
+        if (decoded.text.empty()) {
+            continue;
+        }
+        if (result.text_output.has_value() && !result.text_output->text.empty()) {
+            result.text_output->text += ' ';
+        } else {
+            result.text_output = runtime::Transcript{"", expanded[b].asr_request.language};
+        }
+        result.text_output->text += decoded.text;
+    }
+    return results;
 }
 
 runtime::StreamingPolicy VibeVoiceASRSession::streaming_policy() const {

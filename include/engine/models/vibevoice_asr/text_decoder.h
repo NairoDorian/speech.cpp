@@ -27,6 +27,7 @@ namespace engine::models::vibevoice_asr {
 
 class VibeVoiceDecoderPrefillGraph;
 class VibeVoiceDecoderCachedStepGraph;
+class VibeVoiceDecoderCachedStepGraphBatched;
 class VibeVoiceDecoderEmbeddingGraph;
 
 class VibeVoiceDecoderCachedState final {
@@ -44,6 +45,26 @@ private:
 
     std::unique_ptr<VibeVoiceDecoderCachedStepGraph> graph_;
     runtime::TransformerKVState pending_state_;
+    bool graph_has_state_ = false;
+};
+
+// Batched variant of VibeVoiceDecoderCachedState: one shared step graph holds
+// every sequence's KV slab, and each sequence advances its own position/slot.
+class VibeVoiceDecoderCachedStateBatched final {
+public:
+    VibeVoiceDecoderCachedStateBatched();
+    ~VibeVoiceDecoderCachedStateBatched();
+
+    VibeVoiceDecoderCachedStateBatched(const VibeVoiceDecoderCachedStateBatched &) = delete;
+    VibeVoiceDecoderCachedStateBatched & operator=(const VibeVoiceDecoderCachedStateBatched &) = delete;
+    VibeVoiceDecoderCachedStateBatched(VibeVoiceDecoderCachedStateBatched &&) noexcept;
+    VibeVoiceDecoderCachedStateBatched & operator=(VibeVoiceDecoderCachedStateBatched &&) noexcept;
+
+private:
+    friend class VibeVoiceDecoderWeightsRuntime;
+
+    std::unique_ptr<VibeVoiceDecoderCachedStepGraphBatched> graph_;
+    std::vector<runtime::TransformerKVState> pending_states_;
     bool graph_has_state_ = false;
 };
 
@@ -66,6 +87,13 @@ struct VibeVoiceDecoderHidden {
 struct VibeVoiceDecoderResult {
     VibeVoiceDecoderLogits logits;
     VibeVoiceDecoderHidden last_hidden;
+};
+
+// Batched decode result: one logits/hidden row per sequence, [n_seqs, vocab]
+// and [n_seqs, hidden] respectively.
+struct VibeVoiceDecoderBatchedResult {
+    std::vector<float> logits;
+    std::vector<float> hidden;
 };
 
 struct VibeVoiceDecoderPrefillOutput {
@@ -137,6 +165,19 @@ public:
     VibeVoiceDecoderResult cached_step(
         const std::vector<float> & embedding,
         VibeVoiceDecoderCachedState & state,
+        int64_t cache_capacity) const;
+    // Batched decode: reset_batched_state imports one prefill K/V per
+    // sequence, then batched_cached_step advances all sequences in lockstep
+    // (embeddings [n_seqs, hidden]; positions/slots/visible are per-sequence).
+    void reset_batched_state(
+        VibeVoiceDecoderCachedStateBatched & state,
+        std::vector<runtime::TransformerKVState> prefill_states) const;
+    VibeVoiceDecoderBatchedResult batched_cached_step(
+        const std::vector<float> & embeddings,
+        const std::vector<int32_t> & positions,
+        const std::vector<int32_t> & slots,
+        const std::vector<int64_t> & visible,
+        VibeVoiceDecoderCachedStateBatched & state,
         int64_t cache_capacity) const;
 
 private:

@@ -19,10 +19,12 @@
 #include <ggml.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <thread>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -262,7 +264,20 @@ core::TensorValue conv1d(
     if (conv.groups != 1) {
         throw std::runtime_error("Citrinet only supports regular or depthwise Conv1d groups");
     }
-    return modules::FastConv1dModule({
+    // The fast im2col kernel assumes a single-batch [1, C, T] input; the
+    // standard module lowers batched convs per sequence and concatenates.
+    if (x.shape.dims[0] == 1) {
+        return modules::FastConv1dModule({
+            conv.in_channels,
+            conv.out_channels,
+            conv.kernel,
+            static_cast<int>(conv.stride),
+            static_cast<int>(conv.padding),
+            static_cast<int>(conv.dilation),
+            conv.use_bias,
+        }, modules::FastConv1dKind::MinittsFast1dIm2col).build(ctx, x, conv.conv);
+    }
+    return modules::Conv1dModule({
         conv.in_channels,
         conv.out_channels,
         conv.kernel,
@@ -270,7 +285,7 @@ core::TensorValue conv1d(
         static_cast<int>(conv.padding),
         static_cast<int>(conv.dilation),
         conv.use_bias,
-    }, modules::FastConv1dKind::MinittsFast1dIm2col).build(ctx, x, conv.conv);
+    }).build(ctx, x, conv.conv);
 }
 
 core::TensorValue squeeze_excite(
@@ -349,15 +364,20 @@ class CitrinetRuntime::Graph {
         std::shared_ptr<const CitrinetWeights> weights,
         std::shared_ptr<const CitrinetBackendWeights> backend_weights,
         int64_t frames,
+        int64_t n_seqs,
         core::ExecutionContext & execution_context)
         : weights_(std::move(weights)),
           backend_weights_(std::move(backend_weights)),
           frames_(frames),
+          n_seqs_(n_seqs),
           backend_(execution_context.backend()),
           compute_threads_(std::max(1, execution_context.config().threads)) {
         const auto build_start = Clock::now();
         if (frames_ <= 0) {
             throw std::runtime_error("invalid Citrinet graph shape");
+        }
+        if (n_seqs_ <= 0) {
+            throw std::runtime_error("invalid Citrinet graph batch size");
         }
         if (backend_ == nullptr) {
             throw std::runtime_error("Citrinet execution backend is not initialized");
@@ -372,7 +392,7 @@ class CitrinetRuntime::Graph {
             "citrinet_asr",
             execution_context.backend_type(),
         };
-        auto input = core::make_tensor(build_ctx, GGML_TYPE_F32, core::TensorShape::from_dims({1, weights_->config.n_mels, frames_}));
+        auto input = core::make_tensor(build_ctx, GGML_TYPE_F32, core::TensorShape::from_dims({n_seqs_, weights_->config.n_mels, frames_}));
         input_ = input.tensor;
         ggml_set_input(input_);
         output_ = build_citrinet_graph(build_ctx, input, *backend_weights_).tensor;
@@ -405,8 +425,8 @@ class CitrinetRuntime::Graph {
         }
     }
 
-    bool matches(const CitrinetWeights & weights, int64_t frames, ggml_backend_t backend, int threads) const {
-        return weights_.get() == &weights && frames_ == frames && backend_ == backend && compute_threads_ == std::max(1, threads);
+    bool matches(const CitrinetWeights & weights, int64_t frames, int64_t n_seqs, ggml_backend_t backend, int threads) const {
+        return weights_.get() == &weights && frames_ == frames && n_seqs_ == n_seqs && backend_ == backend && compute_threads_ == std::max(1, threads);
     }
 
     CitrinetInferenceResult run(const std::vector<float> & features) {
@@ -457,10 +477,52 @@ class CitrinetRuntime::Graph {
         return result;
     }
 
+    // Batched forward: `features` is the channels-first payload of all
+    // sequences concatenated, [n_seqs * n_mels * frames] (each sequence is
+    // zero-padded to frames_). Returns row-major logits for every sequence
+    // concatenated, [n_seqs * output_frames * num_classes].
+    std::vector<float> run_batched(const std::vector<float> & features) {
+        const int64_t expected = n_seqs_ * frames_ * weights_->config.n_mels;
+        if (static_cast<int64_t>(features.size()) != expected) {
+            throw std::runtime_error("Citrinet batched feature tensor size mismatch");
+        }
+        ggml_backend_tensor_set(input_, features.data(), 0, features.size() * sizeof(float));
+        core::set_backend_threads(backend_, compute_threads_);
+        const auto compute_start = Clock::now();
+        const ggml_status status = core::compute_backend_graph(backend_, graph_, plan_);
+        ggml_backend_synchronize(backend_);
+        const auto compute_end = Clock::now();
+        if (status != GGML_STATUS_SUCCESS) {
+            throw std::runtime_error("Citrinet graph compute failed");
+        }
+        const size_t values = ggml_nelements(output_);
+        if (raw_output_.size() != values) {
+            raw_output_.resize(values);
+        }
+        ggml_backend_tensor_get(output_, raw_output_.data(), 0, raw_output_.size() * sizeof(float));
+        // Output is [n_seqs, num_classes, output_frames] (ne = [output_frames,
+        // num_classes, n_seqs]); expand to per-sequence row-major logits.
+        const int64_t output_frames = output_->ne[0];
+        const int64_t num_classes = output_->ne[1];
+        const int64_t per_seq = output_frames * num_classes;
+        std::vector<float> out(static_cast<size_t>(n_seqs_ * per_seq), 0.0F);
+        for (int64_t seq = 0; seq < n_seqs_; ++seq) {
+            for (int64_t frame = 0; frame < output_frames; ++frame) {
+                for (int64_t cls = 0; cls < num_classes; ++cls) {
+                    out[static_cast<size_t>(seq * per_seq + frame * num_classes + cls)] =
+                        raw_output_[static_cast<size_t>(seq * output_frames * num_classes + frame + output_frames * cls)];
+                }
+            }
+        }
+        debug::timing_log_scalar("citrinet.graph.compute_ms", engine::debug::elapsed_ms(compute_start, compute_end));
+        return out;
+    }
+
   private:
     std::shared_ptr<const CitrinetWeights> weights_;
     std::shared_ptr<const CitrinetBackendWeights> backend_weights_;
     int64_t frames_ = 0;
+    int64_t n_seqs_ = 1;
     std::unique_ptr<ggml_context, GgmlContextDeleter> ctx_;
     ggml_tensor * input_ = nullptr;
     ggml_tensor * output_ = nullptr;
@@ -658,15 +720,18 @@ CitrinetRuntime::CitrinetRuntime(
 
 CitrinetRuntime::~CitrinetRuntime() = default;
 
-CitrinetRuntime::Graph & CitrinetRuntime::ensure_graph(int64_t frames) {
+CitrinetRuntime::Graph & CitrinetRuntime::ensure_graph(int64_t frames, int64_t n_seqs) {
     if (frames <= 0) {
         throw std::runtime_error("frames must be positive");
+    }
+    if (n_seqs <= 0) {
+        throw std::runtime_error("n_seqs must be positive");
     }
     if (execution_context_ == nullptr) {
         throw std::runtime_error("Citrinet execution context is not initialized");
     }
-    if (!graph_ || !graph_->matches(*weights_, frames, execution_context_->backend(), execution_context_->config().threads)) {
-        graph_ = std::make_unique<Graph>(weights_, backend_weights_, frames, *execution_context_);
+    if (!graph_ || !graph_->matches(*weights_, frames, n_seqs, execution_context_->backend(), execution_context_->config().threads)) {
+        graph_ = std::make_unique<Graph>(weights_, backend_weights_, frames, n_seqs, *execution_context_);
     }
     return *graph_;
 }
@@ -675,7 +740,7 @@ CitrinetInferenceResult CitrinetRuntime::infer_features(const std::vector<float>
     if (features.size() != static_cast<size_t>(frames * weights_->config.n_mels)) {
         throw std::runtime_error("feature tensor size mismatch");
     }
-    return ensure_graph(frames).run(features);
+    return ensure_graph(frames, 1).run(features);
 }
 
 CitrinetInferenceResult CitrinetRuntime::infer_audio(const runtime::AudioBuffer & audio) {
@@ -688,6 +753,73 @@ CitrinetTranscriptionResult CitrinetRuntime::transcribe_features(const std::vect
 
 CitrinetTranscriptionResult CitrinetRuntime::transcribe_audio(const runtime::AudioBuffer & audio) {
     return make_transcription_result(*weights_, infer_audio(audio));
+}
+
+std::vector<CitrinetTranscriptionResult> CitrinetRuntime::transcribe_audio_batch(
+    const std::vector<runtime::AudioBuffer> & audios) {
+    const size_t n = audios.size();
+    if (n == 0) {
+        return {};
+    }
+    if (n > 32) {
+        throw std::runtime_error("Citrinet ASR batch supports at most 32 clips");
+    }
+    std::vector<FeaturePack> packs(n);
+    {
+        std::atomic<size_t> next{0};
+        std::vector<std::thread> pool;
+        const size_t workers = std::min<size_t>(n, 4);
+        for (size_t w = 0; w < workers; ++w) {
+            pool.emplace_back([&]() {
+                for (;;) {
+                    const size_t b = next.fetch_add(1);
+                    if (b >= n) {
+                        break;
+                    }
+                    packs[b] = extract_feature_pack_from_audio(audios[b], *weights_);
+                }
+            });
+        }
+        for (auto & thread : pool) {
+            thread.join();
+        }
+    }
+    int64_t max_frames = 0;
+    for (const auto & pack : packs) {
+        max_frames = std::max(max_frames, pack.padded_frames);
+    }
+    // Channels-first payload, zero-padded per sequence to max_frames.
+    const int64_t mels = weights_->config.n_mels;
+    std::vector<float> payload(static_cast<size_t>(n * max_frames * mels), 0.0F);
+    for (size_t b = 0; b < n; ++b) {
+        const int64_t frames = packs[b].padded_frames;
+        const float * src = packs[b].values.data();
+        float * dst = payload.data() + static_cast<size_t>(b * max_frames * mels);
+        for (int64_t frame = 0; frame < frames; ++frame) {
+            for (int64_t mel = 0; mel < mels; ++mel) {
+                dst[static_cast<size_t>(frame + max_frames * mel)] =
+                    src[static_cast<size_t>(frame * mels + mel)];
+            }
+        }
+    }
+    auto & graph = ensure_graph(max_frames, static_cast<int64_t>(n));
+    const auto logits = graph.run_batched(payload);
+    const int64_t output_frames = compute_output_frames(weights_->config, max_frames);
+    const int64_t num_classes = weights_->config.num_classes;
+    const int64_t per_seq = output_frames * num_classes;
+    std::vector<CitrinetTranscriptionResult> results(n);
+    for (size_t b = 0; b < n; ++b) {
+        const int64_t valid_output_frames = compute_output_frames(weights_->config, packs[b].raw_frames);
+        CitrinetInferenceResult inference;
+        inference.input_frames = packs[b].raw_frames;
+        inference.output_frames = valid_output_frames;
+        inference.num_classes = num_classes;
+        inference.logits.assign(
+            logits.begin() + static_cast<ptrdiff_t>(b * per_seq),
+            logits.begin() + static_cast<ptrdiff_t>(b * per_seq + valid_output_frames * num_classes));
+        results[b] = make_transcription_result(*weights_, std::move(inference));
+    }
+    return results;
 }
 
 }  // namespace engine::models::citrinet_asr

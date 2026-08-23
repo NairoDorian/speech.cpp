@@ -6,11 +6,13 @@
 #include "engine/framework/runtime/spec_backed_model.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 
@@ -271,6 +273,117 @@ runtime::TaskResult HiggsAudioSTTSession::run(const runtime::TaskRequest & reque
         merged.text_output->text = text.str();
     }
     return merged;
+}
+
+std::vector<runtime::TaskResult> HiggsAudioSTTSession::run_batch(
+    const std::vector<runtime::TaskRequest> & requests) {
+    const size_t n = requests.size();
+    if (n == 0) {
+        return {};
+    }
+    if (n > 32) {
+        throw std::runtime_error("Higgs Audio STT run_batch() supports at most 32 utterances");
+    }
+    require_prepared("Higgs Audio STT run_batch()");
+    if (task_.mode != runtime::RunMode::Offline) {
+        throw std::runtime_error("Higgs Audio STT run_batch() requires an offline session");
+    }
+
+    // ---- Expand each request into audio chunks (same plan as run()) ----
+    struct Expanded {
+        size_t request_index;
+        runtime::AudioBuffer audio;
+        HiggsAudioSTTRequest asr_request;
+    };
+    std::vector<Expanded> expanded;
+    expanded.reserve(n);
+    for (size_t request_index = 0; request_index < n; ++request_index) {
+        auto normalized = requests[request_index];
+        normalized.options = normalize_request_options(normalized.options);
+        runtime::validate_spec_backed_request_options(
+            normalized.options,
+            *contract_,
+            "Higgs Audio STT");
+        const auto chunks = audio_chunk_plan(normalized);
+        if (chunks.empty() || !normalized.audio_input.has_value()) {
+            if (!normalized.audio_input.has_value()) {
+                throw std::runtime_error(
+                    "Higgs Audio STT run_batch() requires audio_input for every request");
+            }
+            const auto & audio = *normalized.audio_input;
+            expanded.push_back(
+                {request_index, audio, make_request(normalized)});
+        } else {
+            const auto & audio = *normalized.audio_input;
+            for (const auto & chunk : chunks) {
+                auto chunk_request = normalized;
+                chunk_request.audio_input =
+                    engine::audio::slice_audio_buffer(audio, chunk.source_span);
+                expanded.push_back(
+                    {request_index, *chunk_request.audio_input,
+                     make_request(chunk_request)});
+            }
+        }
+    }
+    const size_t m = expanded.size();
+    if (m > 32) {
+        throw std::runtime_error("Higgs Audio STT run_batch() expanded chunks exceed 32");
+    }
+
+    // ---- Pass 0: per-utterance frontend in parallel (host-only) ----
+    std::vector<HiggsAudioSTTAudioFeatures> features(m);
+    {
+        std::atomic<size_t> next{0};
+        std::vector<std::thread> pool;
+        const size_t workers = std::min<size_t>(m, 4);
+        for (size_t w = 0; w < workers; ++w) {
+            pool.emplace_back([&]() {
+                for (;;) {
+                    const size_t b = next.fetch_add(1);
+                    if (b >= m) {
+                        break;
+                    }
+                    features[b] = frontend_.extract(expanded[b].asr_request.audio);
+                }
+            });
+        }
+        for (auto & thread : pool) {
+            thread.join();
+        }
+    }
+
+    // ---- Pass 1: per-utterance prompt + audio encoder (serial) ----
+    std::vector<HiggsAudioSTTPrompt> prompts(m);
+    std::vector<HiggsAudioSTTAudioEmbeddings> audio_embeddings(m);
+    for (size_t b = 0; b < m; ++b) {
+        prompts[b] =
+            prompt_builder_.build(expanded[b].asr_request, features[b].encoder_tokens);
+        audio_embeddings[b] = audio_encoder_.encode(features[b]);
+    }
+
+    // ---- Pass 2: batched text decoder (lockstep decode) ----
+    const auto token_sets =
+        text_decoder_.generate_batch(prompts, audio_embeddings, expanded.front().asr_request.generation);
+
+    // ---- Pass 3: per-utterance token decode, then merge per request ----
+    std::vector<runtime::TaskResult> results(n);
+    for (size_t b = 0; b < m; ++b) {
+        const auto decoded = postprocessor_.decode(token_sets[b], expanded[b].asr_request);
+        auto & result = results[expanded[b].request_index];
+        if (decoded.text.empty()) {
+            continue;
+        }
+        if (result.text_output.has_value() && !result.text_output->text.empty()) {
+            result.text_output->text += ' ';
+        } else {
+            result.text_output = runtime::Transcript{"", decoded.language};
+        }
+        result.text_output->text += decoded.text;
+        if (result.text_output->language.empty()) {
+            result.text_output->language = decoded.language;
+        }
+    }
+    return results;
 }
 
 runtime::StreamingPolicy HiggsAudioSTTSession::streaming_policy() const {

@@ -817,10 +817,191 @@ private:
     ggml_backend_buffer_t buffer_ = nullptr;
 };
 
+class VibeVoiceDecoderCachedStepGraphBatched {
+public:
+    VibeVoiceDecoderCachedStepGraphBatched(
+        const VibeVoiceDecoderWeightsRuntime & runtime,
+        int64_t cache_steps,
+        int64_t n_seqs,
+        size_t graph_arena_bytes)
+        : runtime_(&runtime), cache_steps_(cache_steps), n_seqs_(n_seqs) {
+        if (cache_steps_ <= 0) {
+            throw std::runtime_error("VibeVoice batched decoder step graph requires positive cache steps");
+        }
+        if (n_seqs_ <= 0) {
+            throw std::runtime_error("VibeVoice batched decoder step graph requires positive n_seqs");
+        }
+        const auto & config = runtime_->assets().config.decoder;
+        ggml_init_params params{graph_arena_bytes, nullptr, true};
+        ctx_.reset(ggml_init(params));
+        if (ctx_ == nullptr) {
+            throw std::runtime_error("failed to initialize VibeVoice batched decoder step graph context");
+        }
+
+        core::ModuleBuildContext ctx{ctx_.get(), "vibevoice.decoder.cached_step.batched"};
+        auto x = core::make_tensor(
+            ctx, GGML_TYPE_F32,
+            core::TensorShape::from_dims({n_seqs_, 1, config.hidden_size}));
+        input_ = x.tensor;
+        ggml_set_input(input_);
+        positions_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, n_seqs_);
+        ggml_set_input(positions_);
+        auto positions_value = core::wrap_tensor(
+            positions_, core::TensorShape::from_dims({n_seqs_}), GGML_TYPE_I32);
+        cache_slot_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, n_seqs_);
+        ggml_set_input(cache_slot_);
+        auto cache_slot_value = core::wrap_tensor(
+            cache_slot_, core::TensorShape::from_dims({n_seqs_}), GGML_TYPE_I32);
+        attention_mask_ = ggml_new_tensor_4d(ctx_.get(), GGML_TYPE_F16,
+                                             cache_steps_, 1, 1, n_seqs_);
+        ggml_set_input(attention_mask_);
+        auto attention_mask_value = core::wrap_tensor(
+            attention_mask_,
+            core::TensorShape::from_dims({n_seqs_, 1, 1, cache_steps_}),
+            GGML_TYPE_F16);
+
+        graph_ = ggml_new_graph_custom(ctx_.get(), 65536, false);
+        auto & constants = runtime_->constants();
+        constants.begin_graph();
+        auto decoder_config = make_qwen_decoder_config(config);
+        decoder_config.stack.runtime.static_cache.update_mode =
+            modules::QwenDecoderStaticCacheUpdateMode::DirectSetRows;
+        auto decoder_out =
+            modules::QwenCausalDecoderModule(decoder_config)
+                .build_static_cache_tail_batched(
+                    ctx, graph_, x, positions_value,
+                    make_qwen_decoder_weights(runtime_->weights(), constants),
+                    cache_steps_, attention_mask_value, cache_slot_value);
+        cache_ = std::move(decoder_out.cache);
+        hidden_output_ = ggml_cpy(ctx_.get(), decoder_out.hidden.tensor, ggml_dup_tensor(ctx_.get(), decoder_out.hidden.tensor));
+        ggml_set_output(hidden_output_);
+        logits_output_ = decoder_out.logits.tensor;
+        ggml_set_output(logits_output_);
+        ggml_build_forward_expand(graph_, hidden_output_);
+        ggml_build_forward_expand(graph_, logits_output_);
+        constants.finish_graph();
+        constants.ensure_uploaded();
+        buffer_ = ggml_backend_alloc_ctx_tensors(ctx_.get(), runtime_->backend());
+        if (buffer_ == nullptr) {
+            throw std::runtime_error("failed to allocate VibeVoice batched decoder step graph");
+        }
+        attention_mask_buffer_.assign(
+            static_cast<size_t>(cache_steps_) * static_cast<size_t>(n_seqs_),
+            ggml_fp32_to_fp16(-std::numeric_limits<float>::infinity()));
+    }
+
+    ~VibeVoiceDecoderCachedStepGraphBatched() {
+        engine::core::release_backend_graph_resources(runtime_->backend(), graph_);
+        if (buffer_ != nullptr) {
+            ggml_backend_buffer_free(buffer_);
+        }
+    }
+
+    int64_t cache_steps() const noexcept { return cache_steps_; }
+    int64_t n_seqs() const noexcept { return n_seqs_; }
+
+    void import_state(int64_t seq, const runtime::TransformerKVState & state) {
+        const auto & config = runtime_->assets().config.decoder;
+        const int64_t step_elems = config.num_key_value_heads * require_head_dim(config);
+        const int64_t valid = state.layers.empty() ? 0 : state.layers.front().valid_steps;
+        if (valid > cache_steps_) {
+            throw std::runtime_error("VibeVoice batched decoder state exceeds capacity");
+        }
+        const size_t bytes = static_cast<size_t>(valid * step_elems) * sizeof(float);
+        const size_t slab =
+            static_cast<size_t>(seq) * static_cast<size_t>(cache_steps_) *
+            static_cast<size_t>(step_elems) * sizeof(float);
+        for (size_t layer = 0; layer < cache_.layers_count(); ++layer) {
+            const auto & src = state.layers[layer];
+            if (src.key.size() != src.value.size() ||
+                src.key.size() != static_cast<size_t>(valid * step_elems)) {
+                throw std::runtime_error("VibeVoice batched decoder import size mismatch");
+            }
+            ggml_backend_tensor_set(cache_.key_tensor(layer).tensor, src.key.data(), slab, bytes);
+            ggml_backend_tensor_set(cache_.value_tensor(layer).tensor, src.value.data(), slab, bytes);
+        }
+    }
+
+    // One lockstep step. embeddings is [n_seqs, hidden]; positions/slots are
+    // per-sequence; visible[b] is each sequence's visible prefix length.
+    VibeVoiceDecoderBatchedResult run_step(
+        const std::vector<float> & embeddings,
+        const std::vector<int32_t> & positions,
+        const std::vector<int32_t> & slots,
+        const std::vector<int64_t> & visible) {
+        const auto & config = runtime_->assets().config.decoder;
+        if (static_cast<int64_t>(embeddings.size()) != n_seqs_ * config.hidden_size ||
+            static_cast<int64_t>(positions.size()) != n_seqs_ ||
+            static_cast<int64_t>(slots.size()) != n_seqs_ ||
+            static_cast<int64_t>(visible.size()) != n_seqs_) {
+            throw std::runtime_error("VibeVoice batched decoder step input size mismatch");
+        }
+        for (int64_t b = 0; b < n_seqs_; ++b) {
+            if (slots[static_cast<size_t>(b)] >= cache_steps_) {
+                throw std::runtime_error("VibeVoice batched decoder step exceeds cache capacity");
+            }
+        }
+        ggml_backend_tensor_set(input_, embeddings.data(), 0, embeddings.size() * sizeof(float));
+        ggml_backend_tensor_set(positions_, positions.data(), 0, positions.size() * sizeof(int32_t));
+        std::vector<int32_t> set_slots(static_cast<size_t>(n_seqs_));
+        for (int64_t b = 0; b < n_seqs_; ++b) {
+            set_slots[static_cast<size_t>(b)] =
+                slots[static_cast<size_t>(b)] +
+                static_cast<int32_t>(b) * static_cast<int32_t>(cache_steps_);
+        }
+        ggml_backend_tensor_set(cache_slot_, set_slots.data(), 0, set_slots.size() * sizeof(int32_t));
+        for (int64_t b = 0; b < n_seqs_; ++b) {
+            auto * row = attention_mask_buffer_.data() +
+                         static_cast<size_t>(b) * static_cast<size_t>(cache_steps_);
+            std::fill(row, row + cache_steps_, ggml_fp32_to_fp16(-std::numeric_limits<float>::infinity()));
+            for (int64_t k = 0; k < visible[static_cast<size_t>(b)]; ++k) {
+                row[k] = ggml_fp32_to_fp16(0.0F);
+            }
+            row[slots[static_cast<size_t>(b)]] = ggml_fp32_to_fp16(0.0F);
+        }
+        ggml_backend_tensor_set(attention_mask_, attention_mask_buffer_.data(), 0,
+                                attention_mask_buffer_.size() * sizeof(ggml_fp16_t));
+        core::set_backend_threads(runtime_->backend(), runtime_->threads());
+        const ggml_status status =
+            engine::core::compute_backend_graph(runtime_->backend(), graph_);
+        ggml_backend_synchronize(runtime_->backend());
+        if (status != GGML_STATUS_SUCCESS) {
+            throw std::runtime_error("VibeVoice batched decoder step graph compute failed");
+        }
+        VibeVoiceDecoderBatchedResult out;
+        out.logits.resize(static_cast<size_t>(n_seqs_) * static_cast<size_t>(config.vocab_size));
+        out.hidden.resize(static_cast<size_t>(n_seqs_) * static_cast<size_t>(config.hidden_size));
+        ggml_backend_tensor_get(logits_output_, out.logits.data(), 0, out.logits.size() * sizeof(float));
+        ggml_backend_tensor_get(hidden_output_, out.hidden.data(), 0, out.hidden.size() * sizeof(float));
+        return out;
+    }
+
+private:
+    const VibeVoiceDecoderWeightsRuntime * runtime_ = nullptr;
+    int64_t cache_steps_ = 0;
+    int64_t n_seqs_ = 0;
+    std::unique_ptr<ggml_context, GgmlContextDeleter> ctx_;
+    ggml_tensor * input_ = nullptr;
+    ggml_tensor * positions_ = nullptr;
+    ggml_tensor * cache_slot_ = nullptr;
+    ggml_tensor * attention_mask_ = nullptr;
+    ggml_tensor * hidden_output_ = nullptr;
+    ggml_tensor * logits_output_ = nullptr;
+    runtime::TransformerBatchedKVCache cache_;
+    std::vector<ggml_fp16_t> attention_mask_buffer_;
+    ggml_cgraph * graph_ = nullptr;
+    ggml_backend_buffer_t buffer_ = nullptr;
+};
+
 VibeVoiceDecoderCachedState::VibeVoiceDecoderCachedState() = default;
 VibeVoiceDecoderCachedState::~VibeVoiceDecoderCachedState() = default;
 VibeVoiceDecoderCachedState::VibeVoiceDecoderCachedState(VibeVoiceDecoderCachedState &&) noexcept = default;
 VibeVoiceDecoderCachedState & VibeVoiceDecoderCachedState::operator=(VibeVoiceDecoderCachedState &&) noexcept = default;
+
+VibeVoiceDecoderCachedStateBatched::VibeVoiceDecoderCachedStateBatched() = default;
+VibeVoiceDecoderCachedStateBatched::~VibeVoiceDecoderCachedStateBatched() = default;
+VibeVoiceDecoderCachedStateBatched::VibeVoiceDecoderCachedStateBatched(VibeVoiceDecoderCachedStateBatched &&) noexcept = default;
+VibeVoiceDecoderCachedStateBatched & VibeVoiceDecoderCachedStateBatched::operator=(VibeVoiceDecoderCachedStateBatched &&) noexcept = default;
 
 VibeVoiceDecoderWeightsRuntime::VibeVoiceDecoderWeightsRuntime(
     std::shared_ptr<const VibeVoiceASRAssets> assets,
@@ -1038,6 +1219,69 @@ VibeVoiceDecoderResult VibeVoiceDecoderWeightsRuntime::cached_step(
         state.graph_has_state_ = true;
     }
     return state.graph_->run_step(embedding);
+}
+
+void VibeVoiceDecoderWeightsRuntime::reset_batched_state(
+    VibeVoiceDecoderCachedStateBatched & state,
+    std::vector<runtime::TransformerKVState> prefill_states) const {
+    if (prefill_states.empty()) {
+        throw std::runtime_error("VibeVoice batched decoder reset requires at least one prefill state");
+    }
+    state.pending_states_ = std::move(prefill_states);
+    state.graph_has_state_ = false;
+}
+
+VibeVoiceDecoderBatchedResult VibeVoiceDecoderWeightsRuntime::batched_cached_step(
+    const std::vector<float> & embeddings,
+    const std::vector<int32_t> & positions,
+    const std::vector<int32_t> & slots,
+    const std::vector<int64_t> & visible,
+    VibeVoiceDecoderCachedStateBatched & state,
+    int64_t cache_capacity) const {
+    const auto & config = assets_->config.decoder;
+    const int64_t n_seqs = state.graph_ != nullptr
+        ? state.graph_->n_seqs()
+        : static_cast<int64_t>(state.pending_states_.size());
+    if (n_seqs <= 0 || static_cast<int64_t>(positions.size()) != n_seqs ||
+        static_cast<int64_t>(slots.size()) != n_seqs ||
+        static_cast<int64_t>(visible.size()) != n_seqs) {
+        throw std::runtime_error("VibeVoice batched decoder step input size mismatch");
+    }
+    if (static_cast<int64_t>(embeddings.size()) != n_seqs * config.hidden_size) {
+        throw std::runtime_error("VibeVoice batched decoder step embedding payload size mismatch");
+    }
+    if (cache_capacity <= 0) {
+        throw std::runtime_error("VibeVoice batched decoder step requires positive cache capacity");
+    }
+    const int64_t required_capacity = cache_graph_capacity(
+        std::max<int64_t>(cache_capacity, 1),
+        config.max_position_embeddings);
+    if (state.graph_ == nullptr ||
+        state.graph_->cache_steps() < required_capacity ||
+        state.graph_->n_seqs() != n_seqs) {
+        state.graph_.reset();
+        const size_t graph_arena_bytes = 1536ull * 1024ull * 1024ull;
+        state.graph_ = std::make_unique<VibeVoiceDecoderCachedStepGraphBatched>(
+            *this,
+            required_capacity,
+            n_seqs,
+            graph_arena_bytes);
+    }
+    if (!state.graph_has_state_) {
+        if (state.pending_states_.size() != static_cast<size_t>(n_seqs)) {
+            throw std::runtime_error("VibeVoice batched decoder prefill state count mismatch");
+        }
+        for (int64_t b = 0; b < n_seqs; ++b) {
+            auto & pending = state.pending_states_[static_cast<size_t>(b)];
+            if (pending.layers.empty() && pending.current_end == 0) {
+                pending = empty_decoder_state(weights_->layers.size());
+            }
+            state.graph_->import_state(b, pending);
+        }
+        state.pending_states_.clear();
+        state.graph_has_state_ = true;
+    }
+    return state.graph_->run_step(embeddings, positions, slots, visible);
 }
 
 }  // namespace engine::models::vibevoice_asr

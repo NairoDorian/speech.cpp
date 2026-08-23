@@ -39,6 +39,12 @@ public:
     runtime::RunMode run_mode() const override;
     void prepare(const runtime::SessionPreparationRequest & request) override;
     runtime::TaskResult run(const runtime::TaskRequest & request) override;
+    // Batched offline ASR (transcribe.cpp run_batch style): frontends run in
+    // parallel, per-utterance prompt/prefill stay serial, and the decoder
+    // advances all utterances in lockstep through one shared batched step
+    // graph (greedy decoding only; beam search falls back to serial runs).
+    std::vector<runtime::TaskResult>
+    run_batch(const std::vector<runtime::TaskRequest> & requests) override;
     runtime::StreamingPolicy streaming_policy() const override;
     void start_stream(const runtime::TaskRequest & request) override;
     void set_stream_event_sink(runtime::StreamEventCallback sink) override;

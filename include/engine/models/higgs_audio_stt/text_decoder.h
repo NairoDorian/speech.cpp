@@ -32,6 +32,13 @@ public:
         const HiggsAudioSTTGenerationOptions & options,
         const HiggsAudioSTTTokenCallback & token_callback = {});
 
+    // Batched generation: per-utterance prefill, then one shared lockstep
+    // decode graph across all utterances. Result[i] matches inputs[i].
+    std::vector<HiggsAudioSTTGeneratedTokens> generate_batch(
+        const std::vector<HiggsAudioSTTPrompt> & prompts,
+        const std::vector<HiggsAudioSTTAudioEmbeddings> & audio_embeddings,
+        const HiggsAudioSTTGenerationOptions & options);
+
 private:
     std::unique_ptr<Impl> impl_;
 };
