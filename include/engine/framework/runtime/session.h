@@ -247,6 +247,18 @@ public:
     ~IOfflineVoiceTaskSession() override = default;
 
     virtual TaskResult run(const TaskRequest & request) = 0;
+
+    // Batched offline execution (Phase 4). Default implementation runs
+    // serially over requests; model sessions can override with a native
+    // shared batch graph for high-throughput multi-utterance decoding.
+    virtual std::vector<TaskResult> run_batch(const std::vector<TaskRequest> & requests) {
+        std::vector<TaskResult> results;
+        results.reserve(requests.size());
+        for (const auto & req : requests) {
+            results.push_back(run(req));
+        }
+        return results;
+    }
 };
 
 class IStreamingVoiceTaskSession : public virtual IVoiceTaskSession {

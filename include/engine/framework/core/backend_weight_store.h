@@ -3,6 +3,7 @@
 #include "engine/framework/assets/tensor_source.h"
 #include "engine/framework/core/backend.h"
 #include "engine/framework/core/module.h"
+#include "engine/framework/core/shared_weight_registry.h"
 
 #include <ggml-backend.h>
 #include <ggml.h>
@@ -44,6 +45,24 @@ public:
         }
         if (context_bytes == 0) {
             throw std::runtime_error(name_ + " context bytes must be non-zero");
+        }
+        // Weight sharing: if the constructing thread is inside a
+        // ScopedWeightShareKey scope (model load + session create), derive a
+        // share key from it plus this backend/device discriminator. Different
+        // backends and different GPUs have disjoint memory — binding a tensor
+        // to a foreign buffer would read garbage, so the discriminator is
+        // mandatory. Empty key keeps the store fully independent.
+        if (!current_weight_share_key().empty()) {
+            share_key_ = current_weight_share_key();
+            if (ggml_backend_dev_t dev = ggml_backend_get_device(backend_); dev != nullptr) {
+                ggml_backend_dev_props props{};
+                ggml_backend_dev_get_props(dev, &props);
+                share_key_ += "|" + std::string(ggml_backend_dev_name(dev));
+                share_key_ += "|";
+                share_key_ += props.device_id != nullptr ? props.device_id : "?";
+            } else {
+                share_key_ += "|unknown-device";
+            }
         }
         // no_alloc=true => pool holds metadata only; do not commit the full
         // context_bytes. Use the smaller of context_bytes and the metadata budget.
@@ -167,14 +186,107 @@ public:
     }
 
     void upload() {
-        if (buffer_ != nullptr) {
+        if (shared_entry_ != nullptr || buffer_ != nullptr) {
             throw std::runtime_error(name_ + " weights were already uploaded");
+        }
+        if (!share_key_.empty()) {
+            upload_shared();
+            return;
         }
         buffer_ = ggml_backend_alloc_ctx_tensors(ctx_.get(), backend_);
         if (buffer_ == nullptr) {
             throw std::runtime_error("failed to allocate " + name_ + " backend weight buffer");
         }
         ggml_backend_buffer_set_usage(buffer_, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+        upload_pending_into();
+        pending_.clear();
+        pending_.shrink_to_fit();
+    }
+
+private:
+    struct GgmlContextDeleter {
+        void operator()(ggml_context * ctx) const noexcept {
+            if (ctx != nullptr) {
+                ggml_free(ctx);
+            }
+        }
+    };
+
+    // Shared-weight path: allocate + fill once (provider), or bind this
+    // store's tensors to an existing shared buffer (consumer). Sharing is a
+    // pure optimization — any mismatch falls back to an independent
+    // allocation, never to wrong data.
+    void upload_shared() {
+        std::vector<SharedWeightTensorMeta> metas;
+        metas.reserve(pending_.size());
+        for (const auto & pending : pending_) {
+            SharedWeightTensorMeta meta;
+            meta.name = pending.name;
+            meta.dims = tensor_dims_for_fingerprint(pending.tensor);
+            meta.type = pending.tensor->type;
+            metas.push_back(std::move(meta));
+        }
+        const std::string fingerprint = shared_weight_fingerprint(metas);
+
+        // The registry key is the share key PLUS the fingerprint. A model
+        // package often holds several independent weight sets under one model
+        // path (e.g. moss: backbone GGUF + audio-tokenizer GGUF) and each
+        // store builds its own tensor set; keying by path alone would make
+        // the second set "conflict" with the first and fall back to
+        // per-session uploads. Keying by path+fingerprint lets every distinct
+        // weight set share across sessions independently.
+        auto & registry = SharedWeightRegistry::instance();
+        const std::string registry_key = share_key_ + "|" + fingerprint;
+        auto result = registry.acquire(registry_key, fingerprint, [&]() {
+            ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx_.get(), backend_);
+            if (buffer == nullptr) {
+                throw std::runtime_error("failed to allocate " + name_ + " shared backend weight buffer");
+            }
+            ggml_backend_buffer_set_usage(buffer, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+            upload_pending_into();
+            const auto * base = static_cast<const char *>(ggml_backend_buffer_get_base(buffer));
+            for (size_t i = 0; i < pending_.size(); ++i) {
+                metas[i].offset = static_cast<size_t>(
+                    static_cast<const char *>(pending_[i].tensor->data) - base);
+            }
+            return std::make_shared<SharedWeightEntry>(buffer, fingerprint, std::move(metas));
+        });
+
+        if (result.first == nullptr) {
+            // Fingerprint conflict: same key, different tensor set (different
+            // model, or a different storage-type configuration). Share nothing.
+            buffer_ = ggml_backend_alloc_ctx_tensors(ctx_.get(), backend_);
+            if (buffer_ == nullptr) {
+                throw std::runtime_error("failed to allocate " + name_ + " backend weight buffer");
+            }
+            ggml_backend_buffer_set_usage(buffer_, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+            upload_pending_into();
+        } else {
+            if (!result.second) {
+                // Consumer: point this store's tensors at the shared buffer.
+                bind_to_shared(*result.first);
+            }
+            shared_entry_ = std::move(result.first);
+        }
+        pending_.clear();
+        pending_.shrink_to_fit();
+    }
+
+    void bind_to_shared(const SharedWeightEntry & entry) {
+        const auto * base = static_cast<const char *>(entry.base());
+        ggml_backend_buffer_t buffer = entry.buffer();
+        const auto & metas = entry.metas();
+        if (metas.size() != pending_.size()) {
+            throw std::runtime_error(name_ + " shared weight tensor count mismatch");
+        }
+        for (size_t i = 0; i < pending_.size(); ++i) {
+            ggml_tensor * tensor = pending_[i].tensor;
+            tensor->data = const_cast<char *>(base) + metas[i].offset;
+            tensor->buffer = buffer;
+        }
+    }
+
+    void upload_pending_into() {
         for (auto & upload : pending_) {
             if (upload.kind == PendingUploadKind::Tensor) {
                 upload.source->set_backend_tensor(
@@ -190,18 +302,7 @@ public:
                 upload.bytes.shrink_to_fit();
             }
         }
-        pending_.clear();
-        pending_.shrink_to_fit();
     }
-
-private:
-    struct GgmlContextDeleter {
-        void operator()(ggml_context * ctx) const noexcept {
-            if (ctx != nullptr) {
-                ggml_free(ctx);
-            }
-        }
-    };
 
     enum class PendingUploadKind {
         Tensor,
@@ -412,7 +513,7 @@ private:
     }
 
     TensorValue make_backend_tensor(const TensorShape & shape, ggml_type type) {
-        if (buffer_ != nullptr) {
+        if (buffer_ != nullptr || shared_entry_ != nullptr) {
             throw std::runtime_error(name_ + " cannot add weights after upload");
         }
         const auto dims = to_ggml_dims(shape);
@@ -458,6 +559,10 @@ private:
     std::string name_;
     std::unique_ptr<ggml_context, GgmlContextDeleter> ctx_;
     ggml_backend_buffer_t buffer_ = nullptr;
+    // Non-empty when this store participates in weight sharing. Buffer
+    // ownership: buffer_ (independent path) OR shared_entry_ (shared path).
+    std::string share_key_;
+    std::shared_ptr<SharedWeightEntry> shared_entry_ = nullptr;
     std::vector<PendingUpload> pending_;
 };
 

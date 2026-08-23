@@ -161,9 +161,24 @@
   },
   "packages": [
     {
+      "id": "sortformer_diar_4spk_v2_q8_0",
+      "display_name": "Sortformer Diar Streaming 4spk v2 Q8_0 GGUF",
+      "default": true,
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "diar_streaming_sortformer_4spk-v2",
+      "files": [
+        "diar_streaming_sortformer_4spk-v2.q8_0.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "nvidia/diar_streaming_sortformer_4spk-v2",
+        "revision": "5240a64075176943f677d30fa2171c780229f341"
+      }
+    },
+    {
       "id": "sortformer_diar_4spk_v1_q8_0",
       "display_name": "Sortformer Diar 4spk v1 Q8_0 GGUF",
-      "default": true,
       "format": "gguf",
       "precision": "q8_0",
       "target_directory": "Sortformer-Diar-4spk-v1-GGUF",
