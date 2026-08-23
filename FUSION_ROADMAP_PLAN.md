@@ -1,9 +1,9 @@
-﻿# Master FUSION Roadmap Plan: The Ultimate Convergence of `audio.cpp` & `transcribe.cpp` into `speech.cpp`
+# Master FUSION Roadmap Plan: The Ultimate Convergence of `audio.cpp` & `transcribe.cpp` into `speech.cpp`
 
 > **Document Status**: Authoritative Master Plan & Architectural Blueprint  
 > **Target System**: `speech.cpp` — The Single, Fully-Fused Native Speech & Audio Intelligence Framework  
 > **Date**: 2026-08-23  
-> **Version**: 2.0 (Ultimate Consolidated & Exhaustive Edition)
+> **Version**: 4.0 (Definitive Master Production Edition)
 
 ---
 
@@ -20,7 +20,7 @@ This roadmap defines the **complete, end-state structural fusion** of both syste
 
 ---
 
-## 2. Architectural Comparison: From Bridged Coexistence to Monolithic Fusion
+## 2. Architectural Evolution: From Bridged Coexistence to Monolithic Fusion
 
 ### 2.1 Current State: Coexistence with Inter-Engine Bridge (Phases 0–6)
 Currently, `speech.cpp` shares a unified low-level GGML substrate, memory safety allocators, build toolchain, and dual public C ABIs (`audiocpp.dll` and `transcribe.dll`), but maintains two parallel model layers connected via `transcribe-arch-adapter.cpp`:
@@ -42,6 +42,8 @@ Currently, `speech.cpp` shares a unified low-level GGML substrate, memory safety
 ├─────────────────────────────────────────┼───────────────────────────────────────────────┤
 │ Parallel Toks:     external/llama_tok   │  src/runtime/transcribe-tokenizer.cpp         │
 │                    external/sentencep   │  (<tok> JSON Tokenizer)                       │
+├─────────────────────────────────────────┼───────────────────────────────────────────────┤
+│ Parallel Modules:  src/framework/modules│  src/runtime/{causal_lm, conformer, sanm}    │
 ├─────────────────────────────────────────┴───────────────────────────────────────────────┤
 │ Unified Substrate: Single GGML • SharedWeightRegistry • BackendWeightStore (16MB Cap)   │
 └─────────────────────────────────────────────────────────────────────────────────────────┘
@@ -75,9 +77,10 @@ The target state eliminates the adapter layer, converges the frontends and token
 ├─────────────────────────────────────────────────────────────────────────────────────────┤
 │                         Unified Framework Shared Modules Layer                          │
 │   • Mel & Audio Frontend: SIMD MelFrontend + Precomputed Kaldi Filterbanks (Single Path)│
-│   • Tokenizer: Unified Engine (BPE, Byte-Level BPE, SentencePiece, WordPiece, <tok>)    │
+│   • Tokenizer Hub: Unified Dispatcher (BPE, Byte-Level BPE, SentencePiece, WordPiece)   │
 │   • Audio Chunking & VAD: Native vad::plan + Deterministic Global Timestamp Re-stitching│
-│   • Codecs: Mimi, MioCodec, EnCodec, SNAC, DAC, Vocos (Shared Zero-Copy Modules)        │
+│   • Codec Hub: Mimi, MioCodec, EnCodec, SNAC, DAC, Vocos (Shared Zero-Copy Modules)     │
+│   • Core Modules: Shared Conformer, Causal-LM, SAN-M, RoPE, SDPA, SwiGLU, LayerNorm     │
 ├─────────────────────────────────────────────────────────────────────────────────────────┤
 │                        High-Performance Memory & Compute Layer                          │
 │   • SharedWeightRegistry (Process-Wide VRAM Sharing across All Sessions: ~34MB/session) │
@@ -91,38 +94,42 @@ The target state eliminates the adapter layer, converges the frontends and token
 
 ---
 
-## 3. Exhaustive Component Fusion Inventory & Elimination Matrix
-
-To eliminate all duplicate and parallel code paths, every overlapping subsystem has been assigned a definitive fusion strategy.
+## 3. Exhaustive Component Fusion & Deduplication Matrix
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
 │                              COMPONENT DEDUPLICATION MATRIX                            │
 ├──────────────────────┬──────────────────────┬──────────────────────┬───────────────────┤
-│ Subsystem Domain     │ `audio.cpp` Heritage │ `transcribe` Heritage│ Target Fusion     │
+│ Subsystem Domain     │ audio.cpp Heritage   │ transcribe Heritage  │ Target Fusion     │
 ├──────────────────────┼──────────────────────┼──────────────────────┼───────────────────┤
-│ **Audio Frontends**  │ `kaldi_fbank.cpp`    │ `transcribe-mel.cpp` │ **SIMD MelFront** │
-│                      │ `mel_frontend.cpp`   │ `transcribe-kaldi`   │ Precomputed filter│
+│ **Audio Frontends**  │ kaldi_fbank.cpp      │ transcribe-mel.cpp   │ **SIMD MelFront** │
+│                      │ mel_frontend.cpp     │ transcribe-kaldi     │ Precomputed filter│
 ├──────────────────────┼──────────────────────┼──────────────────────┼───────────────────┤
-│ **Tokenizer Engine** │ `llama_tokenizer`    │ `<tok>` JSON parser  │ **Unified Tok**   │
-│                      │ `sentencepiece`      │ (bpe/multilingual)   │ Single dispatcher │
+│ **Tokenizer Engine** │ llama_tokenizer      │ <tok> JSON parser    │ **Unified Tok**   │
+│                      │ sentencepiece        │ (bpe/multilingual)   │ Single dispatcher │
 ├──────────────────────┼──────────────────────┼──────────────────────┼───────────────────┤
 │ **Qwen3-ASR**        │ Batched decode graph │ Speculative decode   │ **Fused Qwen3**   │
-│                      │ `src/models/qwen3/`  │ `arch/qwen3_asr/`    │ Batch + Spec-Dec  │
+│                      │ src/models/qwen3/    │ arch/qwen3_asr/      │ Batch + Spec-Dec  │
 ├──────────────────────┼──────────────────────┼──────────────────────┼───────────────────┤
 │ **Voxtral Realtime** │ Parallel host front  │ 4-State Stream Mach  │ **Fused Voxtral** │
-│                      │ `src/models/voxtral/`│ `arch/voxtral/`      │ Cache-aware Stream│
+│                      │ src/models/voxtral/  │ arch/voxtral/        │ Cache-aware Stream│
 ├──────────────────────┼──────────────────────┼──────────────────────┼───────────────────┤
 │ **Parakeet-TDT**     │ RNNT joint loop      │ Batched joint window │ **Fused Parakeet**│
-│                      │ `community_models/`  │ `arch/parakeet/`     │ Multi-frame window│
+│                      │ community_models/    │ arch/parakeet/       │ Multi-frame window│
 ├──────────────────────┼──────────────────────┼──────────────────────┼───────────────────┤
 │ **SenseVoice**       │ Event tags / CTC     │ SAN-M optimization   │ **Fused Sense**   │
-│                      │ `src/models/sense/`  │ `arch/sensevoice/`   │ Rich event tags   │
+│                      │ src/models/sense/    │ arch/sensevoice/     │ Rich event tags   │
 ├──────────────────────┼──────────────────────┼──────────────────────┼───────────────────┤
 │ **FunASR Nano**      │ Packed QKV / SwiGLU  │ Static Arch trait    │ **Fused FunASR**  │
-│                      │ `src/models/funasr/` │ `arch/funasr_nano/`  │ Batched Prefill   │
+│                      │ src/models/funasr/   │ arch/funasr_nano/    │ Batched Prefill   │
 ├──────────────────────┼──────────────────────┼──────────────────────┼───────────────────┤
-│ **Public C ABI**     │ `audiocpp.dll`       │ `transcribe.dll`     │ **`libspeech`**   │
+│ **Neural Codecs**    │ Mimi / MioCodec      │ EnCodec / Vocos      │ **Unified Codec** │
+│                      │ (Standalone runtime) │ (Arch-specific)      │ Modular Hub       │
+├──────────────────────┼──────────────────────┼──────────────────────┼───────────────────┤
+│ **Conformers/SAN-M** │ framework/modules/   │ src/runtime/sanm/    │ **Shared Modules**│
+│                      │ (Per-model copies)   │ src/runtime/conf/    │ Standard Library  │
+├──────────────────────┼──────────────────────┼──────────────────────┼───────────────────┤
+│ **Public C ABI**     │ audiocpp.dll         │ transcribe.dll       │ **libspeech**     │
 │                      │ (14 voice tasks)     │ (STT + WER gates)    │ Single artifact   │
 └──────────────────────┴──────────────────────┴──────────────────────┴───────────────────┘
 ```
@@ -134,7 +141,7 @@ To eliminate all duplicate and parallel code paths, every overlapping subsystem 
 - **Superior Features Retained**:
   - `transcribe.cpp`'s frontend features SIMD vectorization, precomputed triangular filterbank matrices, band-skip optimizations, and threaded scalar paths certified by `asr_e2e_wer_test` (1.45% WER).
 - **Consolidation Target**:
-  - Fused into [`include/engine/framework/audio/mel_frontend.h`](file:///c:/Users/Z/Downloads/PROJECTS/Unified_Audio.cpp/speech.cpp/include/engine/framework/audio/mel_frontend.h) and [`src/framework/audio/mel_frontend.cpp`](file:///c:/Users/Z/Downloads/PROJECTS/Unified_Audio.cpp/speech.cpp/src/framework/audio/mel_frontend.cpp).
+  - Fused into `include/engine/framework/audio/mel_frontend.h` and `src/framework/audio/mel_frontend.cpp`.
   - Delete `src/runtime/transcribe-mel.*` and `src/runtime/transcribe-kaldi-fbank.*`.
   - Wire all TTS (F5-TTS, CosyVoice, IndexTTS2) and ASR models to this unified implementation.
 
@@ -146,28 +153,29 @@ To eliminate all duplicate and parallel code paths, every overlapping subsystem 
   - `transcribe.cpp`'s `<tok>` JSON tokenizer handles complex multilingual byte fallbacks with zero external dependencies.
   - `audio.cpp`'s tokenizer handles embedded GGUF tokenizer metadata, binary SentencePiece models, and HuggingFace `tokenizer.json` for 40+ TTS families.
 - **Consolidation Target**:
-  - Unified dispatcher in [`include/engine/framework/text/tokenizer.h`](file:///c:/Users/Z/Downloads/PROJECTS/Unified_Audio.cpp/speech.cpp/include/engine/framework/text/tokenizer.h) and `src/framework/text/tokenizer.cpp`.
+  - Unified dispatcher in `include/engine/framework/text/tokenizer.h` and `src/framework/text/tokenizer.cpp`.
   - Single API parsing GGUF vocabulary, SentencePiece `.model`, and HuggingFace JSON tokenizers.
 
-### 3.3 Overlapping Model Families (Qwen3, Voxtral, SenseVoice, FunASR, Parakeet)
-- **Qwen3-ASR**:
-  - `audio.cpp` side had `DecodeGraphBatched` and `generate_batch`.
-  - `transcribe.cpp` side had speculative decoding and Whisper frontend integration.
-  - **Fused in `src/models/qwen3_asr/`**: Combines batched execution with speculative draft verification. Delete `src/runtime/arch/qwen3_asr/`.
-- **Voxtral Realtime**:
-  - `audio.cpp` side had parallel audio frontends and graph reset caching.
-  - `transcribe.cpp` side had the 4-state streaming machine (`IDLE`, `FEEDING`, `FINALIZING`, `RESETTING`).
-  - **Fused in `src/models/voxtral_realtime/`**: Combines parallel frontends with the 4-state streaming machine. Delete `src/runtime/arch/voxtral_realtime/`.
-- **Parakeet-TDT**:
-  - `audio.cpp` side had the TDT greedy decoder loop.
-  - `transcribe.cpp` side had frame-windowed greedy joint graph amortization (`JointGraphBatch`).
-  - **Fused in `src/models/parakeet_tdt/`**: FastConformer-TDT with windowed batch joint dispatches. Delete `src/runtime/arch/parakeet/`.
+### 3.3 Neural Codecs Hub (`engine::codecs`)
+- **Supported Codecs**:
+  - **MimiCodec** (12.5Hz, 8 codebooks, Moshi/Mimi audio-language backbone).
+  - **MioCodec** (24kHz acoustic tokenizer for MioTTS).
+  - **EnCodec** (24kHz / 48kHz, multi-bandwidth RVQ for MOSS / AudioCraft).
+  - **SNAC** (Multi-scale hierarchical neural codec for FishAudio / Kokoro / OuteTTS).
+  - **DAC** (Descript Audio Codec, 44.1kHz high-fidelity vocoding).
+  - **Vocos** (ISTFT neural vocoder for CosyVoice / F5-TTS / VibeVoice).
+- **Consolidation Target**:
+  - Standardized under `include/engine/framework/codecs/codec.h` with common `encode()` / `decode()` virtual interfaces.
+  - Direct tensor sharing with `SharedWeightRegistry` to avoid duplicate codec VRAM allocations when running TTS pipelines.
 
-### 3.4 Standalone Transcribe Architectures Migration
-- **Architectures**: Whisper, Moonshine, Moonshine Streaming, Canary, Canary-Qwen, Granite, Granite-NAR, Cohere, GigaAM, MedASR.
-- **Action**:
-  - Migrate all architectures from `src/runtime/arch/<family>/` to `src/models/<family>/` inheriting from `RuntimeSessionBase` and `IVoiceTaskSession`.
-  - Once all architectures are native engine models, delete `src/runtime/arch/` and `src/runtime/transcribe-arch-adapter.cpp`.
+### 3.4 Shared Core Neural Modules
+- **Current Duplicate Files**:
+  - `src/runtime/causal_lm/` <-> `src/framework/modules/self_attention/` & `rope/`.
+  - `src/runtime/conformer/` & `granite_conformer/` <-> `src/framework/modules/convolutions/`.
+  - `src/runtime/sanm/` <-> `src/framework/modules/layers/`.
+- **Consolidation Target**:
+  - Migrate transcribe's optimized conformer / SAN-M routines into `src/framework/modules/`.
+  - Fused SwiGLU, RMSNorm, LayerNorm, Rotary Positional Embeddings (RoPE), and Scaled Dot-Product Attention (SDPA) standardized into single shared kernels.
 
 ---
 
@@ -267,13 +275,23 @@ SPEECH_API speech_status  speech_run_tts(speech_session *session, const char *te
 SPEECH_API speech_status  speech_run_vad(const float *samples, size_t n_samples, int sample_rate, const char *vad_options_json, float **out_segments, size_t *out_n_segments);
 SPEECH_API speech_status  speech_run_diarize(speech_session *session, const float *samples, size_t n_samples, const char *options_json, char **out_rttm_json);
 SPEECH_API speech_status  speech_run_separate(speech_session *session, const float *samples, size_t n_samples, const char *options_json, float ***out_stems, size_t *out_n_stems, size_t *out_samples_per_stem);
+SPEECH_API speech_status  speech_run_align(speech_session *session, const float *samples, size_t n_samples, const char *text, const char *options_json, char **out_alignment_json);
+SPEECH_API speech_status  speech_run_denoise(const float *samples, size_t n_samples, int sample_rate, const char *options_json, float **out_samples, size_t *out_n_samples);
+SPEECH_API speech_status  speech_run_super_resolve(const float *samples, size_t n_samples, int in_sample_rate, int target_sample_rate, float **out_samples, size_t *out_n_samples);
 
-// --- Streaming APIs ---
+// --- Streaming APIs (4-State Engine) ---
 SPEECH_API speech_stream *speech_stream_start(speech_session *session, const char *stream_options_json);
 SPEECH_API speech_status  speech_stream_push(speech_stream *stream, const float *samples, size_t n_samples);
 SPEECH_API speech_status  speech_stream_pull(speech_stream *stream, char **out_partial_text, float **out_audio, size_t *out_n_samples);
 SPEECH_API speech_status  speech_stream_finish(speech_stream *stream);
 SPEECH_API void           speech_stream_free(speech_stream *stream);
+
+// --- Hardware & Utility APIs ---
+SPEECH_API int            speech_device_count(speech_backend_type backend);
+SPEECH_API speech_status  speech_device_info(speech_backend_type backend, int device_id, char **out_info_json);
+SPEECH_API bool           speech_backend_available(speech_backend_type backend);
+SPEECH_API int            speech_read_wav(const char *path, float **out_samples, size_t *out_n_samples, int *out_sample_rate);
+SPEECH_API int            speech_write_wav(const char *path, const float *samples, size_t n_samples, int sample_rate, int n_channels);
 
 // --- Memory & String Management ---
 SPEECH_API void           speech_free_string(char *str);
@@ -294,33 +312,33 @@ SPEECH_API const char *   speech_build_id(void);
 
 `speech.cpp` enables complex, composite multi-model pipelines within a single process without external IPC or disk serialization:
 
-### 5.1 Real-Time Voice-to-Voice (S2S: ASR → LLM → Zero-Shot TTS)
+### 5.1 Real-Time Voice-to-Voice (S2S: ASR -> LLM -> Zero-Shot TTS)
 ```
-  Microphone PCM Stream
+  Microphone PCM Stream (16kHz Mono)
            │
            ▼
-┌──────────────────────┐
-│  Voxtral Realtime /  │ ──► Low-Latency Word Streaming Tokens
-│  Moonshine Streaming │
-└──────────┬───────────┘
-           │
-           ▼
-┌──────────────────────┐
-│   Causal Audio-LLM   │ ──► Synthesized Text Stream
-│   Text Generation    │
-└──────────┬───────────┘
-           │
-           ▼
-┌──────────────────────┐
-│   IndexTTS2 / MOSS   │ ──► High-Fidelity Audio Tokens
-│   Zero-Shot TTS      │
-└──────────┬───────────┘
-           │
-           ▼
-┌──────────────────────┐
-│  Mimi / MioCodec /   │ ──► Continuous Output PCM (Speaker)
-│  Vocos Audio Decoder │
-└──────────────────────┘
+┌──────────────────────────────┐
+│  Voxtral Realtime /          │ ──► Low-Latency Word Streaming Tokens
+│  Moonshine Streaming ASR     │
+└──────────────┬───────────────┘
+               │
+               ▼
+┌──────────────────────────────┐
+│   Causal Audio-LLM           │ ──► Synthesized Text Stream
+│   Text Generation            │
+└──────────────┬───────────────┘
+               │
+               ▼
+┌──────────────────────────────┐
+│   IndexTTS2 / MOSS / Qwen3   │ ──► High-Fidelity Audio Codec Tokens
+│   Zero-Shot TTS              │
+└──────────────┬───────────────┘
+               │
+               ▼
+┌──────────────────────────────┐
+│  Mimi / MioCodec / Vocos     │ ──► Continuous Output PCM (24kHz/48kHz)
+│  Neural Audio Vocoder        │
+└──────────────────────────────┘
 ```
 
 ### 5.2 Long-Form Multi-Speaker Diarized Transcription
@@ -328,33 +346,33 @@ SPEECH_API const char *   speech_build_id(void);
   Raw Long-Form Audio File (e.g. 2-Hour Meeting)
            │
            ▼
-┌──────────────────────┐
-│  Native Silero VAD   │ ──► Active Speech Spans ([start_ms, end_ms])
-│   (vad::detect)      │
-└──────────┬───────────┘
-           │
-           ▼
-┌──────────────────────┐
-│ Native vad::plan     │ ──► Bounded Utterances (≤ 30s) with 250ms Padding
-│ Greedy Chunk Planner │
-└──────────┬───────────┘
-           │
-           ├───────────────────────────────────────────┐
-           ▼                                           ▼
-┌──────────────────────┐                     ┌──────────────────────┐
-│ Sortformer v2 Diar   │                     │ Whisper / Qwen3-ASR  │
-│ Speaker Clustering   │                     │ Batched Decode Graph │
-└──────────┬───────────┘                     └──────────┬───────────┘
-           │                                           │
-           └─────────────────────┬─────────────────────┘
-                                 │
-                                 ▼
-┌─────────────────────────────────────────────────────────────┐
-│ Deterministic Global Timestamp & Speaker Tag Re-stitching   │
-│ (`offset_chunk_results` + `rebuild_full_text`)              │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-                               ▼
+┌──────────────────────────────┐
+│  Native Silero VAD           │ ──► Active Speech Spans ([start_ms, end_ms])
+│   (vad::detect)              │
+└──────────────┬───────────────┘
+               │
+               ▼
+┌──────────────────────────────┐
+│ Native vad::plan             │ ──► Bounded Utterances (≤ 30s) with 250ms Padding
+│ Greedy Chunk Planner         │
+└──────────────┬───────────────┘
+               │
+               ├───────────────────────────────────────────┐
+               ▼                                           ▼
+┌──────────────────────────────┐             ┌──────────────────────────────┐
+│ Sortformer v2 Diarization    │             │ Whisper / Qwen3-ASR          │
+│ Speaker Clustering           │             │ Batched Decode Graph         │
+└──────────────┬───────────────┘             └─────────────┬────────────────┘
+               │                                           │
+               └─────────────────────┬─────────────────────┘
+                                     │
+                                     ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│ Deterministic Global Timestamp & Speaker Tag Re-stitching                 │
+│ (`offset_chunk_results` + `rebuild_full_text`)                            │
+└────────────────────────────────────┬──────────────────────────────────────┘
+                                     │
+                                     ▼
   Diarized Transcript JSON / RTTM with Millisecond Precision
 ```
 
@@ -486,8 +504,8 @@ SPEECH_API const char *   speech_build_id(void);
 
 - **Tasks**:
   1. **Automated Verification Suite**:
-     - **ASR Offline WER Gate**: `asr_e2e_wer_test` ≤ 1.50% corpus WER on LibriSpeech.
-     - **ASR Streaming WER Gate**: `asr_stream_text_wer_test` ≤ 4.50% corpus WER, 0 divergence.
+     - **ASR Offline WER Gate**: `asr_e2e_wer_test` <= 1.50% corpus WER on LibriSpeech.
+     - **ASR Streaming WER Gate**: `asr_stream_text_wer_test` <= 4.50% corpus WER, 0 divergence.
      - **TTS Parity Gate**: Audio waveform MSE & PESQ validation against PyTorch baselines.
      - **Diarization DER Gate**: Speaker error rate validation on multi-talker fixtures.
      - **C ABI Integrity**: `capi_option_number_test`, `capi_session_options_test`, `capi_enum_sync_test`.
@@ -508,12 +526,12 @@ Every milestone must satisfy strict regression gates before landing:
 │ Metric / Gate                  │ Acceptance Requirement                     │
 ├────────────────────────────────┼────────────────────────────────────────────┤
 │ Test Suite Pass Rate           │ 100% Green (All CTest targets passing)     │
-│ Offline ASR WER (Moonshine)    │ ≤ 1.50% corpus WER on LibriSpeech fixtures │
-│ Streaming ASR WER (Moonshine)  │ ≤ 4.50% corpus WER (0 word divergence)     │
-│ VRAM Footprint (Multi-Session) │ ≤ 50 MB delta per additional session       │
+│ Offline ASR WER (Moonshine)    │ <= 1.50% corpus WER on LibriSpeech fixtures│
+│ Streaming ASR WER (Moonshine)  │ <= 4.50% corpus WER (0 word divergence)    │
+│ VRAM Footprint (Multi-Session) │ <= 50 MB delta per additional session      │
 │ Memory Safety Commit           │ 0 GB virtual memory over-commit spikes     │
-│ Clean CUDA Compile Time        │ ≤ 4.0 minutes (auto-arch + ccache)         │
-│ Incremental Rebuild Time       │ ≤ 10.0 seconds (ccache enabled)            │
+│ Clean CUDA Compile Time        │ <= 4.0 minutes (auto-arch + ccache)        │
+│ Incremental Rebuild Time       │ <= 10.0 seconds (ccache enabled)           │
 │ Shared Library Artifact Count  │ Exactly 1 monolithic library (libspeech)   │
 └────────────────────────────────┴────────────────────────────────────────────┘
 ```
