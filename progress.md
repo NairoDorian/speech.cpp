@@ -1,6 +1,6 @@
 # Progress — Unified_Audio.cpp (speech.cpp ggml fork) merge & improve
 
-Status snapshot: **Upstream audio.cpp main (62735ea, 26 commits total) merged cleanly into speech.cpp. Phase 1 Allocator Hardening applied. Phase 2 Toolchain Modernization & Build Provenance landed. Phase 3 Native Long-Form VAD Chunk Planning & Public C ABI integrated. Phase 4 Process-Wide SharedWeightRegistry, Sortformer v2 Diarization package, and Batched Offline ASR Decoders (Qwen3-ASR, Voxtral Realtime, Citrinet, VibeVoice, Higgs Audio) fully implemented and verified. All 53 CPU core tests passing 100% green.** Date: 2026-08-23
+Status snapshot: **Upstream audio.cpp main (62735ea, 26 commits total) merged cleanly into speech.cpp. Phase 1 Allocator Hardening applied. Phase 2 Toolchain Modernization & Build Provenance landed. Phase 3 Native Long-Form VAD Chunk Planning & Public C ABI integrated. Phase 4 Process-Wide SharedWeightRegistry, Sortformer v2 Diarization package, Batched Offline ASR Decoders (Qwen3-ASR, Voxtral Realtime, Citrinet, VibeVoice, Higgs Audio), and universal audiocpp C ABI subsystem + progress callbacks fully implemented and verified. All 56 CPU core tests passing 100% green.** Date: 2026-08-23
 
 ## Repo layout (important, non-obvious)
 `Unified_Audio.cpp/` is a **plain container directory with no git repo of its
@@ -11,7 +11,7 @@ own**. It holds exactly three things, each an independent repository:
 | `speech.cpp/` | the active development repo (the ggml/audio.cpp fork). **All merge work, and this log, live here.** Remote: `NairoDorian/speech.cpp`, upstream `0xShug0/audio.cpp`. |
 | `audio.cpp/` | upstream reference — read from, not developed in (pulled to `62735ea`) |
 | `transcribe.cpp/` | merge source — read from, not developed in. |
-| `audio_cunba/` & `transcribe_cunba/` | hardened reference trees containing allocator fixes, VAD chunk planning, shared weights, batched decoders, and build acceleration. |
+| `audio_cunba/` & `transcribe_cunba/` | hardened reference trees containing allocator fixes, VAD chunk planning, shared weights, batched decoders, C ABI, and build acceleration. |
 
 Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 `sp_bridge` (CPU, full model set, unified ABI + arches, tests), `sp_cuda`
@@ -28,11 +28,12 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | Long-form: Phase 3 Native VAD Chunk Planning & Re-stitching (`vad_plan`, `vad_merge`) | Done (native Silero + Energy VAD, C ABI) | 100% |
 | Optimization: Phase 4 Shared Weight Registry & Sortformer v2 Package | Done (`SharedWeightRegistry`, `ScopedWeightShareKey`, v2 package) | 100% |
 | Scaling: Phase 4 Offline Batched ASR Decode across all 5 major model families | Done (`Qwen3-ASR`, `Voxtral`, `Citrinet`, `VibeVoice`, `Higgs`) | 100% |
+| C ABI: Universal `audiocpp` C ABI & Progress Callbacks Subsystem | Done (`audiocpp.h`, `audiocpp.dll`, `ProgressCallback`, unit tests) | 100% |
 | ABI offline + streaming surface | Verified, real CTest gates | 100% |
 | End-to-end ASR **offline text** (WER gate) | Done — 1.45% corpus WER | 100% |
 | **End-to-end ASR streaming text** | **Done — streamed 4.35% == offline 4.35%, divergence 0** | **100%** |
-| Test suite status | **53/53 green (100% pass in ~24s)** | **100%** |
-| **Project-wide (functional CPU transcribe + unified audio)** | Phases 0, 1, 2, 3, 4 fully implemented | **~98%** |
+| Test suite status | **56/56 green (100% pass in ~31s)** | **100%** |
+| **Project-wide (functional CPU transcribe + unified audio)** | Phases 0, 1, 2, 3, 4 + C ABI fully implemented | **~100%** |
 
 ## DONE this session (plan R12 records all of it)
 
@@ -146,15 +147,21 @@ three shared failures gone; WER gates not registered there — ABI/arches OFF).
      - `Citrinet ASR`: batched CTC graph in `src/models/citrinet_asr/runtime.cpp` & `session.cpp`.
      - `VibeVoice ASR`: `VibeVoiceDecoderCachedStepGraphBatched` in `src/models/vibevoice_asr/text_decoder.cpp` & `session.cpp`.
      - `Higgs Audio STT`: `DecodeGraphBatched` in `src/models/higgs_audio_stt/text_decoder.cpp` & `session.cpp`.
+5. **Phase 5: Universal `audiocpp` C ABI Subsystem & Progress Reporting (`b9f53ab`)**:
+   - Integrated full C ABI surface (`capi/include/audiocpp.h` and `capi/src/audiocpp_capi.cpp`) with 46 exported C APIs covering all 14 audio tasks.
+   - Built monolithic shared library `audiocpp.dll` / `libaudiocpp.so` with hidden internal GGML symbols and embedded Windows `VS_VERSION_INFO` resource.
+   - Implemented `ProgressInfo`, `ProgressCallback`, and `ProgressCanceled` in `include/engine/framework/runtime/session.h`.
+   - Implemented `RuntimeSessionBase::set_progress_callback` and `emit_progress` in `src/framework/runtime/session_base.cpp` and wired into `audiocpp_set_progress_callback`.
+   - Integrated embedded asset subsystem (`include/engine/framework/assets/embedded.h` & `src/framework/assets/embedded.cpp`).
+   - Added unit test suites `capi_option_number_test`, `capi_session_options_test`, and `capi_enum_sync_test` (56/56 tests passing 100% green).
 
 ## NEXT (highest value first)
-1. **Universal Multi-Task Progress Callback & Unified ABI (`libspeech`)**:
-   - Standardize `speech_progress_callback(model, fn, user_data)` across all 42+ TTS and 18+ ASR models (reporting ratio `0.0..1.0`, stage name, units).
-   - Finalize single-artifact shared build (`SPEECH_SHARED_EMBED=ON`) and zero-dependency dynload bindings (Rust, Python ctypes, TypeScript koffi, Swift).
-2. **Whisper Full Pipeline & HF 5.x Seek Fix**:
+1. **Whisper Full Pipeline & HF 5.x Seek Fix**:
    - Port the complete Whisper engine session (16 variants) with HuggingFace 5.x seek continuation fix to eliminate tail speech truncation on early `<|t|>` closures.
-3. **Parakeet TDT & Moonshine Engine Spec Integration**:
+2. **Parakeet TDT & Moonshine Engine Spec Integration**:
    - Provide native engine sessions + `model_specs/*.json` catalogs for Moonshine and Parakeet (11 variants) so they are directly callable via CLI, server, WebUI, and C ABI.
+3. **Zero-Dependency Language Bindings (`dynload`)**:
+   - Finalize single-artifact shared build (`SPEECH_SHARED_EMBED=ON`) and zero-dependency dynload bindings (Rust, Python ctypes, TypeScript koffi, Swift).
 
 ## LEFT TO DO (small)
 - [ ] Formalize root `.gitmodules` so `git submodule update` works for the 3 embedded repos.

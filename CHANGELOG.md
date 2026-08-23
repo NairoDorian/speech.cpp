@@ -9,6 +9,34 @@ Dates are the work-session dates recorded in the plan.
 
 ## [Unreleased]
 
+### Added
+
+- **Universal `audiocpp` C ABI Subsystem & Shared Library (`audiocpp.dll` / `libaudiocpp.so`)**:
+  Exposes 46 exported C APIs covering all 14 audio tasks (TTS, ASR, VAD, Diarization,
+  Separation, Alignment, Voice Conversion, Denoise, Super-Resolution) with opaque handles,
+  strict C++ exception containment, and hidden internal GGML symbols.
+- **Universal Multi-Task Progress Reporting & Synchronous Cancellation**:
+  Added `ProgressInfo`, `ProgressCallback`, and `ProgressCanceled` in `session.h` and
+  `session_base.cpp`, wired directly into `audiocpp_set_progress_callback(model, cb, user_data)`.
+- **High-Throughput Batched Offline ASR Decoders**:
+  Implemented native multi-utterance lockstep decoding across all 5 major ASR model families:
+  `Qwen3-ASR` (`DecodeGraphBatched`), `Voxtral Realtime` (parallel frontends), `Citrinet ASR`
+  (batched CTC graph), `VibeVoice ASR` (`VibeVoiceDecoderCachedStepGraphBatched`), and
+  `Higgs Audio STT` (`DecodeGraphBatched`).
+- **Process-Wide `SharedWeightRegistry` & `ScopedWeightShareKey`**:
+  Eliminated redundant weight uploads across concurrent sessions with process-wide reference-counted
+  GPU/host weight buffer sharing, dropping per-session overhead from ~3 GB to ~34 MB.
+- **Phase 3 Native Long-Form VAD Chunk Planning & Re-stitching (`vad::plan`)**:
+  Greedy gap merging, boundary padding, timestamp offset re-stitching, transactional rollback,
+  and standalone `transcribe_vad` C ABI.
+- **Phase 1 Allocator Hardening & Memory Safety**:
+  Added `kMetadataPoolBudget = 16 MB` cap for `no_alloc=true` metadata pool in `BackendWeightStore`,
+  switched `WavLMEncoder` to `ggml_gallocr` buffer reuse (18x peak memory reduction), added
+  sampling runaway guard to `Qwen3-TTS`, and lowered `DeepFilterNet2` overlap-add threshold.
+- **Phase 2 Toolchain Modernization & Build Provenance**:
+  Integrated `ccache` compiler launcher auto-detection into Windows build scripts, configured
+  3-outlet build provenance (`transcribe-build-info`, `audiocpp_build_info`, Windows `.rc` resources).
+
 ### Fixed
 
 - **`AUDIOCPP_PYTHON` never worked on Windows: `cmd.exe` mangled every quoted

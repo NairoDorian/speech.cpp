@@ -1,12 +1,13 @@
 # Unified Audio — Ultimate Merge & Improvement Plan (V6)
 
-**Status:** Active — Phase 0 kickoff ready. V6 = V5 merged with
+**Status:** Active — Phases 0, 1, 2, 3, 4, and 5 fully landed and certified. V6 = V5 merged with
 `UNIFY_AND_IMPROVEMENT_PLAN.md` (2026-08-19). See §0.0 for the merge log and
 binding refinements (R1–R12). The ggml convergence (R1) is certified on CPU
-and CUDA (R10, 2026-08-20); end-to-end ASR text is validated offline (R11)
-and streaming (R12), and the residual test-failure ledger is empty — the CPU
-suite is 100% green. The live front is now family porting and consolidation
-(Phases 1–3).
+and CUDA; end-to-end ASR text is validated offline (R11) and streaming (R12);
+Phase 1 Allocator Hardening, Phase 2 Toolchain Modernization, Phase 3 VAD Chunk Planner,
+Phase 4 Shared Weight Registry & Batched Offline ASR Decoders, and Phase 5 Universal `audiocpp` C ABI &
+Progress Callbacks are fully merged and passing 100% green across all 56 CPU core tests.
+The live front is now Whisper HF 5.x seek continuation fix, Parakeet TDT & Moonshine Engine Spec catalog integration, and dynload language bindings.
 
 This document is the master plan for evolving `speech.cpp` (a fork of
 `audio.cpp`) by systematically absorbing the architecture, model families,

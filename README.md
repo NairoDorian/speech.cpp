@@ -88,6 +88,15 @@ the people already helping shape the project.
 ## News
 
 > [!IMPORTANT]
+> **2026-08-23:** `speech.cpp` achieves major milestones in the unified audio roadmap:
+> - **Upstream Sync**: Fully synchronized with `audio.cpp@main` (`62735ea`).
+> - **Universal C ABI Subsystem**: `audiocpp.dll` / `libaudiocpp.so` covering all 14 audio tasks with opaque handles, structured error handling, and multi-task progress callbacks.
+> - **Batched Offline ASR Decoders**: High-throughput lockstep decoding landed for Qwen3-ASR, Voxtral Realtime, Citrinet, VibeVoice, and Higgs Audio.
+> - **Process-Wide Weight Sharing**: `SharedWeightRegistry` eliminating redundant memory across concurrent sessions (saving ~3 GB VRAM per session).
+> - **Long-Form VAD Chunk Planner**: Native greedy `vad::plan`, boundary padding, and timeline re-stitching with transactional rollback.
+> - **Allocator Hardening & Provenance**: `BackendWeightStore` 16MB pool cap, WavLM `ggml_gallocr` reuse (18x reduction), and 3-outlet build provenance.
+> - **Test Suite**: 56 / 56 tests passing 100% green on MSVC Windows.
+>
 > **2026-08-18:** `speech.cpp` is forked from `audio.cpp` upstream `main` and is
 > beginning the incremental, one-file-at-a-time absorption of `transcribe.cpp`.
 > This v0.0.1-dev release tracks the `audio.cpp` 0.6.1 baseline.
