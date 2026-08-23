@@ -165,19 +165,48 @@ extern "C" const char * transcribe_status_string(int status) {
 
 // Version
 
-// TRANSCRIBE_COMMIT is stamped by the build (git rev-parse --short HEAD at
-// configure time); fall back to "unknown" so the accessor never returns
-// NULL. TRANSCRIBE_VERSION comes from <transcribe.h>.
-#ifndef TRANSCRIBE_COMMIT
-#    define TRANSCRIBE_COMMIT "unknown"
+#if __has_include("transcribe-build-info.h")
+#    include "transcribe-build-info.h"
+#endif
+
+#ifndef TRANSCRIBE_BUILD_VERSION
+#    define TRANSCRIBE_BUILD_VERSION TRANSCRIBE_VERSION
+#endif
+#ifndef TRANSCRIBE_BUILD_COMMIT
+#    ifdef TRANSCRIBE_COMMIT
+#        define TRANSCRIBE_BUILD_COMMIT TRANSCRIBE_COMMIT
+#    else
+#        define TRANSCRIBE_BUILD_COMMIT "unknown"
+#    endif
+#endif
+#ifndef TRANSCRIBE_BUILD_BRANCH
+#    define TRANSCRIBE_BUILD_BRANCH "unknown"
+#endif
+#ifndef TRANSCRIBE_BUILD_DATE
+#    define TRANSCRIBE_BUILD_DATE "unknown"
+#endif
+#ifndef TRANSCRIBE_BUILD_BACKEND
+#    define TRANSCRIBE_BUILD_BACKEND "cpu"
 #endif
 
 extern "C" const char * transcribe_version(void) {
-    return TRANSCRIBE_VERSION;
+    return TRANSCRIBE_BUILD_VERSION " " TRANSCRIBE_BUILD_COMMIT " " TRANSCRIBE_BUILD_BRANCH " " TRANSCRIBE_BUILD_DATE
+                                    " " TRANSCRIBE_BUILD_BACKEND;
 }
 
 extern "C" const char * transcribe_version_commit(void) {
-    return TRANSCRIBE_COMMIT;
+    return TRANSCRIBE_BUILD_COMMIT;
+}
+
+#if defined(__GNUC__)
+__attribute__((used))
+#endif
+const char kTranscribeBuildId[] =
+    "\ntranscribe-build-id: " TRANSCRIBE_BUILD_VERSION " " TRANSCRIBE_BUILD_COMMIT " " TRANSCRIBE_BUILD_BRANCH
+    " " TRANSCRIBE_BUILD_DATE " " TRANSCRIBE_BUILD_BACKEND "\n";
+
+extern "C" const char * transcribe_build_id(void) {
+    return kTranscribeBuildId;
 }
 
 // Raw enum reads at the public ABI boundary

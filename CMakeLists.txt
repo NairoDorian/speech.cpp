@@ -2,6 +2,72 @@ cmake_minimum_required(VERSION 3.20)
 
 project(AudioCpp LANGUAGES C CXX)
 
+# -----------------------------------------------------------------------------
+# Version & Provenance (single source of truth: include/transcribe/transcribe.h)
+# -----------------------------------------------------------------------------
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe/transcribe.h" _transcribe_header)
+string(REGEX MATCH "define +TRANSCRIBE_VERSION_MAJOR +([0-9]+)" _ "${_transcribe_header}")
+set(TRANSCRIBE_VERSION_MAJOR "${CMAKE_MATCH_1}")
+string(REGEX MATCH "define +TRANSCRIBE_VERSION_MINOR +([0-9]+)" _ "${_transcribe_header}")
+set(TRANSCRIBE_VERSION_MINOR "${CMAKE_MATCH_1}")
+string(REGEX MATCH "define +TRANSCRIBE_VERSION_PATCH +([0-9]+)" _ "${_transcribe_header}")
+set(TRANSCRIBE_VERSION_PATCH "${CMAKE_MATCH_1}")
+if(NOT TRANSCRIBE_VERSION_MAJOR MATCHES "^[0-9]+$" OR
+   NOT TRANSCRIBE_VERSION_MINOR MATCHES "^[0-9]+$" OR
+   NOT TRANSCRIBE_VERSION_PATCH MATCHES "^[0-9]+$")
+    set(TRANSCRIBE_VERSION_MAJOR "0")
+    set(TRANSCRIBE_VERSION_MINOR "2")
+    set(TRANSCRIBE_VERSION_PATCH "1")
+endif()
+set(TRANSCRIBE_VERSION "${TRANSCRIBE_VERSION_MAJOR}.${TRANSCRIBE_VERSION_MINOR}.${TRANSCRIBE_VERSION_PATCH}")
+
+set(TRANSCRIBE_BUILD_COMMIT "unknown")
+set(TRANSCRIBE_BUILD_BRANCH "unknown")
+find_package(Git QUIET)
+if(NOT GIT_FOUND)
+    find_program(GIT_EXECUTABLE NAMES git git.exe)
+    if(GIT_EXECUTABLE)
+        set(GIT_FOUND TRUE)
+    endif()
+endif()
+set(_speech_in_git_worktree FALSE)
+if(GIT_FOUND)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} -c safe.directory=* -C "${CMAKE_CURRENT_SOURCE_DIR}" rev-parse --git-dir
+        OUTPUT_VARIABLE _speech_git_dir
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE _speech_gitdir_rc)
+    if(_speech_gitdir_rc EQUAL 0)
+        set(_speech_in_git_worktree TRUE)
+    endif()
+endif()
+if(_speech_in_git_worktree)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} -c safe.directory=* -C "${CMAKE_CURRENT_SOURCE_DIR}" rev-parse --short HEAD
+        OUTPUT_VARIABLE _speech_git_sha
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    if(_speech_git_sha)
+        set(TRANSCRIBE_BUILD_COMMIT "${_speech_git_sha}")
+    endif()
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} -c safe.directory=* -C "${CMAKE_CURRENT_SOURCE_DIR}" rev-parse --abbrev-ref HEAD
+        OUTPUT_VARIABLE _speech_git_branch
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    if(_speech_git_branch)
+        set(TRANSCRIBE_BUILD_BRANCH "${_speech_git_branch}")
+    endif()
+endif()
+if(TRANSCRIBE_BUILD_COMMIT STREQUAL "unknown" AND DEFINED ENV{GITHUB_SHA})
+    string(SUBSTRING "$ENV{GITHUB_SHA}" 0 7 TRANSCRIBE_BUILD_COMMIT)
+endif()
+if(TRANSCRIBE_BUILD_BRANCH STREQUAL "unknown" AND DEFINED ENV{GITHUB_REF_NAME})
+    set(TRANSCRIBE_BUILD_BRANCH "$ENV{GITHUB_REF_NAME}")
+endif()
+string(TIMESTAMP TRANSCRIBE_BUILD_DATE "%Y-%m-%dT%H:%M:%SZ" UTC)
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
@@ -314,6 +380,27 @@ endif()
 message(STATUS "Using ggml source: ${AUDIOCPP_GGML_SOURCE_DIR}")
 add_subdirectory("${AUDIOCPP_GGML_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/ggml")
 add_subdirectory(external/sentencepiece EXCLUDE_FROM_ALL)
+
+# -----------------------------------------------------------------------------
+# Build backend tag (build-id / version-string provenance)
+# -----------------------------------------------------------------------------
+set(TRANSCRIBE_BUILD_BACKEND "cpu")
+if(ENGINE_ENABLE_CUDA)
+    set(TRANSCRIBE_BUILD_BACKEND "cuda")
+elseif(ENGINE_ENABLE_HIP)
+    set(TRANSCRIBE_BUILD_BACKEND "rocm")
+elseif(ENGINE_ENABLE_VULKAN)
+    set(TRANSCRIBE_BUILD_BACKEND "vulkan")
+elseif(ENGINE_ENABLE_METAL)
+    set(TRANSCRIBE_BUILD_BACKEND "metal")
+endif()
+
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/transcribe-build-info.h.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/transcribe-build-info.h"
+    @ONLY)
+
+message(STATUS "speech.cpp version: ${TRANSCRIBE_VERSION} (commit ${TRANSCRIBE_BUILD_COMMIT}, branch ${TRANSCRIBE_BUILD_BRANCH}, built ${TRANSCRIBE_BUILD_DATE}, backend ${TRANSCRIBE_BUILD_BACKEND})")
 
 add_compile_options(
     $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-Wall>
@@ -1559,6 +1646,7 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
     )
     target_compile_definitions(engine_transcribe_runtime PRIVATE
         TRANSCRIBE_BUILD
+        TRANSCRIBE_COMMIT="${TRANSCRIBE_BUILD_COMMIT}"
         MINIZ_NO_INFLATE_APIS
         MINIZ_NO_STDIO
         MINIZ_NO_TIME
@@ -1620,10 +1708,23 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
     # audio.cpp's ModelRegistry/vtable; linking engine_runtime here resolves
     # make_default_registry, IVoiceModelLoader and the per-family session
     # symbols the adapter's hooks call through.
-    target_compile_definitions(transcribe PRIVATE TRANSCRIBE_BUILD)
+    target_compile_definitions(transcribe PRIVATE
+        TRANSCRIBE_BUILD
+        TRANSCRIBE_COMMIT="${TRANSCRIBE_BUILD_COMMIT}"
+    )
     target_link_libraries(transcribe PRIVATE ggml sentencepiece engine_runtime)
     if (WIN32)
         target_compile_definitions(transcribe PRIVATE _USE_MATH_DEFINES)
+    endif()
+    if (WIN32 AND MSVC)
+        set(TRANSCRIBE_RC_FILEVERSION
+            "${TRANSCRIBE_VERSION_MAJOR},${TRANSCRIBE_VERSION_MINOR},${TRANSCRIBE_VERSION_PATCH},0")
+        set(TRANSCRIBE_RC_FILE "${CMAKE_CURRENT_BINARY_DIR}/generated/transcribe-version.rc")
+        configure_file(
+            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/transcribe-version.rc.in"
+            "${TRANSCRIBE_RC_FILE}"
+            @ONLY)
+        target_sources(transcribe PRIVATE "${TRANSCRIBE_RC_FILE}")
     endif()
 
     # Phase 0.M: hello-world bridge test. Loads a GGUF through the C ABI,

@@ -324,13 +324,13 @@ TRANSCRIBE_API const char * transcribe_status_string(int status);
  * Both return borrowed pointers into static storage: never free them, and
  * treat them as valid for the life of the process.
  */
-/* "MAJOR.MINOR.PATCH", e.g. "0.1.0". Equals the TRANSCRIBE_VERSION macro the
- * caller compiled against; a mismatch means the header and the linked library
- * disagree. */
 TRANSCRIBE_API const char * transcribe_version(void);
 /* Short git commit the library was built from, or "unknown" when the build
  * tree carried no git metadata (e.g. an unpacked source tarball). */
 TRANSCRIBE_API const char * transcribe_version_commit(void);
+/* Full build-ID string ("transcribe-build-id: <version> <commit> <branch> <date> <backend>"),
+ * grep-able from binary strings without loading. */
+TRANSCRIBE_API const char * transcribe_build_id(void);
 
 /* ----------------------------------------------------------------------- */
 /* ABI metadata                                                            */
