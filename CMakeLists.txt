@@ -466,6 +466,7 @@ function(audiocpp_add_model target_name)
 endfunction()
 
 add_library(engine_core OBJECT
+    src/framework/assets/embedded.cpp
     src/framework/assets/resource_bundle.cpp
     src/framework/model_spec/package.cpp
     src/framework/model_spec/options.cpp
@@ -1947,6 +1948,212 @@ if (ENGINE_ENABLE_CUDA AND NOT ENGINE_ENABLE_HIP)
     target_compile_definitions(engine_core PRIVATE ENGINE_HAS_CUDA_ISTFT=1 ENGINE_HAS_CUDA_TORCH_RANDOM=1)
     target_compile_definitions(engine_runtime PUBLIC ENGINE_HAS_CUDA_ISTFT=1 ENGINE_HAS_CUDA_TORCH_RANDOM=1)
     target_link_libraries(engine_runtime PRIVATE CUDA::cudart CUDA::cufft)
+endif()
+
+# ──────────────────────────────────────────────────────────────────────────
+# C ABI shared library (libaudiocpp.so / audiocpp.dll)
+# Hides all internal ggml/sentencepiece/etc symbols; exports only audiocpp_*.
+# ──────────────────────────────────────────────────────────────────────────
+set(AUDIOCPP_GIT_VERSION "${TRANSCRIBE_VERSION}-${TRANSCRIBE_BUILD_COMMIT}")
+set(AUDIOCPP_GIT_COMMIT "${TRANSCRIBE_BUILD_COMMIT}")
+set(AUDIOCPP_GIT_BRANCH "${TRANSCRIBE_BUILD_BRANCH}")
+set(AUDIOCPP_BUILD_DATE "${TRANSCRIBE_BUILD_DATE}")
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/capi/src/audiocpp_build_info.h.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/audiocpp_build_info.h"
+    @ONLY)
+
+option(AUDIOCPP_BUILD_CAPI "Build the C ABI shared library (libaudiocpp)" ON)
+if (AUDIOCPP_BUILD_CAPI)
+    add_library(audiocpp SHARED
+        capi/src/audiocpp_capi.cpp
+    )
+    target_compile_definitions(audiocpp PRIVATE AUDIOCPP_EXPORTS)
+    if (MSVC)
+        target_compile_options(audiocpp PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/utf-8>)
+    endif()
+    target_include_directories(audiocpp PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/capi/include"
+    )
+    target_include_directories(audiocpp PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/external/cJSON"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated"
+    )
+    target_link_libraries(audiocpp PRIVATE engine_runtime ggml cjson_vendor)
+    if (ENGINE_ENABLE_OPENMP)
+        target_link_libraries(audiocpp PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+
+    set_target_properties(audiocpp PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+        C_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON
+    )
+    if (MSVC OR WIN32)
+        set(AUDIOCPP_DEF_FILE "${CMAKE_CURRENT_BINARY_DIR}/audiocpp.def")
+        file(WRITE "${AUDIOCPP_DEF_FILE}"
+            "LIBRARY audiocpp\n"
+            "EXPORTS\n"
+            "    audiocpp_load_model\n"
+            "    audiocpp_load_model_ex\n"
+            "    audiocpp_free_model\n"
+            "    audiocpp_tts\n"
+            "    audiocpp_tts_with_voice_ref\n"
+            "    audiocpp_tts_batch\n"
+            "    audiocpp_free_audio_batch\n"
+            "    audiocpp_asr\n"
+            "    audiocpp_audio_transform\n"
+            "    audiocpp_audio_transform_with_voice_ref\n"
+            "    audiocpp_diar\n"
+            "    audiocpp_vad\n"
+            "    audiocpp_vad_energy\n"
+            "    audiocpp_version\n"
+            "    audiocpp_build_id\n"
+            "    audiocpp_free_audio\n"
+            "    audiocpp_free_text\n"
+            "    audiocpp_free_diar\n"
+            "    audiocpp_free_vad\n"
+            "    audiocpp_align\n"
+            "    audiocpp_free_align\n"
+            "    audiocpp_denoise\n"
+            "    audiocpp_super_resolve\n"
+            "    audiocpp_transform_stems\n"
+            "    audiocpp_free_stems\n"
+            "    audiocpp_model_info\n"
+            "    audiocpp_model_capabilities\n"
+            "    audiocpp_free_model_info\n"
+            "    audiocpp_free_capabilities\n"
+            "    audiocpp_read_wav\n"
+            "    audiocpp_write_wav\n"
+            "    audiocpp_write_wav_ex\n"
+            "    audiocpp_artifact_create\n"
+            "    audiocpp_artifact_set_meta\n"
+            "    audiocpp_artifact_free\n"
+            "    audiocpp_stream_start\n"
+            "    audiocpp_stream_push\n"
+            "    audiocpp_stream_pull\n"
+            "    audiocpp_stream_finish\n"
+            "    audiocpp_free_stream_event\n"
+            "    audiocpp_stream_free\n"
+            "    audiocpp_free_string\n"
+            "    audiocpp_clear_error\n"
+            "    audiocpp_device_count\n"
+            "    audiocpp_device_info\n"
+            "    audiocpp_list_devices\n"
+            "    audiocpp_backend_available\n"
+            "    audiocpp_set_progress_callback\n"
+        )
+        if (MSVC OR CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+            target_link_options(audiocpp PRIVATE "/DEF:${AUDIOCPP_DEF_FILE}")
+        elseif (MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            target_link_libraries(audiocpp PRIVATE "${AUDIOCPP_DEF_FILE}")
+        else()
+            target_link_options(audiocpp PRIVATE "-Wl,/DEF:${AUDIOCPP_DEF_FILE}")
+        endif()
+
+        if (MSVC OR CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+            set(AUDIOCPP_RC_FILEVERSION "0,0,0,0")
+            string(REGEX MATCH "([0-9]+)\\.([0-9]+)\\.([0-9]+)(-([0-9]+))?" _v "${AUDIOCPP_GIT_VERSION}")
+            if (CMAKE_MATCH_1 AND CMAKE_MATCH_2 AND CMAKE_MATCH_3)
+                set(AUDIOCPP_RC_FILEVERSION "${CMAKE_MATCH_1},${CMAKE_MATCH_2},${CMAKE_MATCH_3},${CMAKE_MATCH_5}")
+            endif()
+            set(AUDIOCPP_RC_FILE "${CMAKE_CURRENT_BINARY_DIR}/audiocpp_version.rc")
+            configure_file(
+                "${CMAKE_CURRENT_SOURCE_DIR}/capi/src/audiocpp_version.rc.in"
+                "${AUDIOCPP_RC_FILE}"
+                @ONLY)
+            target_sources(audiocpp PRIVATE "${AUDIOCPP_RC_FILE}")
+        endif()
+    else()
+        set(AUDIOCPP_MAP_FILE "${CMAKE_CURRENT_BINARY_DIR}/audiocpp.map")
+        file(WRITE "${AUDIOCPP_MAP_FILE}"
+            "{ global: audiocpp_*; local: *; };\n"
+        )
+        target_link_options(audiocpp PRIVATE
+            "-Wl,--version-script,${AUDIOCPP_MAP_FILE}"
+        )
+    endif()
+
+    add_executable(capi_test tests/test_capi_load.c capi/src/audiocpp_capi.cpp)
+    set_target_properties(capi_test PROPERTIES CXX_VISIBILITY_PRESET default)
+    target_compile_definitions(capi_test PRIVATE AUDIOCPP_EXPORTS)
+    target_include_directories(capi_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/capi/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/external/cJSON"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated"
+    )
+    target_link_libraries(capi_test PRIVATE engine_runtime ggml cjson_vendor)
+    if (ENGINE_ENABLE_OPENMP)
+        target_link_libraries(capi_test PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+
+    if (ENGINE_BUILD_TESTS)
+        add_executable(capi_option_number_test
+            tests/unittests/test_capi_option_number.cpp
+            capi/src/audiocpp_capi.cpp
+        )
+        set_target_properties(capi_option_number_test PROPERTIES CXX_VISIBILITY_PRESET default)
+        target_compile_definitions(capi_option_number_test PRIVATE AUDIOCPP_EXPORTS)
+        if (MSVC)
+            target_compile_options(capi_option_number_test PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/utf-8>)
+        endif()
+        target_include_directories(capi_option_number_test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/capi/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}/capi/src"
+            "${CMAKE_CURRENT_SOURCE_DIR}/external/cJSON"
+            "${CMAKE_CURRENT_BINARY_DIR}/generated"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests"
+        )
+        target_link_libraries(capi_option_number_test PRIVATE engine_runtime ggml cjson_vendor)
+        if (ENGINE_ENABLE_OPENMP)
+            target_link_libraries(capi_option_number_test PRIVATE OpenMP::OpenMP_CXX)
+        endif()
+        add_test(NAME capi_option_number_test COMMAND capi_option_number_test)
+
+        add_executable(capi_session_options_test
+            tests/unittests/test_capi_session_options.cpp
+            capi/src/audiocpp_capi.cpp
+        )
+        set_target_properties(capi_session_options_test PROPERTIES CXX_VISIBILITY_PRESET default)
+        target_compile_definitions(capi_session_options_test PRIVATE AUDIOCPP_EXPORTS)
+        if (MSVC)
+            target_compile_options(capi_session_options_test PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/utf-8>)
+        endif()
+        target_include_directories(capi_session_options_test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/capi/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}/capi/src"
+            "${CMAKE_CURRENT_SOURCE_DIR}/external/cJSON"
+            "${CMAKE_CURRENT_BINARY_DIR}/generated"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests"
+        )
+        target_link_libraries(capi_session_options_test PRIVATE engine_runtime ggml cjson_vendor)
+        if (ENGINE_ENABLE_OPENMP)
+            target_link_libraries(capi_session_options_test PRIVATE OpenMP::OpenMP_CXX)
+        endif()
+        add_test(NAME capi_session_options_test COMMAND capi_session_options_test)
+
+        add_executable(capi_enum_sync_test
+            tests/unittests/test_capi_enum_sync.cpp
+            capi/src/audiocpp_capi.cpp
+        )
+        set_target_properties(capi_enum_sync_test PROPERTIES CXX_VISIBILITY_PRESET default)
+        target_compile_definitions(capi_enum_sync_test PRIVATE AUDIOCPP_EXPORTS)
+        if (MSVC)
+            target_compile_options(capi_enum_sync_test PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/utf-8>)
+        endif()
+        target_include_directories(capi_enum_sync_test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/capi/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}/capi/src"
+            "${CMAKE_CURRENT_SOURCE_DIR}/external/cJSON"
+            "${CMAKE_CURRENT_BINARY_DIR}/generated"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests"
+        )
+        target_link_libraries(capi_enum_sync_test PRIVATE engine_runtime ggml cjson_vendor)
+        if (ENGINE_ENABLE_OPENMP)
+            target_link_libraries(capi_enum_sync_test PRIVATE OpenMP::OpenMP_CXX)
+        endif()
+        add_test(NAME capi_enum_sync_test COMMAND capi_enum_sync_test)
+    endif()
 endif()
 
 add_executable(audiocpp_cli

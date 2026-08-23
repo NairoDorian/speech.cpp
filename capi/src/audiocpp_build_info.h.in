@@ -1,0 +1,21 @@
+/**
+ * audiocpp_build_info.h — build provenance for the audiocpp shared library.
+ *
+ * Generated at CMake configure time from audiocpp_build_info.h.in. Do not
+ * edit the generated file; edit the .in template or the CMake version
+ * capture in CMakeLists.txt instead. Captures git state + build date so
+ * audiocpp_version() and the embedded Windows version resource stay in sync.
+ */
+#ifndef AUDIOCPP_BUILD_INFO_H
+#define AUDIOCPP_BUILD_INFO_H
+
+/* e.g. "release-0.4.2-169-g8648bbb" or "8648bbb-dirty" or "unknown". */
+#define AUDIOCPP_BUILD_VERSION "@AUDIOCPP_GIT_VERSION@"
+/* Full commit hash, or "unknown" for tarball checkouts. */
+#define AUDIOCPP_BUILD_COMMIT  "@AUDIOCPP_GIT_COMMIT@"
+/* Git branch name, or "unknown". */
+#define AUDIOCPP_BUILD_BRANCH  "@AUDIOCPP_GIT_BRANCH@"
+/* ISO-8601 UTC build timestamp. */
+#define AUDIOCPP_BUILD_DATE    "@AUDIOCPP_BUILD_DATE@"
+
+#endif /* AUDIOCPP_BUILD_INFO_H */

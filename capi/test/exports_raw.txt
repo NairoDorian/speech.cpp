@@ -1,0 +1,79 @@
+Microsoft (R) COFF/PE Dumper Version 14.44.35226.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+
+Dump of file G:\iStation\Sound\audiocpp_batch.dll
+
+File Type: DLL
+
+  Section contains the following exports for audiocpp.dll
+
+    00000000 characteristics
+    FFFFFFFF time date stamp
+        0.00 version
+           1 ordinal base
+          49 number of functions
+          49 number of names
+
+    ordinal hint RVA      name
+
+          1    0 000363D0 audiocpp_align
+          2    1 00036C40 audiocpp_artifact_create
+          3    2 00036DE0 audiocpp_artifact_free
+          4    3 00036EC0 audiocpp_artifact_set_meta
+          5    4 00037200 audiocpp_asr
+          6    5 00037A70 audiocpp_asr_batch
+          7    6 000387D0 audiocpp_audio_transform
+          8    7 00038E10 audiocpp_audio_transform_with_voice_ref
+          9    8 00039690 audiocpp_backend_available
+         10    9 00039770 audiocpp_build_id
+         11    A 00039780 audiocpp_clear_error
+         12    B 000397B0 audiocpp_denoise
+         13    C 0003A7C0 audiocpp_device_count
+         14    D 0003A7D0 audiocpp_device_info
+         15    E 0003A9C0 audiocpp_diar
+         16    F 0003AEE0 audiocpp_free_align
+         17   10 0003AF60 audiocpp_free_audio
+         18   11 0003AF90 audiocpp_free_audio_batch
+         19   12 0003B020 audiocpp_free_capabilities
+         20   13 0003B0A0 audiocpp_free_diar
+         21   14 0003B120 audiocpp_free_model
+         22   15 0003B170 audiocpp_free_model_info
+         23   16 0003B1B0 audiocpp_free_stems
+         24   17 0003B230 audiocpp_free_stream_event
+         25   18 0003B270 audiocpp_free_string
+         26   19 0003B280 audiocpp_free_text
+         27   1A 0003B2C0 audiocpp_free_vad
+         28   1B 0003B2F0 audiocpp_list_devices
+         29   1C 0003B5F0 audiocpp_load_model
+         30   1D 0003B630 audiocpp_load_model_ex
+         31   1E 0003C580 audiocpp_model_capabilities
+         32   1F 0003C730 audiocpp_model_info
+         33   20 0003C7A0 audiocpp_read_wav
+         34   21 0003C8C0 audiocpp_set_progress_callback
+         35   22 0003C930 audiocpp_stream_finish
+         36   23 0003CCD0 audiocpp_stream_free
+         37   24 0003CD10 audiocpp_stream_pull
+         38   25 0003CFC0 audiocpp_stream_push
+         39   26 0003D370 audiocpp_stream_start
+         40   27 0003D910 audiocpp_super_resolve
+         41   28 0003E020 audiocpp_transform_stems
+         42   29 0003E7E0 audiocpp_tts
+         43   2A 0003EE30 audiocpp_tts_batch
+         44   2B 0003FED0 audiocpp_tts_with_voice_ref
+         45   2C 000407A0 audiocpp_vad
+         46   2D 00040C60 audiocpp_vad_energy
+         47   2E 00041120 audiocpp_version
+         48   2F 00041790 audiocpp_write_wav
+         49   30 000417B0 audiocpp_write_wav_ex
+
+  Summary
+
+       C4000 .data
+        1000 .nvFatBi
+     1D45000 .nv_fatb
+       90000 .pdata
+     26FA000 .rdata
+        5000 .reloc
+        1000 .rsrc
+     1D87000 .text

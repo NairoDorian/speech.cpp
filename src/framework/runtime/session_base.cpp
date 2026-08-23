@@ -2,6 +2,33 @@
 
 namespace engine::runtime {
 
+void RuntimeSessionBase::set_progress_callback(ProgressCallback cb) {
+    progress_callback_ = std::move(cb);
+}
+
+void RuntimeSessionBase::emit_progress(
+    const char * stage, int64_t completed_units, int64_t total_units) {
+    if (!progress_callback_) {
+        return;
+    }
+    ProgressInfo info;
+    info.completed_units = completed_units;
+    info.total_units = total_units;
+    if (total_units > 0) {
+        info.progress = static_cast<float>(
+            static_cast<double>(completed_units) / static_cast<double>(total_units));
+        if (info.progress < 0.0f) info.progress = 0.0f;
+        if (info.progress > 1.0f) info.progress = 1.0f;
+    }
+    if (stage != nullptr) {
+        info.stage = stage;
+    }
+    if (!progress_callback_(info)) {
+        throw ProgressCanceled(std::string(stage != nullptr ? stage : "run") +
+                               " canceled by progress callback");
+    }
+}
+
 RuntimeSessionBase::RuntimeSessionBase(const SessionOptions & options)
     : options_(options),
       execution_context_(options.backend),

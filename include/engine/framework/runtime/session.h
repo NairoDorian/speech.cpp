@@ -8,6 +8,7 @@
 #include <functional>
 #include <initializer_list>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -213,6 +214,25 @@ struct StreamEvent {
     bool is_final = false;
 };
 
+// Progress reporting for offline run(). A session invokes the callback at chunk
+// boundaries (for chunked TTS/ASR) or once at start/end for single-shot models.
+// Returning false from the callback requests cancellation; run() then throws
+// ProgressCanceled. The callback is always invoked synchronously on the same
+// thread that called run().
+struct ProgressInfo {
+    float progress = 0.0f;          // [0.0, 1.0]
+    std::string stage;              // model family name, e.g. "qwen3_tts"
+    int64_t completed_units = 0;    // chunks completed so far
+    int64_t total_units = 0;        // total chunks (1 for single-shot models)
+};
+
+using ProgressCallback = std::function<bool(const ProgressInfo &)>;
+
+// Thrown by run() when a progress callback returns false (cancellation).
+struct ProgressCanceled : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 enum class StreamingInputKind {
     None,
     AudioChunks,
@@ -240,6 +260,13 @@ public:
     virtual VoiceTaskKind task_kind() const = 0;
     virtual RunMode run_mode() const = 0;
     virtual void prepare(const SessionPreparationRequest & request) = 0;
+
+    // Install a progress observer invoked from inside run() / streaming runs.
+    // Default no-op; RuntimeSessionBase overrides to store the callback so all
+    // concrete sessions inherit the plumbing. Call before run()/start_stream().
+    virtual void set_progress_callback(ProgressCallback cb) {
+        (void)cb;
+    }
 };
 
 class IOfflineVoiceTaskSession : public virtual IVoiceTaskSession {
