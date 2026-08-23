@@ -43,14 +43,26 @@ Qwen3TTSGenerationOptions generation_options_from_request_impl(
     if (const auto value = runtime::find_option(request.options, {"subtalker_do_sample"})) {
         options.subtalker_do_sample = runtime::parse_bool_option(*value, "subtalker_do_sample");
     }
-    if (const auto value = runtime::parse_finite_float_option(request.options, {"temperature"})) {
-        options.temperature = *value;
+    const auto req_temp = runtime::parse_finite_float_option(request.options, {"temperature"});
+    if (req_temp) {
+        options.temperature = *req_temp;
     }
     if (const auto value = runtime::parse_int_option(request.options, {"top_k"})) {
         options.top_k = *value;
     }
-    if (const auto value = runtime::parse_finite_float_option(request.options, {"top_p"})) {
-        options.top_p = *value;
+    const auto req_top_p = runtime::parse_finite_float_option(request.options, {"top_p"});
+    if (req_top_p) {
+        options.top_p = *req_top_p;
+    }
+    if (config.variant == Qwen3TTSVariant::Base) {
+        if (!req_top_p) {
+            options.top_p = 0.8F;
+        }
+        if (!req_temp) {
+            options.temperature = 0.8F;
+        }
+        constexpr int64_t kBaseMaxNewTokensCap = 1024;
+        options.max_new_tokens = std::min<int64_t>(options.max_new_tokens, kBaseMaxNewTokensCap);
     }
     if (const auto value = runtime::parse_finite_float_option(request.options, {"repetition_penalty"})) {
         options.repetition_penalty = *value;

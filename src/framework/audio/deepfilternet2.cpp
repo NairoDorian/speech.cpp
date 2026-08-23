@@ -1262,7 +1262,12 @@ DeepFilterNet2WaveformOutput DeepFilterNet2Model::run_mono_48k(const std::vector
     }
     constexpr int64_t segment_samples = 48000;
     constexpr int64_t stride_samples = 36000;
-    constexpr int64_t segment_threshold = segment_samples * 2;
+    // The "whole" path builds a single graph that unrolls per frame (GRU +
+    // feature loops), so its node count grows with input length and overflows
+    // the 65536-node graph well before 2×segment. Segment-sized inputs (48000
+    // samples = 100 frames) are the largest verified-safe whole input, so route
+    // anything larger through the overlap-add chunked path.
+    constexpr int64_t segment_threshold = segment_samples;
     const int64_t original_samples = static_cast<int64_t>(waveform.size());
     if (original_samples <= segment_threshold) {
         return run_mono_48k_whole(*state_, waveform);

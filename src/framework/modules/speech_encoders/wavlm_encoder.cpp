@@ -725,6 +725,10 @@ public:
 
 private:
     void release_graph() {
+        if (gallocr_ != nullptr) {
+            ggml_gallocr_free(gallocr_);
+            gallocr_ = nullptr;
+        }
         if (buffer_ != nullptr) {
             ggml_backend_buffer_free(buffer_);
             buffer_ = nullptr;
@@ -829,8 +833,17 @@ private:
             ggml_set_output(output.tensor);
             ggml_build_forward_expand(graph_, output.tensor);
         }
-        buffer_ = ggml_backend_alloc_ctx_tensors(ggml_, weights_->execution_context->backend());
-        if (buffer_ == nullptr) {
+        // Allocate graph tensors via gallocr (lifetime-aware buffer reuse) instead of
+        // ggml_backend_alloc_ctx_tensors, which gives every tensor — including the
+        // per-layer attention score matrices [B, H, tokens, tokens] — its own backing
+        // buffer with zero reuse. For 12 transformer layers that over-commits ~15 GiB
+        // on a 35 s clip (tokens≈1786), blowing past VRAM on CUDA. gallocr analyzes the
+        // graph topology and reuses buffers for tensors whose lifetimes don't overlap,
+        // matching how HuBERT / wav2vec2-bert / whisper / miocodec already allocate.
+        gallocr_ = ggml_gallocr_new(ggml_backend_get_default_buffer_type(weights_->execution_context->backend()));
+        if (gallocr_ == nullptr ||
+            !ggml_gallocr_reserve(gallocr_, graph_) ||
+            !ggml_gallocr_alloc_graph(gallocr_, graph_)) {
             release_graph();
             throw std::runtime_error("failed to allocate WavLM graph tensors");
         }
@@ -906,6 +919,7 @@ private:
     std::mutex mutex_;
     ggml_context * ggml_ = nullptr;
     ggml_backend_buffer_t buffer_ = nullptr;
+    ggml_gallocr_t gallocr_ = nullptr;
     ggml_cgraph * graph_ = nullptr;
     core::TensorValue input_;
     core::TensorValue first_conv_time_mask_;

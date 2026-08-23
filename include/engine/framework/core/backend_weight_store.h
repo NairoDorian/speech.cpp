@@ -21,6 +21,20 @@ namespace engine::core {
 
 class BackendWeightStore {
 public:
+    // The store always runs the ggml context in no_alloc mode: the context pool
+    // only holds tensor METADATA (ggml_tensor structs, a few KB total), while the
+    // tensor DATA lives in a separate backend buffer allocated in upload().
+    //
+    // Historically the constructor committed the entire `context_bytes` up front
+    // via ggml_init -> ggml_aligned_malloc. That over-committed badly for models
+    // with many runtimes: IndexTTS2 constructs 7 stores, each defaulting to
+    // 4096 MB, committing 7 * 4096 MB ~= 28 GB just to hold ~1 MB of metadata and
+    // exhausting the Windows system commit limit. We now cap the committed pool to a
+    // metadata budget that is generous yet orders of magnitude smaller than the
+    // typical context_bytes. `context_bytes` is still accepted for compatibility
+    // and only takes effect if a caller genuinely needs a larger metadata pool.
+    static constexpr size_t kMetadataPoolBudget = 16ull * 1024ull * 1024ull;  // 16 MB
+
     BackendWeightStore(ggml_backend_t backend, BackendType backend_type, std::string name, size_t context_bytes)
         : backend_(backend),
           backend_type_(backend_type),
@@ -31,7 +45,12 @@ public:
         if (context_bytes == 0) {
             throw std::runtime_error(name_ + " context bytes must be non-zero");
         }
-        ggml_init_params params{context_bytes, nullptr, true};
+        // no_alloc=true => pool holds metadata only; do not commit the full
+        // context_bytes. Use the smaller of context_bytes and the metadata budget.
+        const size_t pool_bytes = context_bytes < kMetadataPoolBudget
+                                      ? context_bytes
+                                      : kMetadataPoolBudget;
+        ggml_init_params params{pool_bytes, nullptr, true};
         ctx_.reset(ggml_init(params));
         if (ctx_ == nullptr) {
             throw std::runtime_error("failed to initialize " + name_ + " weight context");
@@ -399,7 +418,13 @@ private:
         const auto dims = to_ggml_dims(shape);
         auto * tensor = ggml_new_tensor(ctx_.get(), type, static_cast<int>(shape.rank), dims.data());
         if (tensor == nullptr) {
-            throw std::runtime_error("failed to create " + name_ + " weight tensor");
+            // The metadata pool is capped at kMetadataPoolBudget (no_alloc mode);
+            // running out of pool here means the model has an extraordinary number
+            // of weight tensors. Re-raise with an actionable message.
+            throw std::runtime_error(
+                "failed to create " + name_ + " weight tensor (metadata pool exhausted; "
+                "raise kMetadataPoolBudget in BackendWeightStore if the model genuinely "
+                "exceeds the tensor-count budget)");
         }
         return wrap_tensor(tensor, shape, type);
     }
