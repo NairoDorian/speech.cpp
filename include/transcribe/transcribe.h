@@ -1074,6 +1074,103 @@ TRANSCRIBE_API void transcribe_session_params_init(struct transcribe_session_par
  *              to probe whether the loaded model accepts a given kind
  *              before pointing `family` at it.
  */
+/*
+ * VAD (Voice Activity Detection) preprocessing modes for offline ASR runs.
+ *
+ * When mode != TRANSCRIBE_VAD_OFF, transcribe_run runs VAD on the input audio,
+ * merges silence gaps, pads boundaries, and decodes the resulting speech
+ * segments individually before re-stitching global timestamps.
+ *
+ * Streaming runs (transcribe_stream_*) never use VAD.
+ */
+typedef enum {
+    TRANSCRIBE_VAD_OFF    = 0, /* default: full-buffer decode, no VAD */
+    TRANSCRIBE_VAD_SILERO = 1, /* neural VAD via native Silero model */
+    TRANSCRIBE_VAD_ENERGY = 2, /* energy/RMS VAD (no model required) */
+} transcribe_vad_mode;
+
+/*
+ * VAD configuration. Embedded in transcribe_run_params.vad. Zero-init
+ * (which transcribe_run_params_init performs) means mode=OFF and all
+ * numeric defaults resolved at runtime.
+ */
+struct transcribe_vad_params {
+    uint64_t struct_size;     /* sizeof(struct transcribe_vad_params) */
+
+    transcribe_vad_mode mode; /* default OFF */
+
+    const char * dll_path;    /* unused in speech.cpp (native in-process execution) */
+    const char * weight_path; /* optional override path to silero_vad weights */
+
+    int backend;              /* 0 = CPU; forwarded to engine backend */
+    int device_id;            /* GPU index; ignored on CPU */
+    int n_threads;            /* 0 = auto */
+
+    int64_t max_chunk_ms;     /* per-window ceiling; <=0 -> family
+                               * effective_max_audio_ms (via
+                               * transcribe_session_get_limits), or 30000 if
+                               * that is 0/unbounded */
+    int64_t merge_gap_ms;     /* default 500; <=0 -> never merge */
+    int64_t padding_ms;       /* default 250; <0 -> 0 */
+
+    /* Silero tuning (SILERO mode only). <=0 / 0 means use engine defaults
+     * (threshold 0.5, min_speech 250ms, min_silence 100ms). */
+    float   silero_threshold;      /* default 0.5; <=0 -> default */
+    int64_t silero_min_speech_ms;  /* default 250; <=0 -> default */
+    int64_t silero_min_silence_ms; /* default 100; <=0 -> default */
+};
+
+/*
+ * One speech segment, ms-resolution. Returned by transcribe_vad (the
+ * standalone API) and used internally. Caller frees the array with
+ * transcribe_free_vad.
+ */
+typedef struct transcribe_vad_segment {
+    int64_t start_ms;
+    int64_t end_ms;
+    float   confidence;
+} transcribe_vad_segment;
+
+/*
+ * Standalone VAD: detect speech segments without running ASR. Does NOT
+ * require a transcribe_session. out_segments is a calloc'd array of
+ * *out_n_segments entries; caller owns it and must free with
+ * transcribe_free_vad. Returns TRANSCRIBE_OK on success (including when 0
+ * segments are found — *out_segments is NULL, *out_n_segments is 0).
+ */
+TRANSCRIBE_API transcribe_status transcribe_vad(const float *                        pcm,
+                                                int                                  n_samples,
+                                                int                                  sample_rate,
+                                                const struct transcribe_vad_params * vad_params,
+                                                struct transcribe_vad_segment **     out_segments,
+                                                int64_t *                            out_n_segments);
+
+/* Free a segment array returned by transcribe_vad. Safe on NULL. */
+TRANSCRIBE_API void transcribe_free_vad(struct transcribe_vad_segment * segments);
+
+/*
+ * Optional parameters for transcribe_run.
+ *
+ * Call transcribe_run_params_init() to populate all fields with their
+ * defaults before overriding specific members:
+ *
+ *   struct transcribe_run_params params;
+ *   transcribe_run_params_init(&params);
+ *   params.task       = TRANSCRIBE_TASK_TRANSCRIBE;
+ *   params.timestamps = TRANSCRIBE_TIMESTAMPS_WORD;
+ *
+ * Extension payloads:
+ *   family: pointer to a family-specific extension struct, or NULL.
+ *           Transcribe takes no ownership of this pointer; the caller
+ *           must keep the struct valid for the duration of the
+ *           transcribe_run() call and is free to reuse or discard the
+ *           extension storage immediately after the call. Each
+ *           family declares its typed extension struct in
+ *           include/transcribe/<family>.h with `struct transcribe_ext
+ *           ext` as field 0. Use transcribe_model_accepts_ext_kind
+ *           to probe whether the loaded model accepts a given kind
+ *           before pointing `family` at it.
+ */
 struct transcribe_run_params {
     uint64_t struct_size;
 
@@ -1109,6 +1206,15 @@ struct transcribe_run_params {
      *   to know whether the field will take effect.
      */
     int32_t spec_k_drafts;
+
+    /*
+     * vad: optional VAD preprocessing. Zero-initialized by
+     * transcribe_run_params_init, which sets mode=OFF. Callers built
+     * against an older header (smaller struct_size) are detected at
+     * runtime and treated as OFF — VAD never changes behavior for
+     * existing callers. See transcribe_vad_mode / transcribe_vad_params.
+     */
+    struct transcribe_vad_params vad;
 };
 
 TRANSCRIBE_API void transcribe_run_params_init(struct transcribe_run_params * params);

@@ -28,6 +28,8 @@
 #include "transcribe-path.h"
 #include "transcribe-session.h"
 #include "transcribe-tokenizer.h"
+#include "transcribe-vad.h"
+#include "transcribe-vad-integrate.h"
 #include "transcribe/whisper.h"
 
 #if defined(TRANSCRIBE_GGML_BACKEND_DL) && defined(_WIN32)
@@ -584,6 +586,13 @@ extern "C" void transcribe_run_params_init(struct transcribe_run_params * p) {
     // Default to AUTO (richest output compatible with the model and selected
     // run tasks, resolved per-family) rather than the memset NONE.
     p->timestamps    = TRANSCRIBE_TIMESTAMPS_AUTO;
+    p->vad.struct_size = sizeof(p->vad);
+    p->vad.mode = TRANSCRIBE_VAD_OFF;
+    p->vad.merge_gap_ms = 500;
+    p->vad.padding_ms = 250;
+    p->vad.silero_threshold = 0.5f;
+    p->vad.silero_min_speech_ms = 250;
+    p->vad.silero_min_silence_ms = 100;
 }
 
 extern "C" void transcribe_stream_params_init(struct transcribe_stream_params * p) {
@@ -2231,6 +2240,16 @@ static transcribe_status run_one_inner(struct transcribe_session *          sess
         return TRANSCRIBE_ERR_NOT_IMPLEMENTED;
     }
 
+    if (transcribe::vad::effective_mode(params) != TRANSCRIBE_VAD_OFF) {
+        bool degraded = false;
+        const transcribe_status vad_st = transcribe::vad::run_with_vad(session, pcm, n_samples, params, degraded);
+        if (!degraded) {
+            return vad_st;
+        }
+        // When degraded (e.g. VAD model unavailable), seamlessly fall through
+        // to standard full-buffer decode.
+    }
+
     return session->model->arch->run(session, pcm, n_samples, params);
 }
 
@@ -3285,3 +3304,51 @@ extern "C" int transcribe_tokenize(const struct transcribe_model * model,
     return api_guard_value("transcribe_tokenize", INT_MIN,
                            [&] { return transcribe_tokenize_impl(model, text, tokens, n_max); });
 }
+
+extern "C" transcribe_status transcribe_vad(const float *                        pcm,
+                                            int                                  n_samples,
+                                            int                                  sample_rate,
+                                            const struct transcribe_vad_params * vad_params,
+                                            struct transcribe_vad_segment **     out_segments,
+                                            int64_t *                            out_n_segments) {
+    return api_guard_status("transcribe_vad", [&] {
+        if (pcm == nullptr || n_samples <= 0 || sample_rate <= 0 || out_segments == nullptr || out_n_segments == nullptr) {
+            return TRANSCRIBE_ERR_INVALID_ARG;
+        }
+        *out_segments = nullptr;
+        *out_n_segments = 0;
+
+        struct transcribe_vad_params vp{};
+        if (vad_params != nullptr) {
+            vp = *vad_params;
+        }
+        if (vp.mode == TRANSCRIBE_VAD_OFF) {
+            vp.mode = TRANSCRIBE_VAD_ENERGY;  // Default for standalone VAD if unspecified
+        }
+
+        const auto segs = transcribe::vad::detect_speech(pcm, n_samples, sample_rate, vp);
+        *out_n_segments = static_cast<int64_t>(segs.size());
+        if (segs.empty()) {
+            return TRANSCRIBE_OK;
+        }
+
+        auto * arr = static_cast<struct transcribe_vad_segment *>(std::calloc(segs.size(), sizeof(struct transcribe_vad_segment)));
+        if (arr == nullptr) {
+            return TRANSCRIBE_ERR_OOM;
+        }
+        for (size_t i = 0; i < segs.size(); ++i) {
+            arr[i].start_ms   = segs[i].start_ms;
+            arr[i].end_ms     = segs[i].end_ms;
+            arr[i].confidence = segs[i].confidence;
+        }
+        *out_segments = arr;
+        return TRANSCRIBE_OK;
+    });
+}
+
+extern "C" void transcribe_free_vad(struct transcribe_vad_segment * segments) {
+    if (segments != nullptr) {
+        std::free(segments);
+    }
+}
+

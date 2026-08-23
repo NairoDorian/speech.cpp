@@ -1542,6 +1542,8 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
         src/runtime/transcribe-tokenizer.cpp
         src/runtime/transcribe-unicode.cpp
         src/runtime/transcribe-unicode-data.cpp
+        src/runtime/transcribe-vad.cpp
+        src/runtime/transcribe-vad-integrate.cpp
         src/runtime/transcribe-weights-util.cpp
         src/runtime/causal_lm/causal_lm.cpp
         src/runtime/conformer/conformer.cpp
@@ -1651,7 +1653,30 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
     add_executable(asr_stream_text_wer_test tests/asr_stream_text_wer_test.cpp)
     target_link_libraries(asr_stream_text_wer_test PRIVATE transcribe)
 
+    add_executable(vad_plan_unit
+        tests/unittests/vad_plan_unit.cpp
+    )
+    target_include_directories(vad_plan_unit PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/runtime
+    )
+    target_link_libraries(vad_plan_unit PRIVATE transcribe)
+
+    add_executable(vad_merge_unit
+        tests/unittests/vad_merge_unit.cpp
+    )
+    target_include_directories(vad_merge_unit PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/runtime
+    )
+    target_link_libraries(vad_merge_unit PRIVATE transcribe)
+
     if (ENGINE_BUILD_TESTS)
+        add_test(NAME vad_plan_unit COMMAND vad_plan_unit)
+        add_test(NAME vad_merge_unit COMMAND vad_merge_unit)
+
         # Both bridge tests skip (exit 2) without a model. Point them at the
         # in-tree silero_vad safetensors + a LibriSpeech fixture so they are
         # real gates under CTest rather than permanent skips; the argv/env

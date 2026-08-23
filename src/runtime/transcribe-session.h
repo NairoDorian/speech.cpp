@@ -39,7 +39,7 @@ inline int32_t transcribe_session_params_n_ctx(const struct transcribe_session_p
     return params->n_ctx;
 }
 
-struct transcribe_session {
+struct TRANSCRIBE_API transcribe_session {
     // The model this session was constructed from. Borrowed pointer:
     // the caller is required (per the public threading contract) to keep
     // the model alive for the lifetime of every derived session.
