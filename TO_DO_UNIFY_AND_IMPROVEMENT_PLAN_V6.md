@@ -403,6 +403,30 @@ failures was actually about assets.
    defects. Treat every "environment/asset issue" label as unverified until
    a failure has been reproduced and root-caused once.
 
+### R13. Upstream Audio.cpp Sync (`62735ea`), Allocator Hardening, Phase 2 Toolchain, and Native VAD Integration (2026-08-23)
+
+1. **Upstream `audio.cpp` Synchronized cleanly:**
+   - Pulled upstream `0xShug0/audio.cpp` `main` (`62735ea`, 26 commits total since fork baseline) including portable CUDA architecture auto-selection and test utilities.
+   - Gated test executables (`moss_voicegen`, `personaplex`, `moss`, `vibevoice`) against `AUDIOCPP_LINKED_MODELS` to ensure lean configurations (`AUDIOCPP_MODEL_SET=core`) pass 100% cleanly.
+   - Pushed cleanly to `NairoDorian/speech.cpp:main` (0 commits behind upstream).
+
+2. **Phase 1 Allocator Hardening Landed:**
+   - **`BackendWeightStore`** metadata pool budget capped at `kMetadataPoolBudget = 16 MB` for `no_alloc=true` ggml context allocations, eliminating up to 28 GB of private virtual memory over-commit in multi-runtime models like IndexTTS2.
+   - **`WavLMEncoder`** switched from `ggml_backend_alloc_ctx_tensors` to `ggml_gallocr` buffer reuse (18x peak computation memory reduction on 35s clips).
+   - **`Qwen3-TTS`** Base variant sampling runaway mitigation (`top_p = 0.8, temp = 0.8` default, hard `max_new_tokens = 1024` ceiling).
+   - **`DeepFilterNet2`** overlap-add chunking threshold lowered to `segment_samples` (48000), preventing GGML 65536-node graph overflows on audio >1s.
+
+3. **Phase 2 Toolchain Modernization & Build Provenance Landed:**
+   - Integrated `Resolve-CudaArchitectures "auto"` local GPU arch probing and `ccache` compiler launcher auto-detection into both `scripts/build_windows.ps1` and `scripts/build_windows_hip.ps1`.
+   - Built 3-outlet build provenance system: configure-time `cmake/transcribe-build-info.h.in`, Windows `cmake/transcribe-version.rc.in` (`VS_VERSION_INFO`), strong symbol `kTranscribeBuildId`, and `transcribe_build_id()` / `transcribe_version()`.
+
+4. **Phase 3 Native Long-Form VAD Chunk Planning & Re-stitching Landed:**
+   - Added pure chunk planner `src/runtime/transcribe-vad.h` & `.cpp` (`vad::plan`, `vad::params_present`, `vad::effective_mode`).
+   - Added native in-process VAD detection & timeline re-stitching `src/runtime/transcribe-vad-integrate.h` & `.cpp` (`vad::detect_speech`, `vad::offset_chunk_results`, `vad::rollback_to`, `vad::rebuild_full_text`, `vad::run_with_vad`).
+   - Extended public C ABI with `transcribe_vad` and `transcribe_free_vad`.
+   - Added dedicated unit test suites `tests/unittests/vad_plan_unit.cpp` and `tests/unittests/vad_merge_unit.cpp`.
+   - CPU test suite stands at **53/53 tests passing (100% green in ~22s)**.
+
 ## 0. Vision Statement
 
 **Goal:** Merge `transcribe.cpp` fully into `audio.cpp` (via the `speech.cpp`

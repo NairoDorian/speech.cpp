@@ -118,24 +118,16 @@ fixes; suite result recorded below when the run lands (expected: the same
 three shared failures gone; WER gates not registered there — ABI/arches OFF).
 
 ## NEXT (highest value first)
-1. **Start Phase 1 family work.** The substrate is fully gated (offline text,
-   streaming text, plumbing, teardown lint, reproducible ggml). Highest-value
-   first move per R3/R6: consolidate one duplicated family end to end —
-   qwen3_asr (engine impl canonical, upgraded with transcribe.cpp's WER/parity
-   corpus) is the plan's Phase 1.A — or port Whisper (Phase 1.D, biggest
-   ecosystem pull). Either lands the ArchAdapter-vs-native decision with a
-   real family and gives the golden pipeline its second WER corpus.
-2. **Wire the WER gates into whatever CI lands** (plan Appendix I): the
-   fetch script is CI-friendly (stdlib-only, sha256-pinned, skip-not-fail
-   contract), and `cpu-core` + tests ON is first-class (R10.5).
-3. **Upstream candidates:** the `run_shell_command` cmd-quote fix + the
-   ModelInstaller join fix + the three `WORKING_DIRECTORY` registrations +
-   the SDPA skip probe apply verbatim to audio.cpp (all in files identical
-   upstream); the streaming gate + fetch-table pattern port cleanly to any
-   fork. Offer once the fork has a PR channel.
-4. **Optional gates when wanted:** pinned GGUFs for citrinet/hviske would
-   make a real standalone-family WER gate (the packaging path is already
-   tested); a Vulkan row in Appendix I's matrix.
+1. **Family Consolidation & Bidirectional Upgrade**:
+   - **Qwen3-ASR & FunASR Nano**: Consolidate engine models (`src/models/qwen3_asr/`, `src/models/fun_asr_nano/`) with transcribe.cpp's direct depthwise conv / packed projection optimizations, 4-state streaming machine, and WER test corpus.
+   - **Whisper Full Pipeline & HF 5.x Seek Fix**: Port the complete Whisper engine session (16 variants) with HuggingFace 5.x seek continuation fix to eliminate tail speech truncation on early `<|t|>` closures.
+   - **Parakeet TDT & Moonshine Engine Spec Integration**: Provide native engine sessions + `model_specs/*.json` catalogs for Moonshine and Parakeet (11 variants) so they are directly callable via CLI, server, WebUI, and C ABI.
+   - **Sortformer v2.1 Streaming Diarization**: Upgrade from v1 to v2.1 streaming Sortformer (`diar_streaming_sortformer_4spk-v2.1`) with official NVIDIA CC-BY-4.0 GGUF.
+2. **Process-Wide VRAM Optimization (`SharedWeightRegistry`)**:
+   - Implement `SharedWeightRegistry` and `ScopedWeightShareKey` from `audio_cunba` for global reference-counted weight buffers, reducing multi-session server memory from ~3 GB to ~34 MB per session.
+3. **Universal Multi-Task Progress Callback & Unified ABI (`libspeech`)**:
+   - Standardize `speech_progress_callback(model, fn, user_data)` across all 42+ TTS and 18+ ASR models (reporting ratio `0.0..1.0`, stage name, units).
+   - Finalize single-artifact shared build (`SPEECH_SHARED_EMBED=ON`) and zero-dependency dynload bindings (Rust, Python ctypes, TypeScript koffi, Swift).
 
 ## LEFT TO DO (small)
 - [ ] Formalize root `.gitmodules` so `git submodule update` works for the 3 embedded repos.
