@@ -1,6 +1,6 @@
 # Progress — Unified_Audio.cpp (speech.cpp ggml fork) merge & improve
 
-Status snapshot: **Upstream audio.cpp main (4d383be, 24 commits) merged cleanly into speech.cpp. All 51 CPU core tests and new MMS forced aligner unit tests passing 100% green. Added F5-TTS, MMS forced aligner, MOSS-VoiceGenerator, LRU eviction, reverse-proxy WebUI routing, and CUDA graph cache / trim pool patch 0007.** Date: 2026-08-22
+Status snapshot: **Upstream audio.cpp main (62735ea, 26 commits total) merged cleanly into speech.cpp. Phase 1 Allocator Hardening applied (BackendWeightStore 16MB cap, WavLM gallocr buffer reuse, Qwen3-TTS runaway guard, DeepFilterNet2 threshold). Phase 3 Native Long-Form VAD Chunk Planning & Public C ABI integrated with dedicated unit tests. Build tooling accelerated with ccache compiler launcher auto-detection. All 53 CPU core tests passing 100% green.** Date: 2026-08-23
 
 ## Repo layout (important, non-obvious)
 `Unified_Audio.cpp/` is a **plain container directory with no git repo of its
@@ -9,25 +9,27 @@ own**. It holds exactly three things, each an independent repository:
 | Folder | Role |
 |---|---|
 | `speech.cpp/` | the active development repo (the ggml/audio.cpp fork). **All merge work, and this log, live here.** Remote: `NairoDorian/speech.cpp`, upstream `0xShug0/audio.cpp`. |
-| `audio.cpp/` | upstream reference — read from, not developed in |
-| `transcribe.cpp/` | merge source — read from, not developed in. This session its `docs/models/moonshine-streaming-tiny.md` supplied the pinned streaming model + its published parity numbers. |
+| `audio.cpp/` | upstream reference — read from, not developed in (pulled to `62735ea`) |
+| `transcribe.cpp/` | merge source — read from, not developed in. |
+| `audio_cunba/` & `transcribe_cunba/` | hardened reference trees containing allocator fixes, VAD chunk planning, and build acceleration. |
 
 Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 `sp_bridge` (CPU, full model set, unified ABI + arches, tests), `sp_cuda`
-(CUDA, core set, ABI/arches OFF), `audiocpp_flashsr` (audio.cpp reference).
-`CMakePresets.json` reproduces the first two as `cpu-full` / `cuda` (plus
-`cpu-core`). NOTE: the scratch trees live OUTSIDE the repo — which is exactly
-what exposed the working-directory defects fixed this session.
+(CUDA, core set, ABI/arches OFF), `audiocpp_flashsr` (audio.cpp reference),
+`build-cpu-core` (local MSVC CPU core test suite).
 
 ## Overall progress (toward "Unified_Audio transcribes on CPU")
 | Area | Status | % |
 |---|---|---|
 | Merge: ggml convergence (pin 8c63e709 + patches 0001–0006), CPU+CUDA certified | Done (prior sessions) | 100% |
+| Merge: Upstream audio.cpp main synchronization (`62735ea`) | Done (clean merge, test gating resolved) | 100% |
+| Memory: Phase 1 Allocator Hardening (16MB cap, WavLM gallocr, Qwen3 runaway, DFN2) | Done (certified in engine) | 100% |
+| Long-form: Phase 3 Native VAD Chunk Planning & Re-stitching (`vad_plan`, `vad_merge`) | Done (native Silero + Energy VAD, C ABI) | 100% |
 | ABI offline + streaming surface | Verified, real CTest gates | 100% |
 | End-to-end ASR **offline text** (WER gate) | Done — 1.45% corpus WER | 100% |
 | **End-to-end ASR streaming text** | **Done — streamed 4.35% == offline 4.35%, divergence 0** | **100%** |
-| Residual "environment/asset" failure ledger | **Empty — CPU suite 58/58 green; every entry was misdiagnosed** | 100% |
-| **Project-wide (functional CPU transcribe)** | Phase 0 substrate is done and fully gated; next front is family porting (Phases 1–3) | **~90%** |
+| Test suite status | **53/53 green (100% pass in ~22s)** | **100%** |
+| **Project-wide (functional CPU transcribe + unified audio)** | Phase 0 & Phase 1 substrate complete, Phase 3 VAD landed | **~94%** |
 
 ## DONE this session (plan R12 records all of it)
 
