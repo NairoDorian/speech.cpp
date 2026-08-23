@@ -2009,58 +2009,62 @@ if (ENGINE_BUILD_TESTS)
         endif()
     endif()
 
-    add_executable(moss_voicegen_codec_parity
-        tests/moss_voicegen/codec_decode_parity.cpp
-    )
+    if (moss_voicegen IN_LIST AUDIOCPP_LINKED_MODELS)
+        add_executable(moss_voicegen_codec_parity
+            tests/moss_voicegen/codec_decode_parity.cpp
+        )
 
-    target_link_libraries(moss_voicegen_codec_parity PRIVATE engine_runtime ggml)
-    if (ENGINE_ENABLE_OPENMP)
-        target_link_libraries(moss_voicegen_codec_parity PRIVATE OpenMP::OpenMP_CXX)
+        target_link_libraries(moss_voicegen_codec_parity PRIVATE engine_runtime ggml)
+        if (ENGINE_ENABLE_OPENMP)
+            target_link_libraries(moss_voicegen_codec_parity PRIVATE OpenMP::OpenMP_CXX)
+        endif()
+
+        add_executable(moss_voicegen_smoke
+            tests/moss_voicegen/voicegen_smoke.cpp
+        )
+
+        target_link_libraries(moss_voicegen_smoke PRIVATE engine_runtime ggml)
+        if (ENGINE_ENABLE_OPENMP)
+            target_link_libraries(moss_voicegen_smoke PRIVATE OpenMP::OpenMP_CXX)
+        endif()
+
+        add_executable(moss_voicegen_generation_parity
+            tests/moss_voicegen/generation_parity.cpp
+        )
+
+        target_link_libraries(moss_voicegen_generation_parity PRIVATE engine_runtime ggml)
+        if (ENGINE_ENABLE_OPENMP)
+            target_link_libraries(moss_voicegen_generation_parity PRIVATE OpenMP::OpenMP_CXX)
+        endif()
+
+        add_executable(moss_voicegen_backbone_parity
+            tests/moss_voicegen/backbone_parity.cpp
+        )
+
+        target_link_libraries(moss_voicegen_backbone_parity PRIVATE engine_runtime ggml)
+        if (ENGINE_ENABLE_OPENMP)
+            target_link_libraries(moss_voicegen_backbone_parity PRIVATE OpenMP::OpenMP_CXX)
+        endif()
+
+        add_executable(moss_voicegen_prompt_parity
+            tests/moss_voicegen/prompt_parity.cpp
+        )
+
+        target_link_libraries(moss_voicegen_prompt_parity PRIVATE engine_runtime ggml)
+        if (ENGINE_ENABLE_OPENMP)
+            target_link_libraries(moss_voicegen_prompt_parity PRIVATE OpenMP::OpenMP_CXX)
+        endif()
     endif()
 
-    add_executable(moss_voicegen_smoke
-        tests/moss_voicegen/voicegen_smoke.cpp
-    )
+    if (personaplex IN_LIST AUDIOCPP_LINKED_MODELS)
+        add_executable(personaplex_ring_kv_cache_parity
+            tests/personaplex/personaplex_ring_kv_cache_parity.cpp
+        )
 
-    target_link_libraries(moss_voicegen_smoke PRIVATE engine_runtime ggml)
-    if (ENGINE_ENABLE_OPENMP)
-        target_link_libraries(moss_voicegen_smoke PRIVATE OpenMP::OpenMP_CXX)
-    endif()
-
-    add_executable(moss_voicegen_generation_parity
-        tests/moss_voicegen/generation_parity.cpp
-    )
-
-    target_link_libraries(moss_voicegen_generation_parity PRIVATE engine_runtime ggml)
-    if (ENGINE_ENABLE_OPENMP)
-        target_link_libraries(moss_voicegen_generation_parity PRIVATE OpenMP::OpenMP_CXX)
-    endif()
-
-    add_executable(moss_voicegen_backbone_parity
-        tests/moss_voicegen/backbone_parity.cpp
-    )
-
-    target_link_libraries(moss_voicegen_backbone_parity PRIVATE engine_runtime ggml)
-    if (ENGINE_ENABLE_OPENMP)
-        target_link_libraries(moss_voicegen_backbone_parity PRIVATE OpenMP::OpenMP_CXX)
-    endif()
-
-    add_executable(moss_voicegen_prompt_parity
-        tests/moss_voicegen/prompt_parity.cpp
-    )
-
-    target_link_libraries(moss_voicegen_prompt_parity PRIVATE engine_runtime ggml)
-    if (ENGINE_ENABLE_OPENMP)
-        target_link_libraries(moss_voicegen_prompt_parity PRIVATE OpenMP::OpenMP_CXX)
-    endif()
-
-    add_executable(personaplex_ring_kv_cache_parity
-        tests/personaplex/personaplex_ring_kv_cache_parity.cpp
-    )
-
-    target_link_libraries(personaplex_ring_kv_cache_parity PRIVATE engine_runtime ggml)
-    if (ENGINE_ENABLE_OPENMP)
-        target_link_libraries(personaplex_ring_kv_cache_parity PRIVATE OpenMP::OpenMP_CXX)
+        target_link_libraries(personaplex_ring_kv_cache_parity PRIVATE engine_runtime ggml)
+        if (ENGINE_ENABLE_OPENMP)
+            target_link_libraries(personaplex_ring_kv_cache_parity PRIVATE OpenMP::OpenMP_CXX)
+        endif()
     endif()
 endif()
 
