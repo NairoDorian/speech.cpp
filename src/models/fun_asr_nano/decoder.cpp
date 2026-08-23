@@ -42,15 +42,12 @@ struct GgmlContextDeleter {
 
 struct TextLayerWeights {
   core::TensorValue input_norm;
-  core::TensorValue q_proj;
-  core::TensorValue k_proj;
-  core::TensorValue v_proj;
+  core::TensorValue qkv_proj;
   core::TensorValue o_proj;
   core::TensorValue q_norm;
   core::TensorValue k_norm;
   core::TensorValue post_norm;
-  core::TensorValue gate_proj;
-  core::TensorValue up_proj;
+  core::TensorValue gate_up_proj;
   core::TensorValue down_proj;
 };
 
@@ -71,15 +68,12 @@ modules::QwenDecoderLayerWeights
 to_qwen_layer_weights(const TextLayerWeights &weights) {
   modules::QwenDecoderLayerWeights out;
   out.input_norm = {weights.input_norm, std::nullopt};
-  out.self_attention.q_weight = weights.q_proj;
-  out.self_attention.k_weight = weights.k_proj;
-  out.self_attention.v_weight = weights.v_proj;
+  out.self_attention.qkv_weight = weights.qkv_proj;
   out.self_attention.out_weight = weights.o_proj;
   out.q_norm = {weights.q_norm, std::nullopt};
   out.k_norm = {weights.k_norm, std::nullopt};
   out.post_norm = {weights.post_norm, std::nullopt};
-  out.mlp.gate_proj = {weights.gate_proj, std::nullopt};
-  out.mlp.up_proj = {weights.up_proj, std::nullopt};
+  out.mlp.gate_up_proj = {weights.gate_up_proj, std::nullopt};
   out.mlp.down_proj = {weights.down_proj, std::nullopt};
   return out;
 }
@@ -96,6 +90,8 @@ make_qwen_decoder_config(const FunAsrNanoTextConfig &config) {
   out.stack.rms_norm_eps = config.rms_norm_eps;
   out.stack.rope_theta = config.rope_theta;
   out.stack.use_qk_norm = true;
+  out.stack.qkv_layout = modules::QwenDecoderQKVLayout::PackedQKV;
+  out.stack.runtime.mlp.mode = modules::QwenDecoderMLPMode::PackedGateUp;
   out.stack.runtime.static_cache.update_mode =
       modules::QwenDecoderStaticCacheUpdateMode::DirectSetRows;
   out.logits_size = config.vocab_size;
@@ -151,6 +147,56 @@ prompt_embeddings(core::ModuleBuildContext &ctx,
       core::TensorShape::from_dims({1, prompt_steps, config.hidden_size}));
 }
 
+// Concatenate several [rows, hidden] weight tensors along the row axis into
+// one [rows_total, hidden] tensor. All inputs must share the same row width
+// (hidden) and storage type, so the row-major byte streams (including
+// quantized block rows) concatenate directly.
+core::TensorValue load_packed_rows(
+    core::BackendWeightStore &store, const assets::TensorSource &source,
+    assets::TensorStorageType storage_type, int64_t hidden,
+    std::vector<std::pair<std::string, int64_t>> named_rows) {
+  if (named_rows.empty()) {
+    throw std::runtime_error("Fun-ASR-Nano packed weight needs at least one row source");
+  }
+  assets::TensorStorageType resolved = storage_type;
+  if (resolved == assets::TensorStorageType::Native) {
+    resolved = assets::tensor_storage_type_for_dtype(
+        source.require_metadata(named_rows.front().first).dtype);
+  }
+  const ggml_type type = assets::ggml_type_for_tensor_storage(resolved);
+  if (hidden % ggml_blck_size(type) != 0) {
+    throw std::runtime_error("Fun-ASR-Nano packed weight row width is not block aligned");
+  }
+  const size_t row_bytes = static_cast<size_t>(hidden) / ggml_blck_size(type) *
+                           ggml_type_size(type);
+  size_t total_rows = 0;
+  std::vector<std::vector<std::byte>> parts;
+  parts.reserve(named_rows.size());
+  for (const auto &[name, rows] : named_rows) {
+    if (rows <= 0) {
+      throw std::runtime_error("Fun-ASR-Nano packed weight row count must be positive");
+    }
+    const assets::TensorData data =
+        source.require_tensor(name, resolved, {rows, hidden});
+    if (data.type != type ||
+        data.bytes.size() != static_cast<size_t>(rows) * row_bytes) {
+      throw std::runtime_error("Fun-ASR-Nano packed weight source layout mismatch for " + name);
+    }
+    total_rows += static_cast<size_t>(rows);
+    parts.push_back(data.bytes);
+  }
+  std::vector<std::byte> packed(total_rows * row_bytes);
+  size_t offset = 0;
+  for (const auto &part : parts) {
+    std::memcpy(packed.data() + offset, part.data(), part.size());
+    offset += part.size();
+  }
+  return store.make_tensor(
+      core::TensorShape::from_dims(
+          {static_cast<int64_t>(total_rows), hidden}),
+      type, packed.data(), packed.size());
+}
+
 TextDecoderWeights load_weights(const FunAsrNanoAssets &assets,
                                 ggml_backend_t backend,
                                 core::BackendType backend_type,
@@ -167,21 +213,22 @@ TextDecoderWeights load_weights(const FunAsrNanoAssets &assets,
       {config.vocab_size, config.hidden_size});
   weights.layers.reserve(static_cast<size_t>(config.layers));
   const int64_t dim = head_dim(config);
+  const int64_t q_out = config.attention_heads * dim;
+  const int64_t kv_out = config.key_value_heads * dim;
   for (int64_t layer = 0; layer < config.layers; ++layer) {
     const std::string prefix =
         "model.language_model.layers." + std::to_string(layer);
     TextLayerWeights w;
     w.input_norm = weights.store->load_f32_tensor(
         source, prefix + ".input_layernorm.weight", {config.hidden_size});
-    w.q_proj = weights.store->load_tensor(
-        source, prefix + ".self_attn.q_proj.weight", storage_type,
-        {config.attention_heads * dim, config.hidden_size});
-    w.k_proj = weights.store->load_tensor(
-        source, prefix + ".self_attn.k_proj.weight", storage_type,
-        {config.key_value_heads * dim, config.hidden_size});
-    w.v_proj = weights.store->load_tensor(
-        source, prefix + ".self_attn.v_proj.weight", storage_type,
-        {config.key_value_heads * dim, config.hidden_size});
+    // q/k/v and gate/up are packed into single row-concatenated weight
+    // tensors at load time so each decoder layer runs one QKV projection and
+    // one fused SwiGLU projection instead of three and two.
+    w.qkv_proj = load_packed_rows(
+        *weights.store, source, storage_type, config.hidden_size,
+        {{prefix + ".self_attn.q_proj.weight", q_out},
+         {prefix + ".self_attn.k_proj.weight", kv_out},
+         {prefix + ".self_attn.v_proj.weight", kv_out}});
     w.o_proj = weights.store->load_tensor(
         source, prefix + ".self_attn.o_proj.weight", storage_type,
         {config.hidden_size, config.attention_heads * dim});
@@ -192,12 +239,10 @@ TextDecoderWeights load_weights(const FunAsrNanoAssets &assets,
     w.post_norm = weights.store->load_f32_tensor(
         source, prefix + ".post_attention_layernorm.weight",
         {config.hidden_size});
-    w.gate_proj = weights.store->load_tensor(
-        source, prefix + ".mlp.gate_proj.weight", storage_type,
-        {config.intermediate_size, config.hidden_size});
-    w.up_proj = weights.store->load_tensor(
-        source, prefix + ".mlp.up_proj.weight", storage_type,
-        {config.intermediate_size, config.hidden_size});
+    w.gate_up_proj = load_packed_rows(
+        *weights.store, source, storage_type, config.hidden_size,
+        {{prefix + ".mlp.gate_proj.weight", config.intermediate_size},
+         {prefix + ".mlp.up_proj.weight", config.intermediate_size}});
     w.down_proj = weights.store->load_tensor(
         source, prefix + ".mlp.down_proj.weight", storage_type,
         {config.hidden_size, config.intermediate_size});
