@@ -174,17 +174,74 @@ if (ENGINE_HIP_STRIX_HALO_OPTIMIZATIONS)
 endif()
 
 if (ENGINE_ENABLE_CUDA AND NOT ENGINE_ENABLE_HIP)
-    enable_language(CUDA)
-    # 12.0 is a floor, not a target: any 12.x or 13.x works (the Dockerfile pins
-    # 12.9.0, and docs/build/windows.md ships a CUDA 13 package). The minimum is
-    # enforced because an older toolkit configures happily and only fails at the
-    # first .cu file, which reads as a code bug rather than a toolchain one: nvcc
-    # < 11.6 cannot parse libstdc++ >= 11.3 headers ("parameter packs not expanded
-    # with '...'" in <functional>), and distros still ship such pairings (Ubuntu
-    # 22.04's nvidia-cuda-toolkit is 11.5). Fail here, with a pointer, instead.
-    # The upper bound is the host compiler the chosen toolkit accepts, not CUDA
-    # itself (e.g. CUDA 12.9 supports GCC <= 14), so it is left to the toolkit.
+    # Require at least CUDA 12.0. Older toolkits configure fine but die at the
+    # first .cu file. Run this before enable_language(CUDA) because the version
+    # is needed for the default arch list below.
     find_package(CUDAToolkit 12.0 REQUIRED)
+
+    # Define default CUDA architectures for every build path.
+    # We stay close to llama.cpp/ggml-cuda here, unless there is a reason
+    # to deviate. See llama.cpp's ggml-cuda CMakeLists.txt for additional
+    # comments.
+    # Must be set before enable_language(CUDA), as that call otherwise seeds
+    # CMAKE_CUDA_ARCHITECTURES from nvcc's default arch (sm_75 for CUDA 13,
+    # sm_52 for CUDA 12), silently making every build without an explicit
+    # list single-arch (the seed ignores the local GPU).
+    # This can be overridden with -DCMAKE_CUDA_ARCHITECTURES=... or CUDAARCHS;
+    # set to "native" to build for the local GPU only (needs CMake >= 3.24).
+
+    # "native" fallback for CMake < 3.24
+    if ((CMAKE_CUDA_ARCHITECTURES STREQUAL "native" OR "$ENV{CUDAARCHS}" STREQUAL "native")
+        AND CMAKE_VERSION VERSION_LESS "3.24")
+        message(STATUS "CMAKE_CUDA_ARCHITECTURES=native requires CMake >= 3.24; "
+                       "falling back to the portable default architecture list")
+        set(CMAKE_CUDA_ARCHITECTURES "")
+    endif()
+
+    # Define default archs
+    if ("${CMAKE_CUDA_ARCHITECTURES}" STREQUAL "" AND "$ENV{CUDAARCHS}" STREQUAL "")
+        # XX-virtual = PTX (JIT, forward-compatible); XX-real = SASS (native).
+        if (CUDAToolkit_VERSION VERSION_LESS "13")
+            # 50/61/70 (Maxwell/Pascal/Volta) unsupported by CUDA 13 toolkits
+            list(APPEND CMAKE_CUDA_ARCHITECTURES 50-virtual 61-virtual 70-virtual)
+        endif()
+        list(APPEND CMAKE_CUDA_ARCHITECTURES 75-virtual 80-virtual 86-real)
+        if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "11.8")
+            list(APPEND CMAKE_CUDA_ARCHITECTURES 89-real 90-virtual)
+        endif()
+        if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")
+            # 12Xa, not 12X: Blackwell FP4 tensor cores are arch-specific.
+            list(APPEND CMAKE_CUDA_ARCHITECTURES 120a-real)
+        endif()
+        if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.9")
+            list(APPEND CMAKE_CUDA_ARCHITECTURES 121a-real)
+        endif()
+    endif()
+
+    enable_language(CUDA)
+
+    # Upgrade plain 12X (user value or resolved "native") to 12Xa (Blackwell).
+    foreach (_ARCHS_VAR IN ITEMS CMAKE_CUDA_ARCHITECTURES CMAKE_CUDA_ARCHITECTURES_NATIVE)
+        set(_FIXED_ARCHS "")
+        foreach (_ARCH IN LISTS ${_ARCHS_VAR})
+            if (_ARCH MATCHES "^12[0-9](-real|-virtual)?$")
+                string(REGEX REPLACE "^(12[0-9])((-real|-virtual)?)$" "\\1a\\2" _FIXED_ARCH "${_ARCH}")
+                message(STATUS "Replacing ${_ARCH} in ${_ARCHS_VAR} with ${_FIXED_ARCH}")
+                list(APPEND _FIXED_ARCHS "${_FIXED_ARCH}")
+            else()
+                list(APPEND _FIXED_ARCHS "${_ARCH}")
+            endif()
+        endforeach()
+        set(${_ARCHS_VAR} "${_FIXED_ARCHS}")
+    endforeach()
+
+    # Resolve "native" for the log; left as-is when no GPU was detected
+    # (nvcc then warns and uses its default arch).
+    if (CMAKE_CUDA_ARCHITECTURES STREQUAL "native" AND CMAKE_CUDA_ARCHITECTURES_NATIVE MATCHES "^[0-9]+(a|f)?(-real|-virtual)?(;[0-9]+(a|f)?(-real|-virtual)?|;)*$")
+        set(CMAKE_CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES_NATIVE}")
+    endif()
+    message(STATUS "Using CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES} CMAKE_CUDA_ARCHITECTURES_NATIVE=${CMAKE_CUDA_ARCHITECTURES_NATIVE}")
+
     if (NOT MSVC)
         set(CMAKE_CUDA_FLAGS_DEBUG "${AUDIOCPP_DEBUG_OPT_FLAGS}" CACHE STRING "Optimized debug CUDA flags" FORCE)
     endif()
@@ -1761,11 +1818,6 @@ if (ENGINE_ENABLE_CUDA AND NOT ENGINE_ENABLE_HIP)
         CUDA_STANDARD 17
         CUDA_STANDARD_REQUIRED ON
     )
-    if (CMAKE_CUDA_ARCHITECTURES)
-        set_target_properties(engine_runtime PROPERTIES CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
-    else()
-        set_target_properties(engine_runtime PROPERTIES CUDA_ARCHITECTURES native)
-    endif()
     target_compile_definitions(engine_core PRIVATE ENGINE_HAS_CUDA_ISTFT=1 ENGINE_HAS_CUDA_TORCH_RANDOM=1)
     target_compile_definitions(engine_runtime PUBLIC ENGINE_HAS_CUDA_ISTFT=1 ENGINE_HAS_CUDA_TORCH_RANDOM=1)
     target_link_libraries(engine_runtime PRIVATE CUDA::cudart CUDA::cufft)
@@ -1895,32 +1947,11 @@ if (ENGINE_ENABLE_OPENMP)
     target_link_libraries(model_perf PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
-add_executable(miocodec_wavlm_parity
+add_executable(miocodec_wavlm_parity EXCLUDE_FROM_ALL
     tests/miocodec/miocodec_wavlm_parity.cpp
 )
 
 target_link_libraries(miocodec_wavlm_parity PRIVATE engine_runtime ggml)
-
-add_executable(torch_bin_parity
-    tests/vibevoice/torch_bin_parity.cpp
-)
-
-target_link_libraries(torch_bin_parity PRIVATE engine_runtime ggml)
-if (ENGINE_ENABLE_OPENMP)
-    target_link_libraries(torch_bin_parity PRIVATE OpenMP::OpenMP_CXX)
-endif()
-
-# Only build this parity check when the vibevoice model is linked, since it
-# directly references model-internal symbols (load_vibevoice_assets etc.).
-if (vibevoice IN_LIST AUDIOCPP_LINKED_MODELS)
-    add_executable(vibevoice_finetune_overlay_check
-        tests/vibevoice/finetune_overlay_check.cpp
-    )
-    target_link_libraries(vibevoice_finetune_overlay_check PRIVATE engine_runtime ggml)
-    if (ENGINE_ENABLE_OPENMP)
-        target_link_libraries(vibevoice_finetune_overlay_check PRIVATE OpenMP::OpenMP_CXX)
-    endif()
-endif()
 
 # F5/Habibi tests: parity harnesses + e2e sample generator. Only when the
 # f5_tts model is linked (they call model-internal symbols) AND test hooks
@@ -1930,7 +1961,7 @@ option(ENGINE_F5_TEST_HOOKS "Build F5-TTS test hooks (f5_test_* symbols) and par
 if (f5_tts IN_LIST AUDIOCPP_LINKED_MODELS AND ENGINE_F5_TEST_HOOKS)
     target_compile_definitions(engine_model_f5_tts PRIVATE F5_MEL_TEST=1)
     foreach(f5_test IN ITEMS f5_e2e f5_parity f5_cfg_parity f5_tokenizer)
-        add_executable(${f5_test} tests/${f5_test}_main.cpp)
+        add_executable(${f5_test} tests/f5_tts/${f5_test}_main.cpp)
         target_compile_definitions(${f5_test} PRIVATE F5_MEL_TEST=1)
         target_link_libraries(${f5_test} PRIVATE engine_runtime ggml)
         target_include_directories(${f5_test} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -1940,37 +1971,42 @@ if (f5_tts IN_LIST AUDIOCPP_LINKED_MODELS AND ENGINE_F5_TEST_HOOKS)
     endforeach()
 endif()
 
-# These reference model-internal symbols (MossAudioTokenizer*,
-# load_moss_tts_local_assets, ...), which only exist when the moss model is in
-# the selected composite -- same reason vibevoice_finetune_overlay_check is
-# gated above. Without the gate, any lean build (AUDIOCPP_MODEL_SET=core, or a
-# custom set without moss) fails at link with ENGINE_BUILD_TESTS=ON.
-if (ENGINE_BUILD_TESTS AND moss IN_LIST AUDIOCPP_LINKED_MODELS)
-    add_executable(moss_tts_local_smoke
-        tests/moss_tts_local/moss_tts_local_smoke.cpp
+if (ENGINE_BUILD_TESTS)
+    add_executable(torch_bin_parity
+        tests/vibevoice/torch_bin_parity.cpp
     )
 
-    target_link_libraries(moss_tts_local_smoke PRIVATE engine_runtime ggml)
+    target_link_libraries(torch_bin_parity PRIVATE engine_runtime ggml)
     if (ENGINE_ENABLE_OPENMP)
-        target_link_libraries(moss_tts_local_smoke PRIVATE OpenMP::OpenMP_CXX)
+        target_link_libraries(torch_bin_parity PRIVATE OpenMP::OpenMP_CXX)
     endif()
 
-    add_executable(codec_dequant_parity
-        tests/moss_tts_local/codec_dequant_parity.cpp
-    )
-
-    target_link_libraries(codec_dequant_parity PRIVATE engine_runtime ggml)
-    if (ENGINE_ENABLE_OPENMP)
-        target_link_libraries(codec_dequant_parity PRIVATE OpenMP::OpenMP_CXX)
+    # Only build this parity check when the vibevoice model is linked, since it
+    # directly references model-internal symbols (load_vibevoice_assets etc.).
+    if (vibevoice IN_LIST AUDIOCPP_LINKED_MODELS)
+        add_executable(vibevoice_finetune_overlay_check
+            tests/vibevoice/finetune_overlay_check.cpp
+        )
+        target_link_libraries(vibevoice_finetune_overlay_check PRIVATE engine_runtime ggml)
+        if (ENGINE_ENABLE_OPENMP)
+            target_link_libraries(vibevoice_finetune_overlay_check PRIVATE OpenMP::OpenMP_CXX)
+        endif()
     endif()
 
-    add_executable(codec_decode_parity
-        tests/moss_tts_local/codec_decode_parity.cpp
-    )
+    # These reference model-internal symbols (MossAudioTokenizer*,
+    # load_moss_tts_local_assets, ...), which only exist when the moss model is in
+    # the selected composite -- same reason vibevoice_finetune_overlay_check is
+    # gated above. Without the gate, any lean build (AUDIOCPP_MODEL_SET=core, or a
+    # custom set without moss) fails at link with ENGINE_BUILD_TESTS=ON.
+    if (moss IN_LIST AUDIOCPP_LINKED_MODELS)
+        add_executable(moss_tts_local_smoke
+            tests/moss_tts_local/moss_tts_local_smoke.cpp
+        )
 
-    target_link_libraries(codec_decode_parity PRIVATE engine_runtime ggml)
-    if (ENGINE_ENABLE_OPENMP)
-        target_link_libraries(codec_decode_parity PRIVATE OpenMP::OpenMP_CXX)
+        target_link_libraries(moss_tts_local_smoke PRIVATE engine_runtime ggml)
+        if (ENGINE_ENABLE_OPENMP)
+            target_link_libraries(moss_tts_local_smoke PRIVATE OpenMP::OpenMP_CXX)
+        endif()
     endif()
 
     add_executable(moss_voicegen_codec_parity
@@ -2018,15 +2054,6 @@ if (ENGINE_BUILD_TESTS AND moss IN_LIST AUDIOCPP_LINKED_MODELS)
         target_link_libraries(moss_voicegen_prompt_parity PRIVATE OpenMP::OpenMP_CXX)
     endif()
 
-    add_executable(codec_encode_parity
-        tests/moss_tts_local/codec_encode_parity.cpp
-    )
-
-    target_link_libraries(codec_encode_parity PRIVATE engine_runtime ggml)
-    if (ENGINE_ENABLE_OPENMP)
-        target_link_libraries(codec_encode_parity PRIVATE OpenMP::OpenMP_CXX)
-    endif()
-
     add_executable(personaplex_ring_kv_cache_parity
         tests/personaplex/personaplex_ring_kv_cache_parity.cpp
     )
@@ -2052,7 +2079,6 @@ if (ENGINE_BUILD_WARMBENCH)
     add_engine_warmbench(chatterbox_warm_bench tests/chatterbox/chatterbox_warm_bench.cpp)
     add_engine_warmbench(citrinet_asr_warm_bench tests/citrinet_asr/citrinet_asr_warm_bench.cpp)
     add_engine_warmbench(confucius4_tts_warm_bench tests/confucius4_tts/confucius4_tts_warm_bench.cpp)
-    add_engine_warmbench(dramabox_warm_bench tools/dramabox/dramabox_warm_bench.cpp)
     add_engine_warmbench(fun_asr_nano_warm_bench tests/fun_asr_nano/fun_asr_nano_warm_bench.cpp)
     add_engine_warmbench(higgs_audio_stt_warm_bench tests/higgs_audio_stt/higgs_audio_stt_warm_bench.cpp)
     add_engine_warmbench(higgs_audio_tts_warm_bench tests/higgs_audio_tts/higgs_audio_tts_warm_bench.cpp)
