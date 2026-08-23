@@ -17,7 +17,8 @@ param(
     [switch]$NativeModelManager,
     [switch]$SystemOpenSsl,
     [string]$BoringSslArchive = "",
-    [switch]$Graphs          # enable CUDA graphs (memory-hungry on iGPUs: each cached graph reserves its own VRAM)
+    [switch]$Graphs,          # enable CUDA graphs (memory-hungry on iGPUs: each cached graph reserves its own VRAM)
+    [switch]$Ccache
 )
 
 Set-StrictMode -Version Latest
@@ -201,6 +202,24 @@ $configureArgs = @(
 $boringSslArchivePath = if ($BoringSslArchive -ne "") { Convert-ToCMakePath $BoringSslArchive } else { "" }
 if ($boringSslArchivePath -ne "") {
     $configureArgs += "-DAUDIOCPP_BORINGSSL_ARCHIVE=$boringSslArchivePath"
+}
+
+# ccache: cache .obj files to speed up clean rebuilds
+$ccacheExe = $null
+if ($Ccache) {
+    $ccacheExe = Get-Command "ccache" -ErrorAction SilentlyContinue
+    if (-not $ccacheExe) {
+        Write-Host "WARNING: -Ccache specified but ccache not found on PATH. Continuing without cache."
+    }
+} else {
+    $ccacheExe = Get-Command "ccache" -ErrorAction SilentlyContinue
+}
+if ($ccacheExe) {
+    $ccachePath = $ccacheExe.Source
+    Write-Host "ccache: $ccachePath"
+    $configureArgs += "-DCMAKE_C_COMPILER_LAUNCHER=$ccachePath"
+    $configureArgs += "-DCMAKE_CXX_COMPILER_LAUNCHER=$ccachePath"
+    $configureArgs += "-DCMAKE_HIP_COMPILER_LAUNCHER=$ccachePath"
 }
 
 Invoke-Checked $cmake $configureArgs
