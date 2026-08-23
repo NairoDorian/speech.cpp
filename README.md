@@ -11,14 +11,13 @@ coverage and modular build system with transcribe.cpp's disciplined STT
 architecture, C ABI surface, and per-tensor testing methodology.
 
 > [!IMPORTANT]
-> **v0.0.1 (development):** This is the first commit of `speech.cpp`,
-> a fork aligned with `audio.cpp@main` (upstream `92816fc`) that is beginning the
-> incremental, one-file-at-a-time absorption of `transcribe.cpp`. This commit is about the readme.md
+> **Unified Architecture & Roadmap:** For the complete, authoritative architectural blueprint, component deduplication strategy, and phased convergence timeline, see the [Master FUSION Roadmap Plan](FUSION_ROADMAP_PLAN.md).
 
 ---
 
 ## Table of Contents
 
+- [Master Fusion Roadmap](FUSION_ROADMAP_PLAN.md)
 - [News](#news)
 - [Supported Models](#supported-models)
 - [Community Models](#community-models)
