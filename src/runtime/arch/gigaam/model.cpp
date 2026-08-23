@@ -362,7 +362,7 @@ transcribe_status run(transcribe_session * session, const float * pcm, int n_sam
     }
 #endif
     if (!mel_from_ref) {
-        if (auto st = gm->mel.compute(pcm, static_cast<size_t>(n_samples), gc->mel_buf, mel_n_frames);
+        if (auto st = gm->mel.compute(pcm, static_cast<size_t>(n_samples), gc->mel_buf, mel_n_frames, gc->n_threads);
             st != TRANSCRIBE_OK) {
             return st;
         }
@@ -480,6 +480,19 @@ transcribe_status run(transcribe_session * session, const float * pcm, int n_sam
 
     gc->encoder_out = eb.out;
 
+    // Free GPU buffers (scheduler galloc buffers) after each transcription to
+    // prevent memory accumulation across repeated runs. The session is reused
+    // across calls (e.g. Multi-STT extra models with
+    // multi_stt_keep_extra_models_loaded), so releasing here lets CUDA's
+    // caching allocator reuse freed blocks on the next run() rather than
+    // growing the cache (GPU memory leak on Windows).
+    auto cleanup_gpu = [&]() {
+        if (gc->sched != nullptr) {
+            safe_sched_free(gc->sched);
+            gc->sched = nullptr;
+        }
+    };
+
     // Decoder (RNN-T or CTC greedy). Both heads consume the
     // pre-final-transpose encoder tensor (ne=[d_model, T_enc, 1]), named
     // `rnnt.encoded` on the graph. CTC variants skip the `rnnt.encoded` dump
@@ -488,6 +501,7 @@ transcribe_status run(transcribe_session * session, const float * pcm, int n_sam
         ggml_tensor * enc_t = eb.dumps.rnnt_encoded;
         if (enc_t == nullptr) {
             log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "gigaam: rnnt.encoded missing");
+            cleanup_gpu();
             return TRANSCRIBE_ERR_GGUF;
         }
         const int T_enc = static_cast<int>(enc_t->ne[1]);
@@ -504,10 +518,12 @@ transcribe_status run(transcribe_session * session, const float * pcm, int n_sam
 
         if (auto st = decode_and_populate(gc, gm, gc->enc_host.data(), T_enc, D, /*utt_index=*/-1);
             st != TRANSCRIBE_OK) {
+            cleanup_gpu();
             return st;
         }
     }
 
+    cleanup_gpu();
     return TRANSCRIBE_OK;
 }
 
@@ -720,20 +736,29 @@ transcribe_status run_batch(transcribe_session *          session,
     const int                       n_mels = gm->hparams.fe_num_mels;
     std::vector<std::vector<float>> mels(static_cast<size_t>(n));
     std::vector<int>                nf(static_cast<size_t>(n), 0);
-    const int64_t                   t_mel_start  = ggml_time_us();
-    const bool                      all_ok       = transcribe::parallel_for_all(n, gc->n_threads, [&](int i) -> bool {
+
+    // Share one bounded thread budget between utterance-level and frame-level
+    // parallelism. This keeps batch execution from nesting n_threads full mel
+    // pools while still using the budget when the batch contains one clip.
+    const int total_threads = gc->n_threads > 0 ? gc->n_threads : transcribe::default_n_threads();
+    const int outer_threads = std::max(1, std::min(n, total_threads));
+    const int mel_threads   = std::max(1, total_threads / outer_threads);
+
+    const int64_t t_mel_start  = ggml_time_us();
+    const bool    all_ok       = transcribe::parallel_for_all(n, outer_threads, [&](int i) -> bool {
         if (pcm[i] == nullptr || n_samples[i] <= 0) {
             return false;
         }
         int                     this_frames = 0;
-        const transcribe_status st = gm->mel.compute(pcm[i], static_cast<size_t>(n_samples[i]), mels[i], this_frames);
+        const transcribe_status st =
+            gm->mel.compute(pcm[i], static_cast<size_t>(n_samples[i]), mels[i], this_frames, mel_threads);
         if (st != TRANSCRIBE_OK || this_frames <= 0) {
             return false;
         }
         nf[i] = this_frames;
         return true;
     });
-    const int64_t                   total_mel_us = ggml_time_us() - t_mel_start;
+    const int64_t total_mel_us = ggml_time_us() - t_mel_start;
 
     if (all_ok) {
         // Per-utterance soft-window advisory before the shared encode; the

@@ -30,6 +30,15 @@ struct GigaamMelFrontend {
     std::vector<float> hann;    // [win_length] periodic
     std::vector<float> mel_fb;  // [n_mels, n_freq] row-major HTK
 
+    // Nonzero support of each mel_fb row: band m covers bins
+    // [fb_begin[m], fb_end[m]). An HTK triangular filterbank touches only
+    // ~2*n_freq/n_mels bins per band (5 of 161 here), so the no-BLAS matmul
+    // walks just this span. Skipped terms are exactly 0.0f * power added to a
+    // sequential f32 accumulator, which leaves it unchanged — bit-identical
+    // to the dense loop. Filled by init(); [n_mels] each.
+    std::vector<int> fb_begin;
+    std::vector<int> fb_end;
+
     void init(const GigaamHParams & hp, const GigaamWeights & w);
 
     // n_frames for a given audio length under center=False.
@@ -37,10 +46,13 @@ struct GigaamMelFrontend {
     int n_frames_for(size_t n_samples) const;
 
     // Compute log-mel. Output is row-major [n_mels, n_frames].
+    // n_threads controls frame FFT parallelism; <= 0 uses the affinity-aware
+    // project default.
     transcribe_status compute(const float *        pcm,
                               size_t               n_samples,
                               std::vector<float> & out_mel,
-                              int &                out_n_frames) const;
+                              int &                out_n_frames,
+                              int                  n_threads = 0) const;
 };
 
 }  // namespace transcribe::gigaam

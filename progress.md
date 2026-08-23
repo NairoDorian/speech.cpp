@@ -154,14 +154,20 @@ three shared failures gone; WER gates not registered there — ABI/arches OFF).
    - Implemented `RuntimeSessionBase::set_progress_callback` and `emit_progress` in `src/framework/runtime/session_base.cpp` and wired into `audiocpp_set_progress_callback`.
    - Integrated embedded asset subsystem (`include/engine/framework/assets/embedded.h` & `src/framework/assets/embedded.cpp`).
    - Added unit test suites `capi_option_number_test`, `capi_session_options_test`, and `capi_enum_sync_test` (56/56 tests passing 100% green).
+6. **Phase 6: Whisper GPU Cleanup, Arch Sync, and Model Spec Catalog Integration**:
+   - **GPU Buffer Cleanup across 18 Arches**: Integrated `cleanup_gpu` lambda across all `src/runtime/arch/*/model.cpp` files (Whisper, Moonshine, Parakeet, Canary, Voxtral, SenseVoice, etc.), eliminating GPU/KV-cache memory leaks across repeated runs on Windows.
+   - **Whisper `bin_load.cpp` Token Tables**: Added separate English and Multilingual suppress-token tables and `synthesize_bin_suppress_tokens()`.
+   - **Parakeet Batched Joint Window**: Added multi-frame greedy joint decoding graph amortization.
+   - **Model Spec Catalog Additions**: Added schema-v1 catalog specifications for `whisper.json` (16 packages: tiny, base, small, medium, large-v3, large-v3-turbo, and .en variants), `moonshine.json` (6 packages: tiny, base, small in q8_0/f16), and `moonshine_streaming.json` (2 packages: streaming-tiny in q8_0/f16).
+   - **Verified**: Full test suite passes 100% green (56/56 tests).
 
 ## NEXT (highest value first)
-1. **Whisper Full Pipeline & HF 5.x Seek Fix**:
-   - Port the complete Whisper engine session (16 variants) with HuggingFace 5.x seek continuation fix to eliminate tail speech truncation on early `<|t|>` closures.
-2. **Parakeet TDT & Moonshine Engine Spec Integration**:
-   - Provide native engine sessions + `model_specs/*.json` catalogs for Moonshine and Parakeet (11 variants) so they are directly callable via CLI, server, WebUI, and C ABI.
-3. **Zero-Dependency Language Bindings (`dynload`)**:
+1. **Zero-Dependency Language Bindings (`dynload`)**:
    - Finalize single-artifact shared build (`SPEECH_SHARED_EMBED=ON`) and zero-dependency dynload bindings (Rust, Python ctypes, TypeScript koffi, Swift).
+2. **HuggingFace 5.x Long-form Seek Continuation**:
+   - Verify long-form chunked streaming continuation across multi-minute audio files with synthetic silence and early `<|t|>` termination guards.
+3. **Parakeet TDT & Moonshine CLI / Server End-to-End Testing**:
+   - Validate CLI invocation with newly cataloged `--model whisper`, `--model moonshine`, and `--model parakeet_tdt`.
 
 ## LEFT TO DO (small)
 - [ ] Formalize root `.gitmodules` so `git submodule update` works for the 3 embedded repos.

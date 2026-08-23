@@ -1,0 +1,128 @@
+﻿{
+  "schema_version": 1,
+  "family": "moonshine_streaming",
+  "display_name": "Moonshine Streaming ASR",
+  "description": "Streaming variant of Useful Sensors Moonshine ASR model with low-latency causal/chunked transcription support.",
+  "category": "asr",
+  "status": "supported",
+  "tasks": [
+    "asr"
+  ],
+  "modes": [
+    "offline",
+    "streaming"
+  ],
+  "languages": [
+    "en"
+  ],
+  "capabilities": {
+    "asr": [
+      "word_timestamps",
+      "partial_results"
+    ]
+  },
+  "runtime": {
+    "tags": [
+      "gguf",
+      "stream"
+    ]
+  },
+  "options": {
+    "request": [
+      {
+        "name": "max_tokens",
+        "type": "int",
+        "description": "Maximum generated transcript tokens; 0 or omitted uses the model limit.",
+        "required": false,
+        "min": 0,
+        "default": 0
+      }
+    ],
+    "session": [
+      {
+        "name": "weight_type",
+        "type": "enum",
+        "description": "Shared matmul weight storage type; default native.",
+        "preset": "weight_type_full",
+        "required": false,
+        "default": "native"
+      }
+    ],
+    "load": []
+  },
+  "package_defaults": {
+    "download": {
+      "kind": "huggingface_snapshot",
+      "repo": "audio-cpp/audio.cpp-gguf",
+      "revision": "main",
+      "gated": false
+    }
+  },
+  "packages": [
+    {
+      "id": "moonshine_streaming_tiny_q8_0",
+      "display_name": "Moonshine Streaming Tiny Q8_0 GGUF",
+      "default": true,
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "Moonshine-Streaming-Tiny-GGUF",
+      "files": [
+        "Moonshine-Streaming-Tiny-GGUF/moonshine-streaming-tiny-q8_0.gguf"
+      ],
+      "strip_prefix": "Moonshine-Streaming-Tiny-GGUF"
+    },
+    {
+      "id": "moonshine_streaming_tiny_f16",
+      "display_name": "Moonshine Streaming Tiny F16 GGUF",
+      "format": "gguf",
+      "precision": "f16",
+      "target_directory": "Moonshine-Streaming-Tiny-GGUF",
+      "files": [
+        "Moonshine-Streaming-Tiny-GGUF/moonshine-streaming-tiny-f16.gguf"
+      ],
+      "strip_prefix": "Moonshine-Streaming-Tiny-GGUF"
+    }
+  ],
+  "dependencies": [],
+  "ui": {
+    "recommended_package": "moonshine_streaming_tiny_q8_0",
+    "tags": [
+      "ASR",
+      "GGUF",
+      "Stream"
+    ],
+    "docs": [
+      "docs/asr.md",
+      "docs/gguf.md"
+    ]
+  },
+  "sources": [
+    {
+      "format": "gguf",
+      "roots": {
+        "model": ".",
+        "weights": "$gguf"
+      },
+      "files": {
+        "config": "model:config.json",
+        "tokenizer_json": "model:tokenizer.json"
+      },
+      "tensors": {
+        "weights": "weights:"
+      }
+    },
+    {
+      "format": "safetensors",
+      "roots": {
+        "model": "."
+      },
+      "files": {
+        "config": "model:config.json",
+        "tokenizer_json": "model:tokenizer.json"
+      },
+      "tensors": {
+        "weights": "model:model.safetensors"
+      }
+    }
+  ]
+}

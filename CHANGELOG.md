@@ -36,6 +36,15 @@ Dates are the work-session dates recorded in the plan.
 - **Phase 2 Toolchain Modernization & Build Provenance**:
   Integrated `ccache` compiler launcher auto-detection into Windows build scripts, configured
   3-outlet build provenance (`transcribe-build-info`, `audiocpp_build_info`, Windows `.rc` resources).
+- **Whisper & Moonshine Engine Model Spec Catalogs**:
+  Added comprehensive schema-v1 catalog specifications for `model_specs/whisper.json`
+  (16 packages covering tiny, base, small, medium, large-v3, large-v3-turbo, and English-only variants),
+  `model_specs/moonshine.json` (6 packages: tiny, base, small), and
+  `model_specs/moonshine_streaming.json` (2 streaming packages).
+- **GPU Buffer Cleanup & Memory Leak Prevention**:
+  Integrated `cleanup_gpu` RAII/exit cleanup across all 18 arch runtime sessions
+  (`src/runtime/arch/*/model.cpp`), eliminating GPU memory and KV cache accumulation on Windows
+  during repeated model inference runs.
 
 ### Fixed
 

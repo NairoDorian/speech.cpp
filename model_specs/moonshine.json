@@ -1,0 +1,168 @@
+﻿{
+  "schema_version": 1,
+  "family": "moonshine",
+  "display_name": "Moonshine ASR",
+  "description": "Useful Sensors Moonshine family of lightweight, high-speed English ASR models designed for fast on-device and offline transcription, with tiny, base, and small variants.",
+  "category": "asr",
+  "status": "supported",
+  "tasks": [
+    "asr"
+  ],
+  "modes": [
+    "offline"
+  ],
+  "languages": [
+    "en"
+  ],
+  "capabilities": {
+    "asr": [
+      "word_timestamps"
+    ]
+  },
+  "runtime": {
+    "tags": [
+      "gguf"
+    ]
+  },
+  "options": {
+    "request": [
+      {
+        "name": "max_tokens",
+        "type": "int",
+        "description": "Maximum generated transcript tokens; 0 or omitted uses the model limit.",
+        "required": false,
+        "min": 0,
+        "default": 0
+      }
+    ],
+    "session": [
+      {
+        "name": "weight_type",
+        "type": "enum",
+        "description": "Shared matmul weight storage type; default native.",
+        "preset": "weight_type_full",
+        "required": false,
+        "default": "native"
+      }
+    ],
+    "load": []
+  },
+  "package_defaults": {
+    "download": {
+      "kind": "huggingface_snapshot",
+      "repo": "audio-cpp/audio.cpp-gguf",
+      "revision": "main",
+      "gated": false
+    }
+  },
+  "packages": [
+    {
+      "id": "moonshine_tiny_q8_0",
+      "display_name": "Moonshine Tiny Q8_0 GGUF",
+      "default": true,
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "Moonshine-Tiny-GGUF",
+      "files": [
+        "Moonshine-Tiny-GGUF/moonshine-tiny-q8_0.gguf"
+      ],
+      "strip_prefix": "Moonshine-Tiny-GGUF"
+    },
+    {
+      "id": "moonshine_tiny_f16",
+      "display_name": "Moonshine Tiny F16 GGUF",
+      "format": "gguf",
+      "precision": "f16",
+      "target_directory": "Moonshine-Tiny-GGUF",
+      "files": [
+        "Moonshine-Tiny-GGUF/moonshine-tiny-f16.gguf"
+      ],
+      "strip_prefix": "Moonshine-Tiny-GGUF"
+    },
+    {
+      "id": "moonshine_base_q8_0",
+      "display_name": "Moonshine Base Q8_0 GGUF",
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "Moonshine-Base-GGUF",
+      "files": [
+        "Moonshine-Base-GGUF/moonshine-base-q8_0.gguf"
+      ],
+      "strip_prefix": "Moonshine-Base-GGUF"
+    },
+    {
+      "id": "moonshine_base_f16",
+      "display_name": "Moonshine Base F16 GGUF",
+      "format": "gguf",
+      "precision": "f16",
+      "target_directory": "Moonshine-Base-GGUF",
+      "files": [
+        "Moonshine-Base-GGUF/moonshine-base-f16.gguf"
+      ],
+      "strip_prefix": "Moonshine-Base-GGUF"
+    },
+    {
+      "id": "moonshine_small_q8_0",
+      "display_name": "Moonshine Small Q8_0 GGUF",
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "Moonshine-Small-GGUF",
+      "files": [
+        "Moonshine-Small-GGUF/moonshine-small-q8_0.gguf"
+      ],
+      "strip_prefix": "Moonshine-Small-GGUF"
+    },
+    {
+      "id": "moonshine_small_f16",
+      "display_name": "Moonshine Small F16 GGUF",
+      "format": "gguf",
+      "precision": "f16",
+      "target_directory": "Moonshine-Small-GGUF",
+      "files": [
+        "Moonshine-Small-GGUF/moonshine-small-f16.gguf"
+      ],
+      "strip_prefix": "Moonshine-Small-GGUF"
+    }
+  ],
+  "dependencies": [],
+  "ui": {
+    "recommended_package": "moonshine_tiny_q8_0",
+    "tags": [
+      "ASR",
+      "GGUF"
+    ],
+    "docs": [
+      "docs/asr.md",
+      "docs/gguf.md"
+    ]
+  },
+  "sources": [
+    {
+      "format": "gguf",
+      "roots": {
+        "model": ".",
+        "weights": "$gguf"
+      },
+      "files": {
+        "config": "model:config.json",
+        "tokenizer_json": "model:tokenizer.json"
+      },
+      "tensors": {
+        "weights": "weights:"
+      }
+    },
+    {
+      "format": "safetensors",
+      "roots": {
+        "model": "."
+      },
+      "files": {
+        "config": "model:config.json",
+        "tokenizer_json": "model:tokenizer.json"
+      },
+      "tensors": {
+        "weights": "model:model.safetensors"
+      }
+    }
+  ]
+}

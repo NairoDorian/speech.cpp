@@ -333,6 +333,7 @@ EncoderBuild build_encoder_graph(ggml_context *         ctx,
                                  const GraniteHParams & hp,
                                  int                    T_enc,
                                  bool /*use_flash*/) {
+    const bool   conv_dw_direct = detect_conv_dw_direct();
     EncoderBuild eb{};
     eb.n_blocks_local = (T_enc + hp.enc_context_size - 1) / hp.enc_context_size;
     const int T_pad   = eb.n_blocks_local * hp.enc_context_size;
@@ -427,10 +428,8 @@ EncoderBuild build_encoder_graph(ggml_context *         ctx,
         //   scale = bn_w / sqrt(bn_var + eps)
         //   bias  = bn_b - bn_mean * scale
         // into [inner_dim] tensors stashed under conv_bn_fused_*.
-        // Direct depthwise conv dispatch (TRANSCRIBE_CONV_NO_DIRECT_DW to opt out).
-        static const bool conv_dw_direct = detect_conv_dw_direct();
         ggml_tensor * conv_out = granite_conv_module(ctx, x, b, b.conv_bn_fused_scale, b.conv_bn_fused_bias, conv_k,
-                                                      static_cast<int>(inner_dim), conv_dw_direct);
+                                                     static_cast<int>(inner_dim), conv_dw_direct);
         x                      = ggml_add(ctx, x, conv_out);
 
         // --- FF2 macaron half ---

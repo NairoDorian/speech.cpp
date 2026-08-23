@@ -458,6 +458,28 @@ transcribe_status load(Loader & loader, const transcribe_model_load_params * par
         return st;
     }
 
+    // Prompt-conditioned variants (nemotron-3.5): the prompt dictionary is
+    // the runtime accept-set for language hints (resolve_prompt_id does an
+    // exact-string lookup in it), and it supersets general.languages — it
+    // carries short aliases ("fr", "en") next to the BCP-47 locales
+    // ("fr-FR"). Advertising only general.languages makes the library-level
+    // language gate (and capability-driven hosts) reject or drop hints the
+    // model would happily take, silently degrading them to auto-detect.
+    // Overwrite caps.languages with the dictionary's locales, minus the
+    // "auto" slot (an empty hint already means auto).
+    if (m->hparams.has_prompt && !m->hparams.prompt_dictionary_locales.empty()) {
+        std::vector<std::string> dict_langs;
+        dict_langs.reserve(m->hparams.prompt_dictionary_locales.size());
+        for (const std::string & loc : m->hparams.prompt_dictionary_locales) {
+            if (loc != "auto") {
+                dict_langs.push_back(loc);
+            }
+        }
+        if (!dict_langs.empty()) {
+            m->set_languages(std::move(dict_langs));
+        }
+    }
+
     // Derive supports_streaming from hparams:
     //   ChunkedLimited + (L, R) >= 0 — cache-aware streaming
     //     (nemotron-speech-streaming-en-0.6b).
@@ -1094,9 +1116,23 @@ transcribe_status run_one_shot_inner(ParakeetSession *             pc,
             return TRANSCRIBE_ERR_GGUF;
         }
     }
+
+    // Free GPU buffers (scheduler galloc) after each transcription to prevent
+    // memory accumulation across repeated runs. The session persists across
+    // calls (e.g. Multi-STT extra models with multi_stt_keep_extra_models_loaded),
+    // so releasing here lets CUDA's caching allocator reuse freed blocks on the
+    // next run() rather than growing the cache (GPU memory leak on Windows).
+    auto cleanup_gpu = [&]() {
+        if (pc->sched != nullptr) {
+            safe_sched_free(pc->sched);
+            pc->sched = nullptr;
+        }
+    };
+
     ggml_backend_sched_reset(pc->sched);
     if (!ggml_backend_sched_alloc_graph(pc->sched, eb.graph)) {
         log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "parakeet run: ggml_backend_sched_alloc_graph failed");
+        cleanup_gpu();
         return TRANSCRIBE_ERR_GGUF;
     }
 
@@ -1160,6 +1196,7 @@ transcribe_status run_one_shot_inner(ParakeetSession *             pc,
                     "parakeet run: language %s%s%s not in prompt "
                     "dictionary",
                     lang_hint ? "\"" : "", lang_hint ? lang_hint : "<null>", lang_hint ? "\"" : "");
+            cleanup_gpu();
             return TRANSCRIBE_ERR_UNSUPPORTED_LANGUAGE;
         }
         std::vector<float> one_hot_buf;
@@ -1168,6 +1205,7 @@ transcribe_status run_one_shot_inner(ParakeetSession *             pc,
                     "parakeet run: prompt_id %d out of range "
                     "[0, %d)",
                     pid, P);
+            cleanup_gpu();
             return TRANSCRIBE_ERR_GGUF;
         }
         ggml_backend_tensor_set(eb.prompt_one_hot_in, one_hot_buf.data(), 0, one_hot_buf.size() * sizeof(float));
@@ -1253,6 +1291,7 @@ transcribe_status run_one_shot_inner(ParakeetSession *             pc,
     if (const ggml_status gs = ggml_backend_sched_graph_compute(pc->sched, eb.graph); gs != GGML_STATUS_SUCCESS) {
         log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "parakeet run: ggml_backend_sched_graph_compute failed (%d)",
                 static_cast<int>(gs));
+        cleanup_gpu();
         return TRANSCRIBE_ERR_GGUF;
     }
     pc->t_encode_us = ggml_time_us() - t_enc_start;
@@ -1323,6 +1362,7 @@ transcribe_status run_one_shot_inner(ParakeetSession *             pc,
                 "parakeet run: encoder output has degenerate shape "
                 "[%d, %d]",
                 d_enc, T_enc);
+        cleanup_gpu();
         return TRANSCRIBE_ERR_GGUF;
     }
     pc->enc_host.resize(static_cast<size_t>(d_enc) * static_cast<size_t>(T_enc));
@@ -1341,6 +1381,8 @@ transcribe_status run_one_shot_inner(ParakeetSession *             pc,
     }
 
     const char * enc_dump_name = pm->hparams.has_prompt ? "dec.enc_out_prompted" : nullptr;
+    cleanup_gpu();
+
     return decode_and_populate(pc, pm, params, pc->enc_host.data(), T_enc, d_enc, /*utt_index=*/-1, enc_dump_name);
 }
 
@@ -3026,8 +3068,39 @@ transcribe_status stream_feed(transcribe_session *       session,
     const int64_t t_mel_start  = ggml_time_us();
     int           mel_n_mels   = 0;
     int           mel_n_frames = 0;
-    if (const transcribe_status mst = pm->mel->compute(pc->stream_pcm_buffer.data(), pc->stream_pcm_buffer.size(),
-                                                       pc->mel_buf, mel_n_mels, mel_n_frames, pc->n_threads);
+
+    // Skip the mel outright on feeds that cannot emit a chunk.
+    //
+    // mel_buf is consumed only by the emit loop below (stream_finalize
+    // recomputes its own), and that loop's entry test is
+    //     avail - consumed >= chunk_advance + right_edge_margin
+    // where avail = pcm_start_frame + (frames compute() returned). The frame
+    // count is a pure function of the buffer length, and n_frames_for() is an
+    // exact upper bound on it: the per_feature and "none" normalizers return
+    // n_frames_for(), the whisper-mode ones (per_utterance / global) return
+    // one less. So when even the upper bound fails the test, the loop breaks
+    // on its first iteration and the entire mel is thrown away.
+    //
+    // Feeds arrive every stream-chunk-ms but a chunk is emitted only every
+    // few feeds, and each feed re-ran the mel over the WHOLE sliding buffer —
+    // which is why streaming mel cost ~9x the offline mel for the same audio.
+    //
+    // Bit-exact: when a chunk is emittable this computes exactly what it
+    // always did, over exactly the same buffer. When it is not, mel_n_frames
+    // stays 0, so avail == pcm_start_frame <= consumed (the trim never drops
+    // past the frames still needed) and the loop breaks as before.
+    const int margin_hops = (pm->hparams.fe_n_fft / 2 + pm->hparams.fe_hop_length - 1) / pm->hparams.fe_hop_length;
+    const int advance_needed =
+        pc->stream_caches.is_first_chunk ? pc->stream_caches.chunk_size_first : pc->stream_caches.chunk_size_subsequent;
+    const int64_t avail_upper = pc->stream_caches.pcm_start_sample / pm->hparams.fe_hop_length +
+                                static_cast<int64_t>(pm->mel->n_frames_for(pc->stream_pcm_buffer.size()));
+    const bool    mel_needed =
+        (avail_upper - pc->stream_caches.mel_frames_consumed) >= static_cast<int64_t>(advance_needed) + margin_hops;
+
+    if (const transcribe_status mst = mel_needed ?
+                                          pm->mel->compute(pc->stream_pcm_buffer.data(), pc->stream_pcm_buffer.size(),
+                                                           pc->mel_buf, mel_n_mels, mel_n_frames, pc->n_threads) :
+                                          TRANSCRIBE_OK;
         mst != TRANSCRIBE_OK) {
         // For very short buffers compute returns INVALID_ARG — "not
         // enough audio yet", a no-op feed, not a fatal error.
@@ -3180,6 +3253,13 @@ transcribe_status stream_finalize(transcribe_session * session, transcribe_strea
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
 
+    auto cleanup_gpu = [&]() {
+        if (pc->sched != nullptr) {
+            safe_sched_free(pc->sched);
+            pc->sched = nullptr;
+        }
+    };
+
     const int prev_n_tokens = static_cast<int>(pc->raw_tokens.size());
 
     // -------- Buffered streaming finalize --------
@@ -3191,11 +3271,13 @@ transcribe_status stream_finalize(transcribe_session * session, transcribe_strea
         const int64_t total = static_cast<int64_t>(pc->stream_pcm_buffer.size());
         if (pc->buf_next_audio_read < total) {
             if (pc->poll_abort()) {
+                cleanup_gpu();
                 return TRANSCRIBE_ERR_ABORTED;
             }
             const int64_t num_new = total - pc->buf_next_audio_read;
             if (const transcribe_status st = emit_buffered_chunk(pc, pm, num_new, /*is_last_chunk=*/true);
                 st != TRANSCRIBE_OK) {
+                cleanup_gpu();
                 return st;
             }
         }
@@ -3215,6 +3297,7 @@ transcribe_status stream_finalize(transcribe_session * session, transcribe_strea
             update->audio_committed_ms = us_to_ms(pc->stream_audio_committed_us);
             update->buffered_ms        = 0;
         }
+        cleanup_gpu();
         return TRANSCRIBE_OK;
     }
 
@@ -3229,6 +3312,7 @@ transcribe_status stream_finalize(transcribe_session * session, transcribe_strea
         const transcribe_status mst = pm->mel->compute(pc->stream_pcm_buffer.data(), pc->stream_pcm_buffer.size(),
                                                        pc->mel_buf, mel_n_mels, mel_n_frames, pc->n_threads);
         if (mst != TRANSCRIBE_OK && mst != TRANSCRIBE_ERR_INVALID_ARG) {
+            cleanup_gpu();
             return mst;
         }
 
@@ -3274,6 +3358,7 @@ transcribe_status stream_finalize(transcribe_session * session, transcribe_strea
                 if (const transcribe_status st =
                         emit_streaming_chunk(pc, pm, chunk.data(), mel_fed, drop_extra, new_take);
                     st != TRANSCRIBE_OK) {
+                    cleanup_gpu();
                     return st;
                 }
             }
@@ -3299,11 +3384,16 @@ transcribe_status stream_finalize(transcribe_session * session, transcribe_strea
         update->audio_committed_ms = us_to_ms(pc->stream_audio_committed_us);
         update->buffered_ms        = 0;
     }
+    cleanup_gpu();
     return TRANSCRIBE_OK;
 }
 
 void stream_reset(transcribe_session * session) {
     auto * pc = static_cast<ParakeetSession *>(session);
+    if (pc->sched != nullptr) {
+        safe_sched_free(pc->sched);
+        pc->sched = nullptr;
+    }
     pc->stream_pcm_buffer.clear();  // keep the allocation
 }
 

@@ -1,0 +1,313 @@
+﻿{
+  "schema_version": 1,
+  "family": "whisper",
+  "display_name": "OpenAI Whisper",
+  "description": "OpenAI Whisper robust multilingual speech recognition and translation model family covering 99+ languages, with support for tiny, base, small, medium, large-v3, and large-v3-turbo variants in multilingual and English-only (.en) configurations.",
+  "category": "asr",
+  "status": "supported",
+  "tasks": [
+    "asr"
+  ],
+  "modes": [
+    "offline"
+  ],
+  "languages": [
+    "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr",
+    "pl", "ca", "nl", "ar", "sv", "it", "id", "hi", "fi", "vi",
+    "he", "uk", "el", "ms", "cs", "ro", "da", "hu", "ta", "no",
+    "th", "ur", "hr", "bg", "lt", "la", "mi", "ml", "cy", "sk",
+    "te", "fa", "lv", "bn", "sr", "az", "sl", "kn", "et", "mk",
+    "br", "eu", "is", "hy", "ne", "mn", "bs", "kk", "sq", "sw",
+    "gl", "mr", "pa", "si", "km", "sn", "yo", "so", "af", "oc",
+    "ka", "be", "tg", "sd", "gu", "am", "yi", "lo", "uz", "fo",
+    "ht", "ps", "tk", "nn", "mt", "sa", "lb", "my", "bo", "tl",
+    "mg", "as", "tt", "haw", "ln", "ha", "ba", "jw", "su", "yue"
+  ],
+  "capabilities": {
+    "asr": [
+      "word_timestamps",
+      "vad_chunking",
+      "translation",
+      "language_detection"
+    ]
+  },
+  "runtime": {
+    "tags": [
+      "gguf",
+      "bin"
+    ]
+  },
+  "options": {
+    "request": [
+      {
+        "name": "language",
+        "type": "string",
+        "description": "Language code (e.g. 'en', 'zh', 'fr'); default auto-detect.",
+        "required": false
+      },
+      {
+        "name": "translate",
+        "type": "bool",
+        "description": "Translate transcription to English; default false.",
+        "required": false,
+        "default": false
+      },
+      {
+        "name": "max_tokens",
+        "type": "int",
+        "description": "Maximum generated transcript tokens; 0 or omitted uses the model limit.",
+        "required": false,
+        "min": 0,
+        "default": 0
+      },
+      {
+        "name": "temperature",
+        "type": "float",
+        "description": "Sampling temperature; default 0.0 for greedy decode.",
+        "required": false,
+        "min": 0.0,
+        "default": 0.0
+      }
+    ],
+    "session": [
+      {
+        "name": "weight_type",
+        "type": "enum",
+        "description": "Shared matmul weight storage type; default native.",
+        "preset": "weight_type_full",
+        "required": false,
+        "default": "native"
+      }
+    ],
+    "load": []
+  },
+  "package_defaults": {
+    "download": {
+      "kind": "huggingface_snapshot",
+      "repo": "audio-cpp/audio.cpp-gguf",
+      "revision": "main",
+      "gated": false
+    }
+  },
+  "packages": [
+    {
+      "id": "whisper_tiny_q8_0",
+      "display_name": "Whisper Tiny Q8_0 GGUF",
+      "default": true,
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "Whisper-Tiny-GGUF",
+      "files": [
+        "Whisper-Tiny-GGUF/whisper-tiny-q8_0.gguf"
+      ],
+      "strip_prefix": "Whisper-Tiny-GGUF"
+    },
+    {
+      "id": "whisper_tiny_f16",
+      "display_name": "Whisper Tiny F16 GGUF",
+      "format": "gguf",
+      "precision": "f16",
+      "target_directory": "Whisper-Tiny-GGUF",
+      "files": [
+        "Whisper-Tiny-GGUF/whisper-tiny-f16.gguf"
+      ],
+      "strip_prefix": "Whisper-Tiny-GGUF"
+    },
+    {
+      "id": "whisper_tiny_en_q8_0",
+      "display_name": "Whisper Tiny English Q8_0 GGUF",
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "Whisper-Tiny-En-GGUF",
+      "files": [
+        "Whisper-Tiny-En-GGUF/whisper-tiny-en-q8_0.gguf"
+      ],
+      "strip_prefix": "Whisper-Tiny-En-GGUF"
+    },
+    {
+      "id": "whisper_base_q8_0",
+      "display_name": "Whisper Base Q8_0 GGUF",
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "Whisper-Base-GGUF",
+      "files": [
+        "Whisper-Base-GGUF/whisper-base-q8_0.gguf"
+      ],
+      "strip_prefix": "Whisper-Base-GGUF"
+    },
+    {
+      "id": "whisper_base_f16",
+      "display_name": "Whisper Base F16 GGUF",
+      "format": "gguf",
+      "precision": "f16",
+      "target_directory": "Whisper-Base-GGUF",
+      "files": [
+        "Whisper-Base-GGUF/whisper-base-f16.gguf"
+      ],
+      "strip_prefix": "Whisper-Base-GGUF"
+    },
+    {
+      "id": "whisper_base_en_q8_0",
+      "display_name": "Whisper Base English Q8_0 GGUF",
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "Whisper-Base-En-GGUF",
+      "files": [
+        "Whisper-Base-En-GGUF/whisper-base-en-q8_0.gguf"
+      ],
+      "strip_prefix": "Whisper-Base-En-GGUF"
+    },
+    {
+      "id": "whisper_small_q8_0",
+      "display_name": "Whisper Small Q8_0 GGUF",
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "Whisper-Small-GGUF",
+      "files": [
+        "Whisper-Small-GGUF/whisper-small-q8_0.gguf"
+      ],
+      "strip_prefix": "Whisper-Small-GGUF"
+    },
+    {
+      "id": "whisper_small_f16",
+      "display_name": "Whisper Small F16 GGUF",
+      "format": "gguf",
+      "precision": "f16",
+      "target_directory": "Whisper-Small-GGUF",
+      "files": [
+        "Whisper-Small-GGUF/whisper-small-f16.gguf"
+      ],
+      "strip_prefix": "Whisper-Small-GGUF"
+    },
+    {
+      "id": "whisper_small_en_q8_0",
+      "display_name": "Whisper Small English Q8_0 GGUF",
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "Whisper-Small-En-GGUF",
+      "files": [
+        "Whisper-Small-En-GGUF/whisper-small-en-q8_0.gguf"
+      ],
+      "strip_prefix": "Whisper-Small-En-GGUF"
+    },
+    {
+      "id": "whisper_medium_q8_0",
+      "display_name": "Whisper Medium Q8_0 GGUF",
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "Whisper-Medium-GGUF",
+      "files": [
+        "Whisper-Medium-GGUF/whisper-medium-q8_0.gguf"
+      ],
+      "strip_prefix": "Whisper-Medium-GGUF"
+    },
+    {
+      "id": "whisper_medium_f16",
+      "display_name": "Whisper Medium F16 GGUF",
+      "format": "gguf",
+      "precision": "f16",
+      "target_directory": "Whisper-Medium-GGUF",
+      "files": [
+        "Whisper-Medium-GGUF/whisper-medium-f16.gguf"
+      ],
+      "strip_prefix": "Whisper-Medium-GGUF"
+    },
+    {
+      "id": "whisper_medium_en_q8_0",
+      "display_name": "Whisper Medium English Q8_0 GGUF",
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "Whisper-Medium-En-GGUF",
+      "files": [
+        "Whisper-Medium-En-GGUF/whisper-medium-en-q8_0.gguf"
+      ],
+      "strip_prefix": "Whisper-Medium-En-GGUF"
+    },
+    {
+      "id": "whisper_large_v3_turbo_q8_0",
+      "display_name": "Whisper Large v3 Turbo Q8_0 GGUF",
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "Whisper-Large-v3-Turbo-GGUF",
+      "files": [
+        "Whisper-Large-v3-Turbo-GGUF/whisper-large-v3-turbo-q8_0.gguf"
+      ],
+      "strip_prefix": "Whisper-Large-v3-Turbo-GGUF"
+    },
+    {
+      "id": "whisper_large_v3_turbo_f16",
+      "display_name": "Whisper Large v3 Turbo F16 GGUF",
+      "format": "gguf",
+      "precision": "f16",
+      "target_directory": "Whisper-Large-v3-Turbo-GGUF",
+      "files": [
+        "Whisper-Large-v3-Turbo-GGUF/whisper-large-v3-turbo-f16.gguf"
+      ],
+      "strip_prefix": "Whisper-Large-v3-Turbo-GGUF"
+    },
+    {
+      "id": "whisper_large_v3_q8_0",
+      "display_name": "Whisper Large v3 Q8_0 GGUF",
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "Whisper-Large-v3-GGUF",
+      "files": [
+        "Whisper-Large-v3-GGUF/whisper-large-v3-q8_0.gguf"
+      ],
+      "strip_prefix": "Whisper-Large-v3-GGUF"
+    },
+    {
+      "id": "whisper_large_v3_f16",
+      "display_name": "Whisper Large v3 F16 GGUF",
+      "format": "gguf",
+      "precision": "f16",
+      "target_directory": "Whisper-Large-v3-GGUF",
+      "files": [
+        "Whisper-Large-v3-GGUF/whisper-large-v3-f16.gguf"
+      ],
+      "strip_prefix": "Whisper-Large-v3-GGUF"
+    }
+  ],
+  "dependencies": [],
+  "ui": {
+    "recommended_package": "whisper_tiny_q8_0",
+    "tags": [
+      "ASR",
+      "GGUF",
+      "Multilingual"
+    ],
+    "docs": [
+      "docs/asr.md",
+      "docs/gguf.md"
+    ]
+  },
+  "sources": [
+    {
+      "format": "gguf",
+      "roots": {
+        "model": ".",
+        "weights": "$gguf"
+      },
+      "files": {
+        "config": "model:config.json",
+        "tokenizer_json": "model:tokenizer.json"
+      },
+      "tensors": {
+        "weights": "weights:"
+      }
+    },
+    {
+      "format": "safetensors",
+      "roots": {
+        "model": "."
+      },
+      "files": {
+        "config": "model:config.json",
+        "tokenizer_json": "model:tokenizer.json"
+      },
+      "tensors": {
+        "weights": "model:model.safetensors"
+      }
+    }
+  ]
+}

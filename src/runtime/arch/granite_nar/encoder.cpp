@@ -46,7 +46,12 @@ namespace {
 // this lands on the same non-tiled kernel_conv_2d_dw_f32_f32 those families
 // already exercise there — not merely a supported op, the identical kernel.
 //
+// The `!is_metal` default belongs to the stride-2 2-D pre_encode site, which
+// granite does not have: this encoder's only conv is this one. (cohere
+// narrows further, on CPU too, for its own F16-kernel reasons; see the
+// canonical note in conformer.cpp.)
 // TRANSCRIBE_CONV_NO_DIRECT_DW is the kill switch back to im2col.
+// Mirrors arch/granite/encoder.cpp.
 static bool detect_conv_dw_direct() {
     return transcribe::conformer::resolve_conv_direct("TRANSCRIBE_CONV_DIRECT_DW", "TRANSCRIBE_CONV_NO_DIRECT_DW",
                                                       /*backend_default=*/true);
@@ -198,12 +203,12 @@ ggml_tensor * conv_module(ggml_context *             ctx,
         x                   = ggml_mul(ctx, gate, ggml_sigmoid(ctx, value));
     }
     x                 = ggml_cont(ctx, ggml_permute(ctx, x, 1, 0, 2, 3));
+    // Direct single-op depthwise instead of the B==1 im2col path — see the
+    // rationale in arch/granite/encoder.cpp granite_conv_module.
     const int padding = (conv_kernel - 1) / 2;
     if (conv_dw_direct) {
         ggml_tensor * knl = b.conv_depthwise_w;
         if (knl->type != GGML_TYPE_F32) {
-            // ggml_conv_2d_dw_direct misbehaves for non-f32 kernels; the
-            // depthwise kernel is tiny, so cast to f32.
             knl = ggml_cast(ctx, knl, GGML_TYPE_F32);
         }
         knl              = ggml_reshape_4d(ctx, knl, conv_kernel, 1, 1, inner_dim);
@@ -217,9 +222,9 @@ ggml_tensor * conv_module(ggml_context *             ctx,
         x = transcribe::conformer::conv_1d_dw_f32(ctx, b.conv_depthwise_w, x,
                                                   /*stride=*/1, /*padding=*/padding, /*dilation=*/1);
     }
-    x                 = transcribe::conformer::fused_batch_norm(ctx, x, bn_fused_scale, bn_fused_bias);
-    x                 = ggml_silu(ctx, x);
-    x                 = ggml_cont(ctx, ggml_permute(ctx, x, 1, 0, 2, 3));
+    x = transcribe::conformer::fused_batch_norm(ctx, x, bn_fused_scale, bn_fused_bias);
+    x = ggml_silu(ctx, x);
+    x = ggml_cont(ctx, ggml_permute(ctx, x, 1, 0, 2, 3));
     {
         ggml_tensor * pw2 = ggml_reshape_2d(ctx, b.conv_pointwise2_w, inner_dim, d_model);
         x                 = ggml_mul_mat(ctx, pw2, x);
@@ -235,6 +240,7 @@ EncoderBuild build_encoder_graph(ggml_context *            ctx,
                                  const GraniteNarHParams & hp,
                                  int                       T_enc,
                                  bool /*use_flash*/) {
+    const bool   conv_dw_direct = detect_conv_dw_direct();
     EncoderBuild eb{};
     eb.n_blocks_local = (T_enc + hp.enc_context_size - 1) / hp.enc_context_size;
     const int T_pad   = eb.n_blocks_local * hp.enc_context_size;
@@ -322,12 +328,9 @@ EncoderBuild build_encoder_graph(ggml_context *            ctx,
             transcribe::debug::mark_tensor_for_dump(x);
         }
 
-        // Direct depthwise conv dispatch (TRANSCRIBE_CONV_NO_DIRECT_DW to opt out).
-        static const bool conv_dw_direct = detect_conv_dw_direct();
-        ggml_tensor * conv_out =
-            conv_module(ctx, x, b, b.conv_bn_fused_scale, b.conv_bn_fused_bias, conv_k, static_cast<int>(inner_dim),
-                        conv_dw_direct);
-        x = ggml_add(ctx, x, conv_out);
+        ggml_tensor * conv_out = conv_module(ctx, x, b, b.conv_bn_fused_scale, b.conv_bn_fused_bias, conv_k,
+                                             static_cast<int>(inner_dim), conv_dw_direct);
+        x                      = ggml_add(ctx, x, conv_out);
         if (i == 0) {
             named(x, "enc.block.0.post_conv");
             eb.dumps.block_0_post_conv = x;
