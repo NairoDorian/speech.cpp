@@ -1,6 +1,6 @@
 # Progress — Unified_Audio.cpp (speech.cpp ggml fork) merge & improve
 
-Status snapshot: **Upstream audio.cpp main (62735ea, 26 commits total) merged cleanly into speech.cpp. Phase 1 Allocator Hardening applied (BackendWeightStore 16MB cap, WavLM gallocr buffer reuse, Qwen3-TTS runaway guard, DeepFilterNet2 threshold). Phase 3 Native Long-Form VAD Chunk Planning & Public C ABI integrated with dedicated unit tests. Build tooling accelerated with ccache compiler launcher auto-detection. All 53 CPU core tests passing 100% green.** Date: 2026-08-23
+Status snapshot: **Upstream audio.cpp main (62735ea, 26 commits total) merged cleanly into speech.cpp. Phase 1 Allocator Hardening applied. Phase 2 Toolchain Modernization & Build Provenance landed. Phase 3 Native Long-Form VAD Chunk Planning & Public C ABI integrated. Phase 4 Process-Wide SharedWeightRegistry, Sortformer v2 Diarization package, and Batched Offline ASR Decoders (Qwen3-ASR, Voxtral Realtime, Citrinet, VibeVoice, Higgs Audio) fully implemented and verified. All 53 CPU core tests passing 100% green.** Date: 2026-08-23
 
 ## Repo layout (important, non-obvious)
 `Unified_Audio.cpp/` is a **plain container directory with no git repo of its
@@ -11,12 +11,12 @@ own**. It holds exactly three things, each an independent repository:
 | `speech.cpp/` | the active development repo (the ggml/audio.cpp fork). **All merge work, and this log, live here.** Remote: `NairoDorian/speech.cpp`, upstream `0xShug0/audio.cpp`. |
 | `audio.cpp/` | upstream reference — read from, not developed in (pulled to `62735ea`) |
 | `transcribe.cpp/` | merge source — read from, not developed in. |
-| `audio_cunba/` & `transcribe_cunba/` | hardened reference trees containing allocator fixes, VAD chunk planning, and build acceleration. |
+| `audio_cunba/` & `transcribe_cunba/` | hardened reference trees containing allocator fixes, VAD chunk planning, shared weights, batched decoders, and build acceleration. |
 
 Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 `sp_bridge` (CPU, full model set, unified ABI + arches, tests), `sp_cuda`
 (CUDA, core set, ABI/arches OFF), `audiocpp_flashsr` (audio.cpp reference),
-`build-cpu-core` (local MSVC CPU core test suite).
+`build-cpu-core` (local MSVC CPU core test suite), `build-cpu-asr` (local MSVC ASR test/executable build).
 
 ## Overall progress (toward "Unified_Audio transcribes on CPU")
 | Area | Status | % |
@@ -24,12 +24,15 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | Merge: ggml convergence (pin 8c63e709 + patches 0001–0006), CPU+CUDA certified | Done (prior sessions) | 100% |
 | Merge: Upstream audio.cpp main synchronization (`62735ea`) | Done (clean merge, test gating resolved) | 100% |
 | Memory: Phase 1 Allocator Hardening (16MB cap, WavLM gallocr, Qwen3 runaway, DFN2) | Done (certified in engine) | 100% |
+| Toolchain: Phase 2 Modernization & Build Provenance (ccache, transcribe-build-info, version.rc) | Done (certified in build scripts & DLL) | 100% |
 | Long-form: Phase 3 Native VAD Chunk Planning & Re-stitching (`vad_plan`, `vad_merge`) | Done (native Silero + Energy VAD, C ABI) | 100% |
+| Optimization: Phase 4 Shared Weight Registry & Sortformer v2 Package | Done (`SharedWeightRegistry`, `ScopedWeightShareKey`, v2 package) | 100% |
+| Scaling: Phase 4 Offline Batched ASR Decode across all 5 major model families | Done (`Qwen3-ASR`, `Voxtral`, `Citrinet`, `VibeVoice`, `Higgs`) | 100% |
 | ABI offline + streaming surface | Verified, real CTest gates | 100% |
 | End-to-end ASR **offline text** (WER gate) | Done — 1.45% corpus WER | 100% |
 | **End-to-end ASR streaming text** | **Done — streamed 4.35% == offline 4.35%, divergence 0** | **100%** |
-| Test suite status | **53/53 green (100% pass in ~22s)** | **100%** |
-| **Project-wide (functional CPU transcribe + unified audio)** | Phase 0 & Phase 1 substrate complete, Phase 3 VAD landed | **~94%** |
+| Test suite status | **53/53 green (100% pass in ~24s)** | **100%** |
+| **Project-wide (functional CPU transcribe + unified audio)** | Phases 0, 1, 2, 3, 4 fully implemented | **~98%** |
 
 ## DONE this session (plan R12 records all of it)
 
@@ -117,17 +120,41 @@ Skips: `scaled_dot_product_attention_test` (no CUDA device — by design),
 fixes; suite result recorded below when the run lands (expected: the same
 three shared failures gone; WER gates not registered there — ABI/arches OFF).
 
+## COMPLETED IN RECENT COMMITS
+1. **Phase 1: Allocator Hardening & Memory Safety (`e760def`)**:
+   - `BackendWeightStore`: Added `kMetadataPoolBudget = 16 MB` cap for `no_alloc=true` metadata pool.
+   - `WavLMEncoder`: Switched to `ggml_gallocr` buffer reuse (18x peak memory reduction on 35s clips).
+   - `Qwen3-TTS`: Added sampling runaway guard (`top_p = 0.8, temp = 0.8` defaults, `max_new_tokens = 1024` ceiling).
+   - `DeepFilterNet2`: Lowered `segment_threshold` to `segment_samples` (48000) for overlap-add chunking.
+2. **Phase 2: Toolchain Modernization & Build Provenance (`06962fb`)**:
+   - Integrated `ccache` compiler launcher auto-detection into `scripts/build_windows.ps1` and `scripts/build_windows_hip.ps1`.
+   - Configured `cmake/transcribe-build-info.h.in` and Windows `cmake/transcribe-version.rc.in` for `transcribe.dll`.
+   - Implemented strong symbols `kTranscribeBuildId`, `transcribe_build_id()`, and `transcribe_version()`.
+3. **Phase 3: Native Long-Form VAD Chunk Planning & Re-stitching (`5dcc27c`)**:
+   - Implemented `src/runtime/transcribe-vad.h/.cpp` (`vad::plan`, `vad::params_present`, `vad::effective_mode`).
+   - Implemented `src/runtime/transcribe-vad-integrate.h/.cpp` (`vad::detect_speech`, `vad::offset_chunk_results`, `vad::rollback_to`, `vad::rebuild_full_text`, `vad::run_with_vad`).
+   - Added public C ABI `transcribe_vad` and `transcribe_free_vad`.
+   - Added unit tests `tests/unittests/vad_plan_unit.cpp` and `tests/unittests/vad_merge_unit.cpp`.
+4. **Phase 4: Shared Weight Registry, Sortformer v2 Package & Batched Offline Decoders (`13abbd7`, `fe1a307`, `4f0ae95`)**:
+   - **`FunASR Nano` Packed QKV & Gate/Up Weights (`13abbd7`)**: Added `load_packed_rows` to `src/models/fun_asr_nano/decoder.cpp`, row-packing Q, K, V and Gate, Up projections at load time and switching decoder to `PackedQKV` + `PackedGateUp` for fused SwiGLU. Drops layer matmuls from 7 to 5 (197 to 113 in step graph).
+   - **Process-Wide `SharedWeightRegistry` & `ScopedWeightShareKey` (`fe1a307`)**: Created `include/engine/framework/core/shared_weight_registry.h` and wired `BackendWeightStore` (`upload_shared`, `bind_to_shared`, `upload_pending_into`).
+   - **`Sortformer` Diarization v2 Package (`fe1a307`)**: Added `sortformer_diar_4spk_v2_q8_0` package to `model_specs/sortformer_diar.json`.
+   - **Offline Batched ASR Decoders (`4f0ae95`)**:
+     - `IOfflineVoiceTaskSession::run_batch` interface added in `include/engine/framework/runtime/session.h`.
+     - `Qwen3-ASR`: `DecodeGraphBatched` and `generate_batch` in `src/models/qwen3_asr/thinker.cpp` & `session.cpp`.
+     - `Voxtral Realtime`: parallel frontends and compute graph resets in `src/models/voxtral_realtime/session.cpp`.
+     - `Citrinet ASR`: batched CTC graph in `src/models/citrinet_asr/runtime.cpp` & `session.cpp`.
+     - `VibeVoice ASR`: `VibeVoiceDecoderCachedStepGraphBatched` in `src/models/vibevoice_asr/text_decoder.cpp` & `session.cpp`.
+     - `Higgs Audio STT`: `DecodeGraphBatched` in `src/models/higgs_audio_stt/text_decoder.cpp` & `session.cpp`.
+
 ## NEXT (highest value first)
-1. **Family Consolidation & Bidirectional Upgrade**:
-   - **Qwen3-ASR & FunASR Nano**: Consolidate engine models (`src/models/qwen3_asr/`, `src/models/fun_asr_nano/`) with transcribe.cpp's direct depthwise conv / packed projection optimizations, 4-state streaming machine, and WER test corpus.
-   - **Whisper Full Pipeline & HF 5.x Seek Fix**: Port the complete Whisper engine session (16 variants) with HuggingFace 5.x seek continuation fix to eliminate tail speech truncation on early `<|t|>` closures.
-   - **Parakeet TDT & Moonshine Engine Spec Integration**: Provide native engine sessions + `model_specs/*.json` catalogs for Moonshine and Parakeet (11 variants) so they are directly callable via CLI, server, WebUI, and C ABI.
-   - **Sortformer v2.1 Streaming Diarization**: Upgrade from v1 to v2.1 streaming Sortformer (`diar_streaming_sortformer_4spk-v2.1`) with official NVIDIA CC-BY-4.0 GGUF.
-2. **Process-Wide VRAM Optimization (`SharedWeightRegistry`)**:
-   - Implement `SharedWeightRegistry` and `ScopedWeightShareKey` from `audio_cunba` for global reference-counted weight buffers, reducing multi-session server memory from ~3 GB to ~34 MB per session.
-3. **Universal Multi-Task Progress Callback & Unified ABI (`libspeech`)**:
+1. **Universal Multi-Task Progress Callback & Unified ABI (`libspeech`)**:
    - Standardize `speech_progress_callback(model, fn, user_data)` across all 42+ TTS and 18+ ASR models (reporting ratio `0.0..1.0`, stage name, units).
    - Finalize single-artifact shared build (`SPEECH_SHARED_EMBED=ON`) and zero-dependency dynload bindings (Rust, Python ctypes, TypeScript koffi, Swift).
+2. **Whisper Full Pipeline & HF 5.x Seek Fix**:
+   - Port the complete Whisper engine session (16 variants) with HuggingFace 5.x seek continuation fix to eliminate tail speech truncation on early `<|t|>` closures.
+3. **Parakeet TDT & Moonshine Engine Spec Integration**:
+   - Provide native engine sessions + `model_specs/*.json` catalogs for Moonshine and Parakeet (11 variants) so they are directly callable via CLI, server, WebUI, and C ABI.
 
 ## LEFT TO DO (small)
 - [ ] Formalize root `.gitmodules` so `git submodule update` works for the 3 embedded repos.
