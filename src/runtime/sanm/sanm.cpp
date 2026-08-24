@@ -3,6 +3,7 @@
 // See src/sanm/sanm.h for the high-level contract.
 
 #include "sanm/sanm.h"
+#include "engine/framework/modules/speech_encoders/sanm.h"
 
 #include "conformer/conformer.h"
 #include "ggml.h"
@@ -232,32 +233,7 @@ ggml_tensor * sanm_block_projection(ggml_context *          ctx,
 }
 
 void build_sinusoidal_pe(std::vector<float> & out, int depth, int T) {
-    out.assign(static_cast<size_t>(T) * depth, 0.0f);
-    if (depth <= 1 || T <= 0) {
-        return;
-    }
-
-    const int half = depth / 2;
-    if (half <= 1) {
-        return;
-    }
-
-    const double log_increment = std::log(10000.0) / static_cast<double>(half - 1);
-
-    std::vector<double> inv_ts(static_cast<size_t>(half));
-    for (int k = 0; k < half; ++k) {
-        inv_ts[static_cast<size_t>(k)] = std::exp(static_cast<double>(k) * (-log_increment));
-    }
-
-    for (int i = 0; i < T; ++i) {
-        const double pos = static_cast<double>(i + 1);  // 1-based
-        float *      row = out.data() + static_cast<size_t>(i) * depth;
-        for (int k = 0; k < half; ++k) {
-            const double s = pos * inv_ts[static_cast<size_t>(k)];
-            row[k]         = static_cast<float>(std::sin(s));
-            row[half + k]  = static_cast<float>(std::cos(s));
-        }
-    }
+    engine::modules::build_sinusoidal_pe(out, static_cast<int64_t>(depth), static_cast<int64_t>(T));
 }
 
 }  // namespace transcribe::sanm

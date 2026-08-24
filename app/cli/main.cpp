@@ -12,6 +12,7 @@
 #include "engine/framework/audio/chunking.h"
 #include "engine/framework/audio/conversion.h"
 #include "engine/framework/debug/trace.h"
+#include "engine/framework/core/shared_weight_registry.h"
 #include "engine/framework/io/json.h"
 #include "engine/framework/runtime/registry.h"
 #include "engine/framework/runtime/session.h"
@@ -648,16 +649,7 @@ int audiocpp_cli_main(int argc, char ** argv) {
             return 0;
         }
         if (has_arg(argc, argv, "--list-devices")) {
-            const auto devices = engine::core::list_backend_devices();
-            std::cout << "available_devices=" << devices.size() << "\n";
-            for (const auto & device : devices) {
-                std::cout << device.backend << ":" << device.index;
-                if (!device.name.empty()) {
-                    std::cout << " \"" << device.name << "\"";
-                }
-                std::cout << " [" << device.type << "]\n";
-            }
-            std::cout << "select with: --backend <cuda|hip|vulkan|metal|cpu> --device <index>\n";
+            engine::core::print_backend_devices(std::cout);
             return 0;
         }
         if (has_arg(argc, argv, "--list-loaders")) {
@@ -819,6 +811,10 @@ int audiocpp_cli_main(int argc, char ** argv) {
         omp_set_num_threads(threads);
 #endif
         session_options.options = collect_key_value_args(argc, argv, "--session-option");
+        const std::string share_key = !load_request.model_path.empty()
+            ? load_request.model_path.string()
+            : (load_request.family_hint.has_value() && !load_request.family_hint->empty() ? *load_request.family_hint : "default_cli_model");
+        engine::core::ScopedWeightShareKey share_scope(share_key);
         auto model = registry.load(load_request);
         auto session = model->create_task_session(task_spec, session_options);
         const auto voice_state_out = optional_path_arg(argc, argv, "--voice-state-out");

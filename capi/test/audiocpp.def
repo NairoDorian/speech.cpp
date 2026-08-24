@@ -26,6 +26,7 @@ EXPORTS
     audiocpp_free_stream_event
     audiocpp_free_string
     audiocpp_free_text
+    audiocpp_free_text_batch
     audiocpp_free_vad
     audiocpp_list_devices
     audiocpp_load_model

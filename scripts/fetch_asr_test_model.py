@@ -68,6 +68,15 @@ PINNED_MODELS = (
         sha256="930e4622ad3a24158b91406c30c977fa6a26b34cb32d6ac3e57cfb23383a869e",
         size=50_462_816,
     ),
+    PinnedModel(
+        filename="librispeech-test-clean-500w.tar.gz",
+        url=(
+            "https://huggingface.co/datasets/handy-computer/librispeech-test-clean-subset/resolve/main/"
+            "librispeech-test-clean-500w.tar.gz"
+        ),
+        sha256="c8f1e582e0d37e2a9b6c039755490a6e297a7a13d7e5d956f91f7c32cb5e9821",
+        size=3_145_728,
+    ),
 )
 
 

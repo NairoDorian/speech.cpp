@@ -6,6 +6,7 @@
 #include "engine/framework/runtime/artifacts.h"
 #include "engine/framework/runtime/cache.h"
 #include "engine/framework/runtime/graph_executor.h"
+#include "engine/framework/runtime/run_control.h"
 #include "engine/framework/runtime/session.h"
 #include "engine/framework/runtime/workspace.h"
 
@@ -29,6 +30,15 @@ public:
     // this single implementation; emit_progress() below reads the stored member.
     void set_progress_callback(ProgressCallback cb) override;
 
+    // Request cooperative abortion of the in-flight run or stream.
+    void request_abort() override;
+
+    // Check whether abortion has been requested.
+    bool is_aborted() const override;
+
+    RunControl & run_control() noexcept;
+    const RunControl & run_control() const noexcept;
+
 protected:
     engine::core::ExecutionContext & execution_context() noexcept;
     const engine::core::ExecutionContext & execution_context() const noexcept;
@@ -47,9 +57,9 @@ protected:
     const SessionOptions & options() const noexcept;
 
     // Emit a progress update to the installed callback (if any). Throws
-    // ProgressCanceled when the callback returns false, so callers in run()
-    // loops can simply call this at chunk boundaries — a cancel request
-    // unwinds run() automatically. No-op when no callback is set.
+    // ProgressCanceled when the callback returns false or poll_abort() is true,
+    // so callers in run() loops can simply call this at chunk boundaries — a
+    // cancel request unwinds run() automatically. No-op when no callback is set.
     void emit_progress(const char * stage, int64_t completed_units, int64_t total_units);
 
 private:
@@ -60,7 +70,7 @@ private:
     RuntimeWorkspace workspace_;
     GraphExecutor graph_executor_;
     bool prepared_ = false;
-    ProgressCallback progress_callback_;
+    RunControl run_control_;
 };
 
 }  // namespace engine::runtime

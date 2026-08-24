@@ -1,13 +1,15 @@
 # Unified Audio — Ultimate Merge & Improvement Plan (V6)
 
-**Status:** Active — Phases 0, 1, 2, 3, 4, and 5 fully landed and certified. V6 = V5 merged with
-`UNIFY_AND_IMPROVEMENT_PLAN.md` (2026-08-19). See §0.0 for the merge log and
-binding refinements (R1–R12). The ggml convergence (R1) is certified on CPU
-and CUDA; end-to-end ASR text is validated offline (R11) and streaming (R12);
+**Status:** Active — Phases 0 through 9 fully landed and certified. V6 = V5 merged with
+`UNIFY_AND_IMPROVEMENT_PLAN.md` (2026-08-19) and [FUSION_ROADMAP_PLAN.md](FUSION_ROADMAP_PLAN.md).
+The ggml convergence (R1) is certified on CPU and CUDA; end-to-end ASR text is validated offline (R11) and streaming (R12);
 Phase 1 Allocator Hardening, Phase 2 Toolchain Modernization, Phase 3 VAD Chunk Planner,
-Phase 4 Shared Weight Registry & Batched Offline ASR Decoders, and Phase 5 Universal `audiocpp` C ABI &
-Progress Callbacks are fully merged and passing 100% green across all 56 CPU core tests.
-The live front is now Whisper HF 5.x seek continuation fix, Parakeet TDT & Moonshine Engine Spec catalog integration, and dynload language bindings.
+Phase 4 Shared Weight Registry & Batched Offline ASR Decoders, Phase 5 Universal `audiocpp` C ABI &
+Progress Callbacks, Phase 7 Safety Net & Activation, Phase 8 Contract Convergence & Exception Boundary,
+Phase 9 Unified Mel & Tokenizer Subsystems, and Phase 10 Attention & Conformer Module Fusion are fully merged.
+**The live front is now Phase 11 (Architectural Family Migration): Wave W1a landed the first native
+engine family (`src/models/moonshine/`, engine-path WER 1.449% == arch baseline, `moonshine_engine_smoke_test`),
+96/96 CTest targets green on CPU. Next: Wave W1b (`moonshine_streaming` on `StreamingSessionBase`).**
 
 This document is the master plan for evolving `speech.cpp` (a fork of
 `audio.cpp`) by systematically absorbing the architecture, model families,

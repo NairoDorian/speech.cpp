@@ -8,6 +8,7 @@
 #include <cmath>
 #include <optional>
 #include <stdexcept>
+#include <vector>
 
 namespace engine::modules {
 namespace {
@@ -51,18 +52,32 @@ SanmAttentionBranch build_attention_branch(core::ModuleBuildContext &ctx,
                                            const SanmBlockWeightsView &weights,
                                            const SanmBlockConfig &config) {
   const int64_t head_dim = config.model_size / config.num_heads;
-  const LinearModule q_projection(
-      {config.input_size, config.model_size, true, GGML_PREC_F32});
-  const LinearModule k_projection(
-      {config.input_size, config.model_size, true, GGML_PREC_F32});
-  const LinearModule v_projection(
-      {config.input_size, config.model_size, true, GGML_PREC_F32});
   const LinearModule output_projection(
       {config.model_size, config.model_size, true, GGML_PREC_F32});
 
-  auto query = q_projection.build(ctx, normalized, weights.query_projection);
-  auto key = k_projection.build(ctx, normalized, weights.key_projection);
-  auto value = v_projection.build(ctx, normalized, weights.value_projection);
+  core::TensorValue query;
+  core::TensorValue key;
+  core::TensorValue value;
+
+  if (weights.fused_qkv_projection.has_value()) {
+    const LinearModule qkv_projection(
+        {config.input_size, 3 * config.model_size, true, GGML_PREC_F32});
+    auto qkv = qkv_projection.build(ctx, normalized, *weights.fused_qkv_projection);
+    query = SliceModule({2, 0, config.model_size}).build(ctx, qkv);
+    key = SliceModule({2, config.model_size, config.model_size}).build(ctx, qkv);
+    value = SliceModule({2, 2 * config.model_size, config.model_size}).build(ctx, qkv);
+  } else {
+    const LinearModule q_projection(
+        {config.input_size, config.model_size, true, GGML_PREC_F32});
+    const LinearModule k_projection(
+        {config.input_size, config.model_size, true, GGML_PREC_F32});
+    const LinearModule v_projection(
+        {config.input_size, config.model_size, true, GGML_PREC_F32});
+
+    query = q_projection.build(ctx, normalized, weights.query_projection);
+    key = k_projection.build(ctx, normalized, weights.key_projection);
+    value = v_projection.build(ctx, normalized, weights.value_projection);
+  }
 
   query = reshape_heads(ctx, query, config.num_heads, head_dim);
   key = reshape_heads(ctx, key, config.num_heads, head_dim);
@@ -72,15 +87,34 @@ SanmAttentionBranch build_attention_branch(core::ModuleBuildContext &ctx,
   value_heads = TransposeModule({{0, 2, 1, 3}, value_heads.shape.rank})
                     .build(ctx, value_heads);
 
-  auto attention =
-      ScaledDotProductAttentionModule({
-                                          head_dim,
-                                          config.attention_lowering,
-                                          GGML_PREC_F32,
-                                          AttentionCausality::NonCausal,
-                                      })
-          .build(ctx, query, key, value_heads);
-  attention = core::ensure_backend_addressable_layout(ctx, attention);
+  core::TensorValue attention;
+  if (config.attn_pad_mask.has_value()) {
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    const MatMulModule matmul;
+    auto key_transposed = TransposeModule({{0, 1, 3, 2}, key.shape.rank}).build(ctx, key);
+    auto kq = matmul.build(ctx, query, key_transposed);
+    kq = core::wrap_tensor(
+        ggml_add(ctx.ggml, kq.tensor, config.attn_pad_mask->tensor),
+        kq.shape, GGML_TYPE_F32);
+    auto kq_soft = core::wrap_tensor(
+        ggml_soft_max_ext(ctx.ggml, core::ensure_backend_addressable_layout(ctx, kq).tensor,
+                          nullptr, scale, 0.0f),
+        kq.shape, GGML_TYPE_F32);
+    auto context = matmul.build(ctx, kq_soft, value_heads);
+    context = TransposeModule({{0, 2, 1, 3}, context.shape.rank}).build(ctx, context);
+    attention = core::ensure_backend_addressable_layout(ctx, context);
+  } else {
+    attention =
+        ScaledDotProductAttentionModule({
+                                            head_dim,
+                                            config.attention_lowering,
+                                            GGML_PREC_F32,
+                                            AttentionCausality::NonCausal,
+                                        })
+            .build(ctx, query, key, value_heads);
+    attention = core::ensure_backend_addressable_layout(ctx, attention);
+  }
+
   attention =
       core::reshape_tensor(ctx, attention,
                            core::TensorShape::from_dims(
@@ -89,21 +123,7 @@ SanmAttentionBranch build_attention_branch(core::ModuleBuildContext &ctx,
   attention = output_projection.build(ctx, attention,
                                       weights.attention_output_projection);
 
-  auto value_bct =
-      TransposeModule({{0, 2, 1, 3}, value.shape.rank}).build(ctx, value);
-  value_bct = core::ensure_backend_addressable_layout(ctx, value_bct);
-  auto fsmn = DepthwiseConv1dModule(
-                  {
-                      config.model_size,
-                      config.fsmn_kernel_size,
-                      1,
-                      static_cast<int>((config.fsmn_kernel_size - 1) / 2),
-                      1,
-                      false,
-                  })
-                  .build(ctx, value_bct, {weights.fsmn_weight, std::nullopt});
-  fsmn = TransposeModule({{0, 2, 1, 3}, fsmn.shape.rank}).build(ctx, fsmn);
-  fsmn = AddModule{}.build(ctx, fsmn, value);
+  auto fsmn = sanm_fsmn_branch(ctx, value, weights.fsmn_weight, config.fsmn_kernel_size, config.conv_pad_mask);
   return {AddModule{}.build(ctx, attention, fsmn)};
 }
 
@@ -148,6 +168,37 @@ core::TensorValue build_block(core::ModuleBuildContext &ctx,
 
 } // namespace
 
+void build_sinusoidal_pe(std::vector<float> & out, int64_t depth, int64_t frames) {
+  out.assign(static_cast<size_t>(frames * depth), 0.0f);
+  if (depth <= 1 || frames <= 0) {
+    return;
+  }
+  const int64_t half = depth / 2;
+  if (half <= 1) {
+    return;
+  }
+  const double log_increment = std::log(10000.0) / static_cast<double>(half - 1);
+  std::vector<double> inv_ts(static_cast<size_t>(half));
+  for (int64_t k = 0; k < half; ++k) {
+    inv_ts[static_cast<size_t>(k)] = std::exp(static_cast<double>(k) * (-log_increment));
+  }
+  for (int64_t i = 0; i < frames; ++i) {
+    const double pos = static_cast<double>(i + 1); // 1-based
+    float *row = out.data() + static_cast<size_t>(i * depth);
+    for (int64_t k = 0; k < half; ++k) {
+      const double s = pos * inv_ts[static_cast<size_t>(k)];
+      row[k] = static_cast<float>(std::sin(s));
+      row[half + k] = static_cast<float>(std::cos(s));
+    }
+  }
+}
+
+std::vector<float> make_sinusoidal_positions(int64_t frames, int64_t channels) {
+  std::vector<float> values;
+  build_sinusoidal_pe(values, channels, frames);
+  return values;
+}
+
 core::TensorValue sanm_layer_norm(core::ModuleBuildContext &ctx,
                                   const core::TensorValue &input,
                                   const NormWeights &weights, float epsilon) {
@@ -158,6 +209,33 @@ core::TensorValue sanm_layer_norm(core::ModuleBuildContext &ctx,
   }
   return LayerNormModule({input.shape.last_dim(), epsilon, true, true})
       .build(ctx, input, weights);
+}
+
+core::TensorValue sanm_fsmn_branch(core::ModuleBuildContext &ctx,
+                                   const core::TensorValue &value,
+                                   const core::TensorValue &fsmn_weight,
+                                   int64_t kernel_size,
+                                   const std::optional<core::TensorValue> &conv_pad_mask) {
+  auto v_in = value;
+  if (conv_pad_mask.has_value()) {
+    v_in = core::wrap_tensor(
+        ggml_mul(ctx.ggml, v_in.tensor, conv_pad_mask->tensor),
+        v_in.shape, v_in.type);
+  }
+  auto value_bct = TransposeModule({{0, 2, 1, 3}, v_in.shape.rank}).build(ctx, v_in);
+  value_bct = core::ensure_backend_addressable_layout(ctx, value_bct);
+  auto fsmn = DepthwiseConv1dModule(
+                  {
+                      v_in.shape.dims[2],
+                      kernel_size,
+                      1,
+                      static_cast<int>((kernel_size - 1) / 2),
+                      1,
+                      false,
+                  })
+                  .build(ctx, value_bct, {fsmn_weight, std::nullopt});
+  fsmn = TransposeModule({{0, 2, 1, 3}, fsmn.shape.rank}).build(ctx, fsmn);
+  return AddModule{}.build(ctx, fsmn, value);
 }
 
 core::TensorValue sanm_projection_block(core::ModuleBuildContext &ctx,
@@ -175,3 +253,4 @@ core::TensorValue sanm_residual_block(core::ModuleBuildContext &ctx,
 }
 
 } // namespace engine::modules
+

@@ -8,6 +8,7 @@
 #include "engine/framework/audio/mixing.h"
 #include "engine/framework/audio/output.h"
 #include "engine/framework/audio/wav_reader.h"
+#include "engine/framework/core/shared_weight_registry.h"
 #include "engine/framework/io/json.h"
 #include "engine/framework/text/subtitle.h"
 
@@ -618,6 +619,11 @@ void run_model_step_impl(
         throw std::runtime_error("workflow model steps currently require offline mode: " + id);
     }
 
+    const std::string share_key = !load_request.model_path.empty()
+        ? load_request.model_path.string()
+        : (load_request.family_hint.has_value() && !load_request.family_hint->empty() ? *load_request.family_hint : id);
+    engine::core::ScopedWeightShareKey share_scope(share_key);
+
     auto model = registry.load(load_request);
     auto session = model->create_task_session(task_spec, session_options);
     auto * offline = dynamic_cast<engine::runtime::IOfflineVoiceTaskSession *>(session.get());
@@ -791,6 +797,11 @@ void run_chunked_model_step(
     if (task_spec.mode != engine::runtime::RunMode::Offline) {
         throw std::runtime_error("chunked_model steps require offline mode: " + id);
     }
+    const std::string share_key = !load_request.model_path.empty()
+        ? load_request.model_path.string()
+        : (load_request.family_hint.has_value() && !load_request.family_hint->empty() ? *load_request.family_hint : id);
+    engine::core::ScopedWeightShareKey share_scope(share_key);
+
     auto model = registry.load(load_request);
     auto session = model->create_task_session(task_spec, session_options);
     auto * offline = dynamic_cast<engine::runtime::IOfflineVoiceTaskSession *>(session.get());
@@ -1010,6 +1021,11 @@ void run_model_step_foreach(
     if (task_spec.mode != engine::runtime::RunMode::Offline) {
         throw std::runtime_error("workflow model steps currently require offline mode: " + id);
     }
+
+    const std::string share_key = !load_request.model_path.empty()
+        ? load_request.model_path.string()
+        : (load_request.family_hint.has_value() && !load_request.family_hint->empty() ? *load_request.family_hint : id);
+    engine::core::ScopedWeightShareKey share_scope(share_key);
 
     auto model = registry.load(load_request);
     auto session = model->create_task_session(task_spec, session_options);

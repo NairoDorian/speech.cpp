@@ -67,6 +67,13 @@ typedef struct {
     char *language;      /**< Detected language code (may be NULL) */
 } audiocpp_text_t;
 
+/** Batch of transcribed text outputs. Returned by audiocpp_asr_batch. Caller owns; free with audiocpp_free_text_batch. */
+typedef struct {
+    audiocpp_text_t *items; /**< Array of n_items text elements (in input order) */
+    int64_t n_items;        /**< Total number of items in the batch */
+    int64_t items_failed;   /**< Count of items that failed to transcribe */
+} audiocpp_text_batch_t;
+
 /** Error info. */
 typedef struct {
     int code;            /**< 0 = success, negative = error */
@@ -321,6 +328,28 @@ AUDIOCPP_API audiocpp_text_t *audiocpp_asr(
     const audiocpp_model_t *model,
     const float *pcm,
     int64_t n_samples,
+    int sample_rate,
+    const char *options_json,
+    audiocpp_error_t *err
+);
+
+/**
+ * Transcribe a batch of audio buffers to text in one call.
+ *
+ * @param model           Model handle (must be loaded with AUDIOCPP_TASK_ASR).
+ * @param pcm_array       Array of pointers to mono f32 PCM buffers (n_items elements).
+ * @param n_samples_array Array of sample counts per PCM buffer (n_items elements).
+ * @param n_items         Number of utterances in batch.
+ * @param sample_rate     Sample rate of the audio (e.g. 16000).
+ * @param options_json    JSON options string applied to all utterances (NULL = defaults).
+ * @param err             Optional error output.
+ * @return Batch result or NULL on fatal error. Caller MUST free with audiocpp_free_text_batch.
+ */
+AUDIOCPP_API audiocpp_text_batch_t *audiocpp_asr_batch(
+    const audiocpp_model_t *model,
+    const float *const *pcm_array,
+    const int64_t *n_samples_array,
+    int64_t n_items,
     int sample_rate,
     const char *options_json,
     audiocpp_error_t *err
@@ -1120,6 +1149,9 @@ AUDIOCPP_API void audiocpp_free_audio(audiocpp_audio_t *audio);
 
 /** Free a text result. Safe to call with NULL. */
 AUDIOCPP_API void audiocpp_free_text(audiocpp_text_t *text);
+
+/** Free a text batch result. Safe to call with NULL. */
+AUDIOCPP_API void audiocpp_free_text_batch(audiocpp_text_batch_t *batch);
 
 /** Free a diarization result. Safe to call with NULL. */
 AUDIOCPP_API void audiocpp_free_diar(audiocpp_diar_t *diar);

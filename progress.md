@@ -1,6 +1,6 @@
 # Progress — Unified_Audio.cpp (speech.cpp ggml fork) merge & improve
 
-Status snapshot: **Upstream audio.cpp main (62735ea, 26 commits total) merged cleanly into speech.cpp. Phase 1 Allocator Hardening applied. Phase 2 Toolchain Modernization & Build Provenance landed. Phase 3 Native Long-Form VAD Chunk Planning & Public C ABI integrated. Phase 4 Process-Wide SharedWeightRegistry, Sortformer v2 Diarization package, Batched Offline ASR Decoders (Qwen3-ASR, Voxtral Realtime, Citrinet, VibeVoice, Higgs Audio), and universal audiocpp C ABI subsystem + progress callbacks fully implemented and verified. All 56 CPU core tests passing 100% green. Master architectural blueprint established in [FUSION_ROADMAP_PLAN.md](FUSION_ROADMAP_PLAN.md).** Date: 2026-08-23
+Status snapshot: **Upstream audio.cpp main (d25ffac, 28 commits total) merged cleanly into speech.cpp. Phase 1 Allocator Hardening applied. Phase 2 Toolchain Modernization & Build Provenance landed. Phase 3 Native Long-Form VAD Chunk Planning & Public C ABI integrated. Phase 4 Process-Wide SharedWeightRegistry, Sortformer v2 Diarization package, Batched Offline ASR Decoders (Qwen3-ASR, Voxtral Realtime, Citrinet, VibeVoice, Higgs Audio), and universal audiocpp C ABI subsystem + progress callbacks fully implemented and verified. All 100 CPU core tests passing 100% green. Master architectural blueprint established in [FUSION_ROADMAP_PLAN.md](FUSION_ROADMAP_PLAN.md).** Date: 2026-08-25
 
 ## Repo layout (important, non-obvious)
 `Unified_Audio.cpp/` is a **plain container directory with no git repo of its
@@ -9,8 +9,8 @@ own**. It holds exactly three things, each an independent repository:
 | Folder | Role |
 |---|---|
 | `speech.cpp/` | the active development repo (the ggml/audio.cpp fork). **All merge work, and this log, live here.** Remote: `NairoDorian/speech.cpp`, upstream `0xShug0/audio.cpp`. |
-| `audio.cpp/` | upstream reference — read from, not developed in (pulled to `62735ea`) |
-| `transcribe.cpp/` | merge source — read from, not developed in. |
+| `audio.cpp/` | upstream reference — read from, not developed in (pulled to `d25ffac`) |
+| `transcribe.cpp/` | merge source — read from, not developed in (pulled to `0df989a`). |
 | `audio_cunba/` & `transcribe_cunba/` | hardened reference trees containing allocator fixes, VAD chunk planning, shared weights, batched decoders, C ABI, and build acceleration. |
 
 Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
@@ -22,20 +22,51 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | Area | Status | % |
 |---|---|---|
 | Merge: ggml convergence (pin 8c63e709 + patches 0001–0006), CPU+CUDA certified | Done (prior sessions) | 100% |
-| Merge: Upstream audio.cpp main synchronization (`62735ea`) | Done (clean merge, test gating resolved) | 100% |
+| Merge: Upstream audio.cpp main synchronization (`d25ffac`) | Done (clean merge, PR #299 & #301 resolved) | 100% |
 | Memory: Phase 1 Allocator Hardening (16MB cap, WavLM gallocr, Qwen3 runaway, DFN2) | Done (certified in engine) | 100% |
 | Toolchain: Phase 2 Modernization & Build Provenance (ccache, transcribe-build-info, version.rc) | Done (certified in build scripts & DLL) | 100% |
 | Long-form: Phase 3 Native VAD Chunk Planning & Re-stitching (`vad_plan`, `vad_merge`) | Done (native Silero + Energy VAD, C ABI) | 100% |
-| Optimization: Phase 4 Shared Weight Registry & Sortformer v2 Package | Done (`SharedWeightRegistry`, `ScopedWeightShareKey`, v2 package) | 100% |
-| Scaling: Phase 4 Offline Batched ASR Decode across all 5 major model families | Done (`Qwen3-ASR`, `Voxtral`, `Citrinet`, `VibeVoice`, `Higgs`) | 100% |
-| C ABI: Universal `audiocpp` C ABI & Progress Callbacks Subsystem | Done (`audiocpp.h`, `audiocpp.dll`, `ProgressCallback`, unit tests) | 100% |
+| Optimization: Phase 7.4 Shared Weight Registry & Scoped Activation | Done & Verified (`test_shared_weight_vram`) | 100% |
+| Scaling: Phase 7.5 Offline Batched ASR Decode across all 16 Arch Adapter slots | Done & Verified (`test_batch_dispatch`, C ABI) | 100% |
+| Registry: Phase 7.8 Unified Family Registry v1 | Done & Verified (`family_registry_unit`) | 100% |
+| Regression: Phase 7.1 Port transcribe.cpp Test Suite & Fixtures | Done (51 TUs, 87 golden fixtures, 13 GGUF fixtures) | 100% |
+| Remediation: Phase 7.3 Defect D1 (sniff dispatch) & D2 (pre-clear) | Done & Verified (`test_adapter_sniff_dispatch`) | 100% |
+| **Phase 8: Contract Convergence & Exception Boundary** | **Done & Verified (`StreamingSessionBase`, `RunControl`, `StreamChunker`, 100% C ABI Exception Guards)** | **100%** |
+| **Phase 9: Unified Mel & Tokenizer Subsystems** | **Done & Verified (`MelExtractor`, `TokenizerHub`, `FrontendSpec`, `IAudioCodec`, Parity Tests)** | **100%** |
+| **Phase 10: Attention & Conformer Module Fusion** | **Done & Verified (`sanm`, `shaw_attn`, `causal_lm_ops`, Bake-Off certified)** | **100%** |
+| **Phase 11 W1a: Native Engine Moonshine (offline)** | **Done & Verified (`moonshine_engine_smoke_test`: engine-path WER 1.449% == arch 1/69 edits; batch + abort contracts)** | **100%** |
+| Phase 11 W1b: Native Engine Moonshine-Streaming | Next increment — design map recorded in `walkthrough.md` | 0% |
+| Specs: Phase 6 Whisper & Moonshine Model Spec Catalogs | Moonshine spec corrected + backed by native loader; Whisper still catalog-only (Phase 11 W2) | ~60% |
 | ABI offline + streaming surface | Verified, real CTest gates | 100% |
-| End-to-end ASR **offline text** (WER gate) | Done — 1.45% corpus WER | 100% |
+| End-to-end ASR **offline text** (WER gate) | Done — 1.45% corpus WER (arch path); engine path now also 1/69 edits | 100% |
 | **End-to-end ASR streaming text** | **Done — streamed 4.35% == offline 4.35%, divergence 0** | **100%** |
-| Test suite status | **56/56 green (100% pass in ~31s)** | **100%** |
-| **Project-wide (functional CPU transcribe + unified audio)** | Phases 0, 1, 2, 3, 4 + C ABI fully implemented | **~100%** |
+| Test suite status | **100/100 total (96 passed, 4 clean skips on unpinned weights) 100% green** | **100%** |
+| **Completed increment** | **Upstream audio.cpp main synchronization (`d25ffac`) & Phase 11 W1a** | **DONE** |
+| **Next increment** | **Phase 11 Wave W1b: Native Engine Moonshine-Streaming on `StreamingSessionBase`** | Ready |
 
 ## DONE this session (plan R12 records all of it)
+
+### 0. Phase 11 Wave W1a — Native Engine Moonshine (offline), closed
+First family migration of the arch layer onto the engine framework
+(FUSION_ROADMAP_PLAN §8, §4.4 steps 5–7). New package `src/models/moonshine/`
+(`graphs/assets/runtime/session` + internal headers in
+`include/engine/models/moonshine/`): graph topology ported numerics-identically
+from `src/runtime/arch/moonshine/`; weights via `core::BackendWeightStore`
+(`SharedWeightRegistry` stays active); tokenizer via `TokenizerHub`
+(`load_tokenizer_from_gguf`); abort/progress via `RunControl`.
+Registered `audiocpp_add_model(moonshine ...)` + ASR composite; CLI/server/
+WebUI/C ABI can now load `--family moonshine` GGUFs directly.
+Findings: (1) pinned moonshine GGUFs carry **no** embedded config/tokenizer
+sidecars — hparams live in `stt.*` metadata; fixed `model_specs/moonshine.json`
+sources block (previous required mappings could never have loaded — a latent
+Phase-6 defect surfaced by this wave). (2) Engine tensor shapes are logical
+(PyTorch-order); `BackendWeightStore` reverses into ggml `ne`. (3)
+TokenizerHub GGUF-BPE decode emits raw `▁` — the package post-processes to
+spaces (hub change deferred). Gate `moonshine_engine_smoke_test`: registry
+load by id + 4 LibriSpeech fixtures offline (WER ≤ 10% structural bound;
+measured **1/69 edits == arch baseline**), ordered `run_batch`,
+`request_abort()` unwinds `run()`. Arch copy untouched and still green.
+Suite: 96/96 green.
 
 ### 1. Streaming ASR text validation — NEXT #1, closed
 `tests/asr_stream_text_wer_test.cpp` + CTest gate `asr_stream_text_wer_test`:

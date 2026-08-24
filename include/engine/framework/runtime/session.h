@@ -192,6 +192,17 @@ struct VoiceActivityEvent {
     std::optional<SpeechSegment> segment = std::nullopt;
 };
 
+struct DecodeTelemetry {
+    int64_t t0_ms = 0;
+    int64_t t1_ms = 0;
+    float temperature_used = 0.0f;
+    float compression_ratio = 0.0f;
+    float avg_logprob = 0.0f;
+    float no_speech_prob = 0.0f;
+    bool no_speech_triggered = false;
+    int32_t n_fallbacks = 0;
+};
+
 struct TaskResult {
     std::optional<AudioBuffer> audio_output = std::nullopt;
     std::vector<NamedAudioBuffer> named_audio_outputs;
@@ -199,6 +210,7 @@ struct TaskResult {
     std::vector<SpeechSegment> speech_segments;
     std::vector<SpeakerTurn> speaker_turns;
     std::vector<WordTimestamp> word_timestamps;
+    std::vector<DecodeTelemetry> decode_telemetry;
     std::optional<VoiceArtifact> artifact_output = std::nullopt;
     std::vector<VoiceArtifact> output_artifacts;
 };
@@ -266,6 +278,14 @@ public:
     // concrete sessions inherit the plumbing. Call before run()/start_stream().
     virtual void set_progress_callback(ProgressCallback cb) {
         (void)cb;
+    }
+
+    // Request cooperative abortion of the in-flight run or stream.
+    virtual void request_abort() {}
+
+    // Check whether abortion has been requested.
+    virtual bool is_aborted() const {
+        return false;
     }
 };
 

@@ -125,21 +125,7 @@ std::vector<float> make_sinusoidal_positions(int64_t frames, int64_t channels) {
     throw std::runtime_error(
         "Fun-ASR-Nano sinusoidal position shape is invalid");
   }
-  const int64_t half = channels / 2;
-  const float increment = std::log(10000.0F) / static_cast<float>(half - 1);
-  std::vector<float> values(static_cast<size_t>(frames * channels), 0.0F);
-  for (int64_t frame = 0; frame < frames; ++frame) {
-    const float position = static_cast<float>(frame + 1);
-    for (int64_t index = 0; index < half; ++index) {
-      const float inverse_timescale =
-          std::exp(-increment * static_cast<float>(index));
-      const float phase = position * inverse_timescale;
-      const size_t base = static_cast<size_t>(frame * channels + index);
-      values[base] = std::sin(phase);
-      values[base + static_cast<size_t>(half)] = std::cos(phase);
-    }
-  }
-  return values;
+  return engine::modules::make_sinusoidal_positions(frames, channels);
 }
 
 engine::modules::SanmBlockConfig

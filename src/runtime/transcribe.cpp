@@ -190,8 +190,7 @@ extern "C" const char * transcribe_status_string(int status) {
 #endif
 
 extern "C" const char * transcribe_version(void) {
-    return TRANSCRIBE_BUILD_VERSION " " TRANSCRIBE_BUILD_COMMIT " " TRANSCRIBE_BUILD_BRANCH " " TRANSCRIBE_BUILD_DATE
-                                    " " TRANSCRIBE_BUILD_BACKEND;
+    return TRANSCRIBE_VERSION;
 }
 
 extern "C" const char * transcribe_version_commit(void) {
@@ -1567,7 +1566,7 @@ static transcribe_status transcribe_model_load_file_impl(const char *           
             if (const transcribe_status st = fw_loader.open_framework(path, family); st != TRANSCRIBE_OK) {
                 return st;
             }
-            const transcribe::Arch * fw_arch = transcribe::find_arch(family.c_str());
+            const transcribe::Arch * fw_arch = transcribe::adapter_find_arch(family.c_str());
             if (fw_arch == nullptr || fw_arch->load == nullptr) {
                 return TRANSCRIBE_ERR_UNSUPPORTED_ARCH;
             }

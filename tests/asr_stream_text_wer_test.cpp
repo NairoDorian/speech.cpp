@@ -65,12 +65,10 @@ constexpr int kSampleRate = 16000;
 // single-word jitter, far below the 50-100% a structural break produces.
 constexpr double kDefaultMaxCorpusWerPct = 10.0;
 
-// Streamed and offline text come from the same weights, so they may differ
-// only by boundary effects (transcribe.cpp measured +8 word edits over ~52k
-// words on the full split). On this 69-word corpus, 3 words of divergence is
-// generous headroom for chunk-boundary jitter while still catching a
-// streaming path that garbles text yet stays under the absolute WER bound.
-constexpr size_t kDefaultMaxStreamVsOfflineEdits = 3;
+// Streamed and offline text come from the same weights; on the 4 LibriSpeech
+// fixtures moonshine-streaming-tiny produces identical transcripts in both
+// modes (divergence 0). Tightened to 0 per Fusion Roadmap §7.6.
+constexpr size_t kDefaultMaxStreamVsOfflineEdits = 0;
 
 // Feed sizes in samples: odd, mutually coprime-ish, none aligned to any
 // plausible internal chunk size, spanning ~100-400 ms like real capture

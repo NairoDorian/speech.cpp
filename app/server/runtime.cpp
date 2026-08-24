@@ -8,6 +8,7 @@
 #include "../streaming/pcm_source.h"
 #include "../streaming/streaming.h"
 
+#include "engine/framework/core/shared_weight_registry.h"
 #include "engine/framework/debug/trace.h"
 #include "engine/framework/io/json.h"
 #include "engine/framework/model_spec/metadata.h"
@@ -1671,6 +1672,11 @@ void ServerState::ensure_model_loaded_locked(LoadedModel & model) {
     for (const auto & [key, value] : session_options.options) {
         engine::debug::trace_log_scalar("server.model.session_options." + key, value);
     }
+
+    const std::string share_key = !load_request.model_path.empty()
+        ? load_request.model_path.string()
+        : (load_request.family_hint.has_value() && !load_request.family_hint->empty() ? *load_request.family_hint : model.config.id);
+    engine::core::ScopedWeightShareKey share_scope(share_key);
 
     auto loaded_model = registry.load(load_request);
     auto session = loaded_model->create_task_session(model.task, session_options);

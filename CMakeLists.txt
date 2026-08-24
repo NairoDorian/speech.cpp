@@ -491,6 +491,8 @@ add_library(engine_core OBJECT
     src/framework/runtime/bounded_static_kv_decode.cpp
     src/framework/runtime/options.cpp
     src/framework/runtime/session_base.cpp
+    src/framework/runtime/stream_chunker.cpp
+    src/framework/runtime/streaming_session_base.cpp
     src/framework/runtime/workspace.cpp
     src/framework/midi/midi_file.cpp
     src/framework/io/filesystem.cpp
@@ -551,6 +553,7 @@ add_library(engine_core OBJECT
     src/framework/modules/transformers/qwen_causal_decoder.cpp
     src/framework/modules/transformers/qwen_causal_decode_runtime.cpp
     src/framework/modules/transformers/qwen3_vl_encoder_runtime.cpp
+    src/framework/modules/transformers/causal_lm_ops.cpp
     src/framework/modules/attention/cross_attention.cpp
     src/framework/modules/attention/transformer_blocks.cpp
     src/framework/modules/conditioning_modules.cpp
@@ -568,7 +571,9 @@ add_library(engine_core OBJECT
     external/llama_tokenizer/unicode.cpp
     external/llama_tokenizer/unicode-data.cpp
     src/framework/tokenizers/sentencepiece.cpp
+    src/framework/text/tokenizer_hub.cpp
     src/framework/audio/fft.cpp
+    src/framework/audio/mel_extractor.cpp
     src/framework/audio/kaldi_fbank.cpp
     src/framework/audio/activity.cpp
     src/framework/audio/chunking.cpp
@@ -1385,6 +1390,19 @@ audiocpp_add_model(citrinet_asr
         engine::models::citrinet_asr::make_citrinet_asr_loader
 )
 
+# Phase 11 W1: native engine Moonshine (offline ASR, raw-PCM frontend).
+audiocpp_add_model(moonshine
+    SOURCES
+        src/models/moonshine/graphs.cpp
+        src/models/moonshine/assets.cpp
+        src/models/moonshine/runtime.cpp
+        src/models/moonshine/session.cpp
+    INCLUDES
+        engine/models/moonshine/session.h
+    LOADERS
+        engine::models::moonshine::make_moonshine_loader
+)
+
 audiocpp_add_model(vevo2
     SOURCES
         src/models/vevo2/ar.cpp
@@ -1520,6 +1538,7 @@ set(AUDIOCPP_ASR_MODEL_TARGETS
     hviske_asr
     nemotron_asr
     citrinet_asr
+    moonshine
     qwen3_asr
     parakeet_tdt
     higgs_audio_stt
@@ -1600,6 +1619,7 @@ endforeach()
 message(STATUS "audio.cpp model composite: ${AUDIOCPP_MODEL_SET} selected [${AUDIOCPP_ENABLED_MODELS}] linked [${AUDIOCPP_LINKED_MODELS}]")
 add_library(engine_runtime STATIC
     src/framework/runtime/registry.cpp
+    src/framework/runtime/family_registry.cpp
     ${AUDIOCPP_RUNTIME_OBJECTS}
 )
 
@@ -1684,6 +1704,9 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/runtime
                 ${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe
             )
+            target_compile_definitions(engine_arch_${arch_family} PRIVATE
+                TRANSCRIBE_BUILD
+            )
             list(APPEND AUDIOCPP_ARCH_OBJECTS $<TARGET_OBJECTS:engine_arch_${arch_family}>)
         endforeach()
         list(REMOVE_DUPLICATES AUDIOCPP_ARCH_OBJECTS)
@@ -1727,6 +1750,18 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
             @ONLY)
         target_sources(transcribe PRIVATE "${TRANSCRIBE_RC_FILE}")
     endif()
+
+    add_library(transcribe_internal STATIC
+        $<TARGET_OBJECTS:engine_transcribe_runtime>
+        ${AUDIOCPP_ARCH_OBJECTS}
+    )
+    target_include_directories(transcribe_internal
+        PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/runtime
+    )
+    target_link_libraries(transcribe_internal PRIVATE ggml ggml-cpu sentencepiece engine_runtime)
 
     # Phase 0.M: hello-world bridge test. Loads a GGUF through the C ABI,
     # runs 16 kHz mono PCM, asserts transcribe_full_text() is non-NULL.
@@ -1854,6 +1889,8 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
                 -DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}/src/runtime
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint_teardown.cmake)
     endif()
+
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/transcribe-tests.cmake)
 endif()
 
 add_library(cjson_vendor STATIC
@@ -2153,6 +2190,28 @@ if (AUDIOCPP_BUILD_CAPI)
             target_link_libraries(capi_enum_sync_test PRIVATE OpenMP::OpenMP_CXX)
         endif()
         add_test(NAME capi_enum_sync_test COMMAND capi_enum_sync_test)
+
+        add_executable(capi_exception_containment_test
+            tests/unittests/test_capi_exception_containment.cpp
+            capi/src/audiocpp_capi.cpp
+        )
+        set_target_properties(capi_exception_containment_test PROPERTIES CXX_VISIBILITY_PRESET default)
+        target_compile_definitions(capi_exception_containment_test PRIVATE AUDIOCPP_EXPORTS)
+        if (MSVC)
+            target_compile_options(capi_exception_containment_test PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/utf-8>)
+        endif()
+        target_include_directories(capi_exception_containment_test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/capi/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}/capi/src"
+            "${CMAKE_CURRENT_SOURCE_DIR}/external/cJSON"
+            "${CMAKE_CURRENT_BINARY_DIR}/generated"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests"
+        )
+        target_link_libraries(capi_exception_containment_test PRIVATE engine_runtime ggml cjson_vendor)
+        if (ENGINE_ENABLE_OPENMP)
+            target_link_libraries(capi_exception_containment_test PRIVATE OpenMP::OpenMP_CXX)
+        endif()
+        add_test(NAME capi_exception_containment_test COMMAND capi_exception_containment_test)
     endif()
 endif()
 
@@ -2181,13 +2240,15 @@ endif()
 if (ENGINE_ENABLE_OPENMP)
     target_link_libraries(audiocpp_cli PRIVATE OpenMP::OpenMP_CXX)
 endif()
+add_executable(speech_cli ALIAS audiocpp_cli)
+add_executable(speechcpp_cli ALIAS audiocpp_cli)
 
 set(AUDIOCPP_UI_DIST "${CMAKE_CURRENT_SOURCE_DIR}/webui/native/dist/index.html")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${AUDIOCPP_UI_DIST}")
 if (EXISTS "${AUDIOCPP_UI_DIST}")
     file(READ "${AUDIOCPP_UI_DIST}" AUDIOCPP_UI_HEX HEX)
 else()
-    string(HEX "<!doctype html><title>audio.cpp</title><p>Embedded WebUI assets are unavailable.</p>" AUDIOCPP_UI_HEX)
+    string(HEX "<!doctype html><title>speech.cpp</title><p>Embedded WebUI assets are unavailable.</p>" AUDIOCPP_UI_HEX)
 endif()
 string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," AUDIOCPP_UI_BYTES "${AUDIOCPP_UI_HEX}")
 string(REPLACE "," ",\n" AUDIOCPP_UI_BYTES "${AUDIOCPP_UI_BYTES}")
@@ -2252,6 +2313,8 @@ endif()
 if (ENGINE_ENABLE_OPENMP)
     target_link_libraries(audiocpp_server PRIVATE OpenMP::OpenMP_CXX)
 endif()
+add_executable(speech_server ALIAS audiocpp_server)
+add_executable(speechcpp_server ALIAS audiocpp_server)
 
 add_executable(audiocpp_gguf
     app/gguf/main.cpp
@@ -2261,6 +2324,8 @@ target_include_directories(audiocpp_gguf PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/ge
 if (ENGINE_ENABLE_OPENMP)
     target_link_libraries(audiocpp_gguf PRIVATE OpenMP::OpenMP_CXX)
 endif()
+add_executable(speech_gguf ALIAS audiocpp_gguf)
+add_executable(speechcpp_gguf ALIAS audiocpp_gguf)
 
 if (AUDIOCPP_BUILD_NATIVE_MODEL_MANAGER)
     add_executable(audiocpp_model_manager
@@ -2463,6 +2528,30 @@ endif()
 
 if (ENGINE_BUILD_TESTS)
     enable_testing()
+
+    add_test(
+        NAME speech_cli_list_devices
+        COMMAND audiocpp_cli --list-devices
+    )
+    add_test(
+        NAME speech_server_list_devices
+        COMMAND audiocpp_server --list-devices
+    )
+    add_test(
+        NAME audiocpp_cli_list_devices
+        COMMAND audiocpp_cli --list-devices
+    )
+    add_test(
+        NAME audiocpp_server_list_devices
+        COMMAND audiocpp_server --list-devices
+    )
+    set_tests_properties(
+        speech_cli_list_devices
+        speech_server_list_devices
+        audiocpp_cli_list_devices
+        audiocpp_server_list_devices
+        PROPERTIES PASS_REGULAR_EXPRESSION "available_devices=[0-9]+"
+    )
 
     set(ENGINE_UNITTEST_ASSET_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests/assets")
 
@@ -2733,6 +2822,27 @@ if (ENGINE_BUILD_TESTS)
         COMMAND partial_text_render_test
     )
 
+    add_engine_unittest(run_control_unit_test tests/unittests/test_run_control.cpp)
+    target_compile_definitions(run_control_unit_test PRIVATE TRANSCRIBE_BUILD)
+    add_test(
+        NAME run_control_unit_test
+        COMMAND run_control_unit_test
+    )
+
+    add_engine_unittest(stream_chunker_unit_test tests/unittests/test_stream_chunker.cpp)
+    target_compile_definitions(stream_chunker_unit_test PRIVATE TRANSCRIBE_BUILD)
+    add_test(
+        NAME stream_chunker_unit_test
+        COMMAND stream_chunker_unit_test
+    )
+
+    add_engine_unittest(streaming_session_base_unit_test tests/unittests/test_streaming_session_base.cpp)
+    target_compile_definitions(streaming_session_base_unit_test PRIVATE TRANSCRIBE_BUILD)
+    add_test(
+        NAME streaming_session_base_unit_test
+        COMMAND streaming_session_base_unit_test
+    )
+
     add_engine_unittest(hf_sampler_test tests/unittests/test_hf_sampler.cpp)
 
     add_test(
@@ -2901,6 +3011,28 @@ if (ENGINE_BUILD_TESTS)
         COMMAND fun_asr_nano_assets_test
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
+
+    # Phase 11 W1: engine-path gate for the native Moonshine package. The
+    # package sources are linked directly (core model set does not include
+    # ASR families in engine_runtime); spec resolution reads the production
+    # catalog, so the working directory is pinned to the source root.
+    add_engine_unittest(moonshine_engine_smoke_test tests/unittests/test_moonshine_engine.cpp)
+    target_sources(moonshine_engine_smoke_test PRIVATE
+        src/models/moonshine/graphs.cpp
+        src/models/moonshine/assets.cpp
+        src/models/moonshine/runtime.cpp
+        src/models/moonshine/session.cpp
+    )
+    target_include_directories(moonshine_engine_smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    add_test(
+        NAME moonshine_engine_smoke_test
+        COMMAND moonshine_engine_smoke_test
+            ${CMAKE_CURRENT_SOURCE_DIR}/models/moonshine-tiny-Q8_0.gguf
+            ${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    set_tests_properties(moonshine_engine_smoke_test PROPERTIES SKIP_RETURN_CODE 2)
+
 
     add_engine_unittest(fun_asr_nano_frontend_probe tests/fun_asr_nano/fun_asr_nano_frontend_probe.cpp)
 

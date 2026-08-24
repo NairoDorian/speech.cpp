@@ -19,6 +19,7 @@
 #include "engine/framework/audio/wav_reader.h"
 #include "engine/framework/audio/conversion.h"
 #include "engine/framework/core/backend.h"
+#include "engine/framework/core/shared_weight_registry.h"
 #include "engine/framework/runtime/model.h"
 #include "engine/framework/runtime/registry.h"
 #include "engine/framework/runtime/session.h"
@@ -304,6 +305,11 @@ audiocpp_model_t *audiocpp_load_model_ex(
                 "model_path is null or empty (only allowed for silero_vad/"
                 "marblenet_vad when built with AUDIOCPP_EMBED_VAD_ASSETS=ON)");
         }
+        const std::string share_key = (model_path != nullptr && model_path[0] != '\0')
+            ? std::string(model_path)
+            : (!hint.empty() ? hint : "default_model");
+        engine::core::ScopedWeightShareKey share_scope(share_key);
+
         auto registry = engine::runtime::make_default_registry();
         engine::runtime::ModelLoadRequest req;
         req.model_path = empty_path ? std::filesystem::path{} : std::filesystem::path(model_path);
@@ -351,7 +357,10 @@ audiocpp_model_t *audiocpp_load_model(
 }
 
 void audiocpp_free_model(audiocpp_model_t *model) {
-    delete model;
+    if (!model) return;
+    try {
+        delete model;
+    } catch (...) {}
 }
 
 /* ======================================================================== */
@@ -365,26 +374,28 @@ void audiocpp_set_progress_callback(audiocpp_model_t *model,
                                     audiocpp_progress_fn fn,
                                     void *user_data) {
     if (!model) return;
-    model->progress_fn = fn;
-    model->progress_user = user_data;
-    if (!model->session) return;
-    if (fn == nullptr) {
-        model->session->set_progress_callback(nullptr);
-        return;
-    }
-    // Adapter: bridge C++ ProgressInfo -> C callback. Return false from C side
-    // (non-zero) to request cancellation; the std::function returning false
-    // makes emit_progress() throw ProgressCanceled inside run().
-    audiocpp_model *m = static_cast<audiocpp_model *>(model);
-    model->session->set_progress_callback(
-        [m](const engine::runtime::ProgressInfo & info) -> bool {
-            if (!m->progress_fn) return true;  // cleared mid-flight: continue
-            const char *stage = info.stage.empty() ? "" : info.stage.c_str();
-            int cont = m->progress_fn(info.progress, stage,
-                                      info.completed_units, info.total_units,
-                                      m->progress_user);
-            return cont == 0;  // 0 == continue
-        });
+    try {
+        model->progress_fn = fn;
+        model->progress_user = user_data;
+        if (!model->session) return;
+        if (fn == nullptr) {
+            model->session->set_progress_callback(nullptr);
+            return;
+        }
+        // Adapter: bridge C++ ProgressInfo -> C callback. Return false from C side
+        // (non-zero) to request cancellation; the std::function returning false
+        // makes emit_progress() throw ProgressCanceled inside run().
+        audiocpp_model *m = static_cast<audiocpp_model *>(model);
+        model->session->set_progress_callback(
+            [m](const engine::runtime::ProgressInfo & info) -> bool {
+                if (!m->progress_fn) return true;  // cleared mid-flight: continue
+                const char *stage = info.stage.empty() ? "" : info.stage.c_str();
+                int cont = m->progress_fn(info.progress, stage,
+                                          info.completed_units, info.total_units,
+                                          m->progress_user);
+                return cont == 0;  // 0 == continue
+            });
+    } catch (...) {}
 }
 
 namespace audiocpp::detail {
@@ -888,6 +899,65 @@ audiocpp_text_t *audiocpp_asr(
     return result;
 }
 
+audiocpp_text_batch_t *audiocpp_asr_batch(
+    const audiocpp_model_t *model,
+    const float *const *pcm_array,
+    const int64_t *n_samples_array,
+    int64_t n_items,
+    int sample_rate,
+    const char *options_json,
+    audiocpp_error_t *err
+) {
+    audiocpp_text_batch_t *result = nullptr;
+    AUDIOCPP_CATCH(err, {
+        if (!model || !model->offline) {
+            throw std::runtime_error("invalid model handle");
+        }
+        if (!pcm_array || !n_samples_array || n_items <= 0) {
+            throw std::runtime_error("invalid batch audio input");
+        }
+        std::vector<engine::runtime::TaskRequest> requests;
+        requests.reserve(static_cast<size_t>(n_items));
+        for (int64_t i = 0; i < n_items; ++i) {
+            engine::runtime::TaskRequest req;
+            if (pcm_array[i] && n_samples_array[i] > 0) {
+                req.audio_input = engine::runtime::AudioBuffer{};
+                req.audio_input->sample_rate = sample_rate;
+                req.audio_input->channels = 1;
+                req.audio_input->samples.assign(
+                    pcm_array[i], pcm_array[i] + n_samples_array[i]);
+            }
+            apply_options(req, options_json);
+            requests.push_back(std::move(req));
+        }
+
+        if (!requests.empty()) {
+            model->session->prepare(engine::runtime::build_preparation_request(requests[0]));
+        }
+
+        const auto task_results = model->offline->run_batch(requests);
+
+        result = new audiocpp_text_batch_t{};
+        result->n_items = n_items;
+        result->items = new audiocpp_text_t[static_cast<size_t>(n_items)]{};
+        result->items_failed = 0;
+
+        for (size_t i = 0; i < static_cast<size_t>(n_items); ++i) {
+            if (i < task_results.size() && task_results[i].text_output.has_value()) {
+                result->items[i].text = dup_cstr(task_results[i].text_output->text);
+                result->items[i].language = !task_results[i].text_output->language.empty()
+                    ? dup_cstr(task_results[i].text_output->language)
+                    : nullptr;
+            } else {
+                result->items[i].text = dup_cstr("");
+                result->items[i].language = nullptr;
+                ++result->items_failed;
+            }
+        }
+    });
+    return result;
+}
+
 /* ======================================================================== */
 /* Audio transform: audio → audio (Source Separation, Voice Conversion)      */
 /* ======================================================================== */
@@ -1150,32 +1220,54 @@ const char *audiocpp_version(void) {
 
 void audiocpp_free_audio(audiocpp_audio_t *audio) {
     if (!audio) return;
-    free(audio->samples);
-    delete audio;
+    try {
+        free(audio->samples);
+        delete audio;
+    } catch (...) {}
 }
 
 void audiocpp_free_text(audiocpp_text_t *text) {
     if (!text) return;
-    free(text->text);
-    free(text->language);
-    delete text;
+    try {
+        free(text->text);
+        free(text->language);
+        delete text;
+    } catch (...) {}
+}
+
+void audiocpp_free_text_batch(audiocpp_text_batch_t *batch) {
+    if (!batch) return;
+    try {
+        if (batch->items) {
+            for (int64_t i = 0; i < batch->n_items; ++i) {
+                if (batch->items[i].text) free(batch->items[i].text);
+                if (batch->items[i].language) free(batch->items[i].language);
+            }
+            delete[] batch->items;
+        }
+        delete batch;
+    } catch (...) {}
 }
 
 void audiocpp_free_diar(audiocpp_diar_t *diar) {
     if (!diar) return;
-    if (diar->turns) {
-        for (int64_t i = 0; i < diar->n_turns; ++i) {
-            free(diar->turns[i].speaker_id);
+    try {
+        if (diar->turns) {
+            for (int64_t i = 0; i < diar->n_turns; ++i) {
+                free(diar->turns[i].speaker_id);
+            }
+            free(diar->turns);
         }
-        free(diar->turns);
-    }
-    delete diar;
+        delete diar;
+    } catch (...) {}
 }
 
 void audiocpp_free_vad(audiocpp_vad_t *vad) {
     if (!vad) return;
-    free(vad->segments);
-    delete vad;
+    try {
+        free(vad->segments);
+        delete vad;
+    } catch (...) {}
 }
 
 audiocpp_vad_t *audiocpp_vad_energy(
@@ -1637,63 +1729,82 @@ int audiocpp_model_info(
     const audiocpp_model_t *model,
     audiocpp_model_info_t *out
 ) {
-    if (!model || !model->loaded_model || !out) return -1;
-    const auto &meta = model->loaded_model->metadata();
-    out->family = dup_cstr(meta.family);
-    out->variant = dup_cstr(meta.variant);
-    out->description = dup_cstr(meta.description);
-    return 0;
+    if (!out) return -1;
+    out->family = nullptr;
+    out->variant = nullptr;
+    out->description = nullptr;
+    if (!model || !model->loaded_model) return -1;
+    try {
+        const auto &meta = model->loaded_model->metadata();
+        out->family = dup_cstr(meta.family);
+        out->variant = dup_cstr(meta.variant);
+        out->description = dup_cstr(meta.description);
+        return 0;
+    } catch (...) {
+        audiocpp_free_model_info(out);
+        return -1;
+    }
 }
 
 int audiocpp_model_capabilities(
     const audiocpp_model_t *model,
     audiocpp_model_capabilities_t *out
 ) {
-    if (!model || !model->loaded_model || !out) return -1;
+    if (!out) return -1;
     memset(out, 0, sizeof(*out));
-    const auto &caps = model->loaded_model->capabilities();
-    out->supports_speaker_reference = caps.supports_speaker_reference ? 1 : 0;
-    out->supports_style_condition = caps.supports_style_condition ? 1 : 0;
-    out->supports_timestamps = caps.supports_timestamps ? 1 : 0;
-    // Supported tasks
-    out->n_supported_tasks = static_cast<int>(caps.supported_tasks.size());
-    if (out->n_supported_tasks > 0) {
-        out->supported_tasks = static_cast<int *>(
-            calloc(out->n_supported_tasks, sizeof(int)));
-        for (int i = 0; i < out->n_supported_tasks; ++i) {
-            out->supported_tasks[i] = static_cast<int>(caps.supported_tasks[i].task);
+    if (!model || !model->loaded_model) return -1;
+    try {
+        const auto &caps = model->loaded_model->capabilities();
+        out->supports_speaker_reference = caps.supports_speaker_reference ? 1 : 0;
+        out->supports_style_condition = caps.supports_style_condition ? 1 : 0;
+        out->supports_timestamps = caps.supports_timestamps ? 1 : 0;
+        // Supported tasks
+        out->n_supported_tasks = static_cast<int>(caps.supported_tasks.size());
+        if (out->n_supported_tasks > 0) {
+            out->supported_tasks = static_cast<int *>(
+                calloc(out->n_supported_tasks, sizeof(int)));
+            for (int i = 0; i < out->n_supported_tasks; ++i) {
+                out->supported_tasks[i] = static_cast<int>(caps.supported_tasks[i].task);
+            }
         }
-    }
-    // Languages
-    out->n_languages = static_cast<int>(caps.languages.size());
-    if (out->n_languages > 0) {
-        out->languages = static_cast<char **>(
-            calloc(out->n_languages, sizeof(char *)));
-        for (int i = 0; i < out->n_languages; ++i) {
-            out->languages[i] = dup_cstr(caps.languages[i]);
+        // Languages
+        out->n_languages = static_cast<int>(caps.languages.size());
+        if (out->n_languages > 0) {
+            out->languages = static_cast<char **>(
+                calloc(out->n_languages, sizeof(char *)));
+            for (int i = 0; i < out->n_languages; ++i) {
+                out->languages[i] = dup_cstr(caps.languages[i]);
+            }
         }
+        return 0;
+    } catch (...) {
+        audiocpp_free_capabilities(out);
+        return -1;
     }
-    return 0;
 }
 
 void audiocpp_free_model_info(audiocpp_model_info_t *info) {
     if (!info) return;
-    free(info->family);
-    free(info->variant);
-    free(info->description);
-    memset(info, 0, sizeof(*info));
+    try {
+        free(info->family);
+        free(info->variant);
+        free(info->description);
+        memset(info, 0, sizeof(*info));
+    } catch (...) {}
 }
 
 void audiocpp_free_capabilities(audiocpp_model_capabilities_t *caps) {
     if (!caps) return;
-    free(caps->supported_tasks);
-    if (caps->languages) {
-        for (int i = 0; i < caps->n_languages; ++i) {
-            free(caps->languages[i]);
+    try {
+        free(caps->supported_tasks);
+        if (caps->languages) {
+            for (int i = 0; i < caps->n_languages; ++i) {
+                free(caps->languages[i]);
+            }
+            free(caps->languages);
         }
-        free(caps->languages);
-    }
-    memset(caps, 0, sizeof(*caps));
+        memset(caps, 0, sizeof(*caps));
+    } catch (...) {}
 }
 
 /* ======================================================================== */
@@ -1707,15 +1818,28 @@ int audiocpp_read_wav(
     int *out_rate
 ) {
     if (!path || !out_samples || !out_n || !out_rate) return -1;
+    *out_samples = nullptr;
+    *out_n = 0;
+    *out_rate = 0;
     try {
         auto wav = engine::audio::read_wav_f32(std::filesystem::path(path));
         *out_n = static_cast<int64_t>(wav.samples.size());
         *out_rate = wav.sample_rate;
         *out_samples = static_cast<float *>(malloc(wav.samples.size() * sizeof(float)));
-        if (!*out_samples) return -1;
+        if (!*out_samples) {
+            *out_n = 0;
+            *out_rate = 0;
+            return -1;
+        }
         std::memcpy(*out_samples, wav.samples.data(), wav.samples.size() * sizeof(float));
         return 0;
     } catch (...) {
+        if (out_samples && *out_samples) {
+            free(*out_samples);
+            *out_samples = nullptr;
+        }
+        if (out_n) *out_n = 0;
+        if (out_rate) *out_rate = 0;
         return -1;
     }
 }
@@ -1763,20 +1887,24 @@ audiocpp_artifact_t *audiocpp_artifact_create(
     int64_t payload_size
 ) {
     if (!id) return nullptr;
-    auto *art = new audiocpp_artifact_t{};
-    art->kind = kind;
-    art->id = dup_cstr(id);
-    art->n_meta = 0;
-    art->meta_keys = nullptr;
-    art->meta_values = nullptr;
-    if (payload && payload_size > 0) {
-        art->payload = static_cast<uint8_t *>(malloc(static_cast<size_t>(payload_size)));
-        if (art->payload) {
-            std::memcpy(art->payload, payload, static_cast<size_t>(payload_size));
-            art->payload_size = payload_size;
+    try {
+        auto *art = new audiocpp_artifact_t{};
+        art->kind = kind;
+        art->id = dup_cstr(id);
+        art->n_meta = 0;
+        art->meta_keys = nullptr;
+        art->meta_values = nullptr;
+        if (payload && payload_size > 0) {
+            art->payload = static_cast<uint8_t *>(malloc(static_cast<size_t>(payload_size)));
+            if (art->payload) {
+                std::memcpy(art->payload, payload, static_cast<size_t>(payload_size));
+                art->payload_size = payload_size;
+            }
         }
+        return art;
+    } catch (...) {
+        return nullptr;
     }
-    return art;
 }
 
 int audiocpp_artifact_set_meta(
@@ -1785,34 +1913,42 @@ int audiocpp_artifact_set_meta(
     const char *value
 ) {
     if (!artifact || !key || !value) return -1;
-    // Check if key already exists
-    for (int i = 0; i < artifact->n_meta; ++i) {
-        if (std::strcmp(artifact->meta_keys[i], key) == 0) {
-            free(artifact->meta_values[i]);
-            artifact->meta_values[i] = dup_cstr(value);
-            return 0;
+    try {
+        // Check if key already exists
+        for (int i = 0; i < artifact->n_meta; ++i) {
+            if (artifact->meta_keys[i] && std::strcmp(artifact->meta_keys[i], key) == 0) {
+                free(artifact->meta_values[i]);
+                artifact->meta_values[i] = dup_cstr(value);
+                return 0;
+            }
         }
+        // Append new key-value pair
+        int idx = artifact->n_meta;
+        artifact->n_meta = idx + 1;
+        artifact->meta_keys = static_cast<char **>(
+            realloc(artifact->meta_keys, artifact->n_meta * sizeof(char *)));
+        artifact->meta_values = static_cast<char **>(
+            realloc(artifact->meta_values, artifact->n_meta * sizeof(char *)));
+        artifact->meta_keys[idx] = dup_cstr(key);
+        artifact->meta_values[idx] = dup_cstr(value);
+        return 0;
+    } catch (...) {
+        return -1;
     }
-    // Append new key-value pair
-    int idx = artifact->n_meta;
-    artifact->n_meta = idx + 1;
-    artifact->meta_keys = static_cast<char **>(
-        realloc(artifact->meta_keys, artifact->n_meta * sizeof(char *)));
-    artifact->meta_values = static_cast<char **>(
-        realloc(artifact->meta_values, artifact->n_meta * sizeof(char *)));
-    artifact->meta_keys[idx] = dup_cstr(key);
-    artifact->meta_values[idx] = dup_cstr(value);
-    return 0;
 }
 
 void audiocpp_artifact_free(audiocpp_artifact_t *artifact) {
     if (!artifact) return;
-    free_artifact_members(artifact);
-    delete artifact;
+    try {
+        free_artifact_members(artifact);
+        delete artifact;
+    } catch (...) {}
 }
 
 void audiocpp_free_artifacts(audiocpp_artifacts_t *artifacts) {
-    release_artifacts(artifacts);
+    try {
+        release_artifacts(artifacts);
+    } catch (...) {}
 }
 
 /* ======================================================================== */
@@ -2226,21 +2362,27 @@ audiocpp_stream_event_t *audiocpp_stream_pull(
 
 void audiocpp_stream_free(audiocpp_stream_t *stream) {
     if (!stream) return;
-    // session unique_ptr cleans up the C++ session object
-    delete stream;
+    try {
+        delete stream;
+    } catch (...) {}
 }
 
 void audiocpp_free_string(char *str) {
-    free(str);
+    if (!str) return;
+    try {
+        free(str);
+    } catch (...) {}
 }
 
 void audiocpp_clear_error(audiocpp_error_t *err) {
     if (!err) return;
-    if (err->message) {
-        free(err->message);
-        err->message = nullptr;
-    }
-    err->code = 0;
+    try {
+        if (err->message) {
+            free(err->message);
+            err->message = nullptr;
+        }
+        err->code = 0;
+    } catch (...) {}
 }
 
 /* ======================================================================== */
@@ -2297,68 +2439,80 @@ void copy_cstr(char *dst, size_t dst_size, const char *src) {
 }  // namespace
 
 int audiocpp_device_count(void) {
-    return static_cast<int>(ggml_backend_dev_count());
+    try {
+        return static_cast<int>(ggml_backend_dev_count());
+    } catch (...) {
+        return 0;
+    }
 }
 
 int audiocpp_device_info(int index, audiocpp_device_info_t *out) {
-    if (!out || index < 0 || static_cast<size_t>(index) >= ggml_backend_dev_count()) {
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
+    if (index < 0) return -1;
+
+    try {
+        if (static_cast<size_t>(index) >= ggml_backend_dev_count()) {
+            return -1;
+        }
+
+        ggml_backend_dev_t dev = ggml_backend_dev_get(static_cast<size_t>(index));
+        if (!dev) return -1;
+
+        ggml_backend_dev_props props;
+        ggml_backend_dev_get_props(dev, &props);
+
+        copy_cstr(out->name, sizeof(out->name), props.name);
+        copy_cstr(out->description, sizeof(out->description), props.description);
+        out->type = dev_type_to_id(props.type);
+        out->memory_total = static_cast<uint64_t>(props.memory_total);
+        out->memory_free = static_cast<uint64_t>(props.memory_free);
+
+        // Determine which backend this device belongs to.
+        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+        out->backend = backend_reg_to_id(reg);
+
+        // Compute per-backend device index: count how many earlier devices in the
+        // global list share the same backend reg.
+        int per_backend_idx = 0;
+        for (int i = 0; i < index; ++i) {
+            ggml_backend_dev_t earlier = ggml_backend_dev_get(static_cast<size_t>(i));
+            if (earlier && ggml_backend_dev_backend_reg(earlier) == reg) {
+                ++per_backend_idx;
+            }
+        }
+        out->device_id = per_backend_idx;
+
+        return 0;
+    } catch (...) {
+        memset(out, 0, sizeof(*out));
         return -1;
     }
-    memset(out, 0, sizeof(*out));
-
-    ggml_backend_dev_t dev = ggml_backend_dev_get(static_cast<size_t>(index));
-    if (!dev) return -1;
-
-    ggml_backend_dev_props props;
-    ggml_backend_dev_get_props(dev, &props);
-
-    copy_cstr(out->name, sizeof(out->name), props.name);
-    copy_cstr(out->description, sizeof(out->description), props.description);
-    out->type = dev_type_to_id(props.type);
-    out->memory_total = static_cast<uint64_t>(props.memory_total);
-    out->memory_free = static_cast<uint64_t>(props.memory_free);
-
-    // Determine which backend this device belongs to.
-    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
-    out->backend = backend_reg_to_id(reg);
-
-    // Compute per-backend device index: count how many earlier devices in the
-    // global list share the same backend reg. This aligns with
-    // ggml_backend_cuda_init(device) / ggml_backend_sycl_init(device) which
-    // take backend-relative indices.
-    int per_backend_idx = 0;
-    for (int i = 0; i < index; ++i) {
-        ggml_backend_dev_t earlier = ggml_backend_dev_get(static_cast<size_t>(i));
-        if (earlier && ggml_backend_dev_backend_reg(earlier) == reg) {
-            ++per_backend_idx;
-        }
-    }
-    out->device_id = per_backend_idx;
-
-    return 0;
 }
 
 void audiocpp_list_devices(void) {
-    int count = audiocpp_device_count();
-    printf("audio.cpp devices (%d):\n", count);
-    printf("  %-4s  %-10s  %-6s  %-10s  %-30s\n",
-           "idx", "backend", "type", "device_id", "name");
-    printf("  %s\n", "---------------------------------------------------------------");
-    static const char *backend_names[] = {
-        "CPU", "CUDA", "Vulkan", "Metal", "SYCL", "BEST"
-    };
-    static const char *type_names[] = {"CPU", "GPU", "IGPU"};
-    for (int i = 0; i < count; ++i) {
-        audiocpp_device_info_t info;
-        if (audiocpp_device_info(i, &info) == 0) {
-            const char *bn = (info.backend >= 0 && info.backend <= 5)
-                ? backend_names[info.backend] : "?";
-            const char *tn = (info.type >= 0 && info.type <= 2)
-                ? type_names[info.type] : "?";
-            printf("  %-4d  %-10s  %-6s  %-10d  %-30s\n",
-                   i, bn, tn, info.device_id, info.name);
+    try {
+        int count = audiocpp_device_count();
+        printf("audio.cpp devices (%d):\n", count);
+        printf("  %-4s  %-10s  %-6s  %-10s  %-30s\n",
+               "idx", "backend", "type", "device_id", "name");
+        printf("  %s\n", "---------------------------------------------------------------");
+        static const char *backend_names[] = {
+            "CPU", "CUDA", "Vulkan", "Metal", "SYCL", "BEST"
+        };
+        static const char *type_names[] = {"CPU", "GPU", "IGPU"};
+        for (int i = 0; i < count; ++i) {
+            audiocpp_device_info_t info;
+            if (audiocpp_device_info(i, &info) == 0) {
+                const char *bn = (info.backend >= 0 && info.backend <= 5)
+                    ? backend_names[info.backend] : "?";
+                const char *tn = (info.type >= 0 && info.type <= 2)
+                    ? type_names[info.type] : "?";
+                printf("  %-4d  %-10s  %-6s  %-10d  %-30s\n",
+                       i, bn, tn, info.device_id, info.name);
+            }
         }
-    }
+    } catch (...) {}
 }
 
 /* ======================================================================== */
@@ -2453,18 +2607,23 @@ bool backend_has_gpu_device(void) {
 }  // namespace
 
 int audiocpp_backend_available(int backend) {
-    switch (backend) {
-        case AUDIOCPP_BACKEND_CPU:
-            return 1;  // CPU is always compiled in and always "present"
-        case AUDIOCPP_BACKEND_CUDA:
-        case AUDIOCPP_BACKEND_VULKAN:
-        case AUDIOCPP_BACKEND_METAL:
-        case AUDIOCPP_BACKEND_SYCL:
-            return (backend_compiled_in(backend) && backend_has_device(backend)) ? 1 : 0;
-        case AUDIOCPP_BACKEND_BEST:
-            return backend_has_gpu_device() ? 1 : 0;
-        default:
-            return 0;  // unknown backend id — never abort
+    try {
+        switch (backend) {
+            case AUDIOCPP_BACKEND_CPU:
+                return 1;  // CPU is always compiled in and always "present"
+            case AUDIOCPP_BACKEND_CUDA:
+            case AUDIOCPP_BACKEND_VULKAN:
+            case AUDIOCPP_BACKEND_METAL:
+            case AUDIOCPP_BACKEND_SYCL:
+                return (backend_compiled_in(backend) && backend_has_device(backend)) ? 1 : 0;
+            case AUDIOCPP_BACKEND_BEST:
+                return backend_has_gpu_device() ? 1 : 0;
+            default:
+                return 0;  // unknown backend id — never abort
+        }
+    } catch (...) {
+        return (backend == AUDIOCPP_BACKEND_CPU) ? 1 : 0;
     }
 }
+
 

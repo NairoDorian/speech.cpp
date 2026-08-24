@@ -6,7 +6,7 @@
 
 namespace engine::model_spec {
 
-inline constexpr int kModelSpecSchemaVersion = 1;
+inline constexpr int kModelSpecSchemaVersion = 2;
 
 void validate_spec(const engine::io::json::Value & spec, std::string_view source_name);
 

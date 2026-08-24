@@ -1,4 +1,5 @@
 #include "attention_internal.h"
+#include "engine/framework/modules/attention/shaw_attention.h"
 
 namespace engine::modules::attention::internal {
 
@@ -374,3 +375,96 @@ core::TensorValue build_windowed_relative_attention_impl(
 }
 
 }  // namespace engine::modules::attention::internal
+
+namespace engine::modules {
+
+core::TensorValue build_shaw_block_attention(
+    core::ModuleBuildContext &ctx,
+    const core::TensorValue &input,
+    const std::optional<core::TensorValue> &zero_pad,
+    const core::TensorValue &dists,
+    const core::TensorValue &pad_mask_3d,
+    const ShawAttentionWeights &weights,
+    const ShawAttentionConfig &config) {
+    const int64_t inner_dim = config.num_heads * config.head_dim;
+    const int64_t context_size = config.context_size;
+    const int64_t num_blocks = config.num_blocks;
+    const int64_t T_enc = config.sequence_length;
+    const int64_t T_pad = context_size * num_blocks;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(config.head_dim));
+
+    const int64_t B = (input.shape.rank >= 3) ? input.shape.dims[0] : 1;
+    const int64_t num_blocks_eff = num_blocks * B;
+
+    // Pre-LayerNorm on the T_enc input
+    auto h = LayerNormModule({input.shape.last_dim(), config.layer_norm_eps, true, true})
+                 .build(ctx, input, weights.norm_attn);
+
+    // Zero-pad along the time axis when T_pad > T_enc
+    if (T_pad > T_enc) {
+        if (!zero_pad.has_value()) {
+            throw std::runtime_error("build_shaw_block_attention: zero_pad is required when T_pad > T_enc");
+        }
+        h = core::wrap_tensor(
+            ggml_concat(ctx.ggml, h.tensor, zero_pad->tensor, 1),
+            core::TensorShape::from_dims({B, T_pad, h.shape.last_dim()}),
+            GGML_TYPE_F32);
+    }
+
+    // QKV projections
+    const LinearModule q_proj({input.shape.last_dim(), inner_dim, false});
+    const LinearModule kv_proj({input.shape.last_dim(), 2 * inner_dim, false});
+    const LinearModule out_proj({inner_dim, input.shape.last_dim(), true});
+
+    auto q = q_proj.build(ctx, h, weights.attn_q);
+    auto kv = kv_proj.build(ctx, h, weights.attn_kv);
+
+    ggml_tensor * k_raw = ggml_view_3d(ctx.ggml, kv.tensor, inner_dim, kv.tensor->ne[1], kv.tensor->ne[2], kv.tensor->nb[1], kv.tensor->nb[2], 0);
+    ggml_tensor * v_raw = ggml_view_3d(ctx.ggml, kv.tensor, inner_dim, kv.tensor->ne[1], kv.tensor->ne[2], kv.tensor->nb[1], kv.tensor->nb[2], inner_dim * ggml_element_size(kv.tensor));
+    k_raw = ggml_cont(ctx.ggml, k_raw);
+    v_raw = ggml_cont(ctx.ggml, v_raw);
+
+    auto reshape_qkv = [&](ggml_tensor * t) -> ggml_tensor * {
+        ggml_tensor * r = ggml_reshape_4d(ctx.ggml, t, config.head_dim, config.num_heads, context_size, num_blocks_eff);
+        r = ggml_cont(ctx.ggml, ggml_permute(ctx.ggml, r, 0, 2, 1, 3));
+        return r;
+    };
+    auto q_t = reshape_qkv(q.tensor);
+    auto k_t = reshape_qkv(k_raw);
+    auto v_t = reshape_qkv(v_raw);
+
+    ggml_tensor * dists_flat = ggml_reshape_1d(ctx.ggml, dists.tensor, context_size * context_size);
+    ggml_tensor * rel_lookup = ggml_get_rows(ctx.ggml, weights.rel_pos_emb.tensor, dists_flat);
+    rel_lookup = ggml_reshape_3d(ctx.ggml, rel_lookup, config.head_dim, context_size, context_size);
+
+    ggml_tensor * q_perm = ggml_cont(ctx.ggml, ggml_permute(ctx.ggml, q_t, 0, 2, 1, 3));
+    ggml_tensor * pos_attn = ggml_mul_mat(ctx.ggml, rel_lookup, q_perm);
+
+    ggml_tensor * kq = ggml_mul_mat(ctx.ggml, k_t, q_t);
+    pos_attn = ggml_cont(ctx.ggml, ggml_permute(ctx.ggml, pos_attn, 0, 2, 1, 3));
+
+    ggml_tensor * scores = ggml_add(ctx.ggml, kq, pos_attn);
+    scores = ggml_scale(ctx.ggml, scores, scale);
+
+    ggml_tensor * pad_mask_4d = ggml_reshape_4d(ctx.ggml, pad_mask_3d.tensor, context_size, context_size, 1, num_blocks_eff);
+    scores = ggml_add(ctx.ggml, scores, pad_mask_4d);
+
+    ggml_tensor * attn = ggml_soft_max(ctx.ggml, scores);
+
+    ggml_tensor * v_transposed = ggml_cont(ctx.ggml, ggml_permute(ctx.ggml, v_t, 1, 0, 2, 3));
+    ggml_tensor * out = ggml_mul_mat(ctx.ggml, v_transposed, attn);
+
+    out = ggml_cont(ctx.ggml, ggml_permute(ctx.ggml, out, 0, 2, 1, 3));
+    out = ggml_reshape_3d(ctx.ggml, out, inner_dim, T_pad, B);
+
+    if (T_pad > T_enc) {
+        out = ggml_view_3d(ctx.ggml, out, inner_dim, T_enc, B, out->nb[1], out->nb[2], 0);
+        out = ggml_cont(ctx.ggml, out);
+    }
+
+    auto out_wrapped = core::wrap_tensor(out, core::TensorShape::from_dims({B, T_enc, inner_dim}), GGML_TYPE_F32);
+    return out_proj.build(ctx, out_wrapped, weights.attn_out);
+}
+
+} // namespace engine::modules
+

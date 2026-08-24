@@ -670,6 +670,8 @@ void validate_legacy_source(const json::Value & value, std::string_view path) {
     validate_layout(value, path);
 }
 
+void validate_frontend(const json::Value & frontend_value, std::string_view path);
+
 void validate_v1(const json::Value & spec, std::string_view source_name) {
     const auto family = require_spec_string(require_spec_field(spec, "family", source_name), std::string(source_name) + ".family");
     (void) require_spec_string(require_spec_field(spec, "display_name", source_name), std::string(source_name) + ".display_name");
@@ -706,11 +708,45 @@ void validate_v1(const json::Value & spec, std::string_view source_name) {
         std::string(source_name) + ".dependencies");
     validate_ui(require_spec_field(spec, "ui", source_name), package_ids, std::string(source_name) + ".ui");
 
+    if (const auto * frontend = spec.find("frontend")) {
+        validate_frontend(*frontend, std::string(source_name) + ".frontend");
+    }
+
     const auto sources_path = std::string(source_name) + ".sources";
     const auto & sources_field = require_spec_field(spec, "sources", source_name);
     const auto & sources = require_spec_array(sources_field, sources_path);
     for (size_t index = 0; index < sources.size(); ++index) {
         validate_legacy_source(sources[index], std::string(source_name) + ".sources[" + std::to_string(index) + "]");
+    }
+}
+
+void validate_frontend(const json::Value & frontend_value, std::string_view path) {
+    if (!frontend_value.is_object()) {
+        fail(path, "expected object");
+    }
+    if (const auto * kind_field = frontend_value.find("kind")) {
+        const std::string kind = require_spec_string(*kind_field, std::string(path) + ".kind");
+        static const std::unordered_set<std::string> valid_kinds = {"mel_spectrogram", "kaldi_fbank", "raw_pcm"};
+        if (valid_kinds.find(kind) == valid_kinds.end()) {
+            fail(std::string(path) + ".kind", "unsupported frontend kind '" + kind + "'");
+        }
+    }
+    if (const auto * sr = frontend_value.find("sample_rate")) {
+        require_spec_number(*sr, std::string(path) + ".sample_rate");
+    }
+    if (const auto * mels = frontend_value.find("num_mels")) {
+        require_spec_number(*mels, std::string(path) + ".num_mels");
+    } else if (const auto * nmels = frontend_value.find("n_mels")) {
+        require_spec_number(*nmels, std::string(path) + ".n_mels");
+    }
+    if (const auto * nfft = frontend_value.find("n_fft")) {
+        require_spec_number(*nfft, std::string(path) + ".n_fft");
+    }
+    if (const auto * win = frontend_value.find("win_length")) {
+        require_spec_number(*win, std::string(path) + ".win_length");
+    }
+    if (const auto * hop = frontend_value.find("hop_length")) {
+        require_spec_number(*hop, std::string(path) + ".hop_length");
     }
 }
 
@@ -733,9 +769,9 @@ void validate_spec(const json::Value & spec, std::string_view source_name) {
         validate_legacy(spec, source_name);
         return;
     }
-    if (!version->is_number() || version->as_i64() != kModelSpecSchemaVersion) {
+    if (!version->is_number() || (version->as_i64() != 1 && version->as_i64() != kModelSpecSchemaVersion)) {
         fail(std::string(source_name) + ".schema_version",
-             "expected " + std::to_string(kModelSpecSchemaVersion));
+             "expected 1 or " + std::to_string(kModelSpecSchemaVersion));
     }
     validate_v1(spec, source_name);
 }

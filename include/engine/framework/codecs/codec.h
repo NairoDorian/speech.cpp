@@ -22,8 +22,9 @@ class IAudioCodec {
 public:
     virtual ~IAudioCodec() = default;
 
-    virtual std::string family() const = 0;
+    virtual std::string family() const { return ""; }
     virtual AudioChunk decode(const LatentChunk & latents) = 0;
+    virtual LatentChunk encode(const AudioChunk & audio) { (void)audio; return {}; }
 };
 
 }  // namespace engine::codecs

@@ -131,6 +131,25 @@ public:
         return registry;
     }
 
+    size_t hit_count() const noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return hit_count_;
+    }
+    size_t miss_count() const noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return miss_count_;
+    }
+    size_t conflict_count() const noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return conflict_count_;
+    }
+    void reset_counters() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        hit_count_ = 0;
+        miss_count_ = 0;
+        conflict_count_ = 0;
+    }
+
     // Look up (key, fingerprint). On hit returns the entry with created=false.
     // On miss calls create() inside the lock, registers the entry and returns
     // it with created=true. On a fingerprint conflict for the same key
@@ -148,13 +167,16 @@ public:
             if (!entry) {
                 entries_.erase(it);  // stale weak_ptr; treat as miss
             } else if (entry->fingerprint() == fingerprint) {
+                ++hit_count_;
                 return {std::move(entry), false};
             } else {
+                ++conflict_count_;
                 return {nullptr, false};  // fingerprint conflict
             }
         }
         auto entry = create();
         entries_[key] = entry;
+        ++miss_count_;
         return {std::move(entry), true};
     }
 
@@ -163,8 +185,11 @@ private:
     SharedWeightRegistry(const SharedWeightRegistry &) = delete;
     SharedWeightRegistry & operator=(const SharedWeightRegistry &) = delete;
 
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::unordered_map<std::string, std::weak_ptr<SharedWeightEntry>> entries_;
+    size_t hit_count_ = 0;
+    size_t miss_count_ = 0;
+    size_t conflict_count_ = 0;
 };
 
 // Current thread's share key; empty means sharing is disabled on this thread.

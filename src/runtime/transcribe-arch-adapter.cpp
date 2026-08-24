@@ -40,6 +40,7 @@
 #include "engine/framework/runtime/model.h"
 #include "engine/framework/runtime/registry.h"
 #include "engine/framework/runtime/session.h"
+#include "engine/framework/runtime/stream_chunker.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -329,93 +330,8 @@ static void apply_run_params(TaskRequest & request, const transcribe_run_params 
 }
 
 // Re-blocks an arbitrary caller feed into the fixed-size, contiguous chunks a
-// framework streaming session requires. transcribe_stream_feed() imposes no
-// granularity ("n_samples may be 0"), while framework sessions declare one via
-// streaming_policy() and enforce it hard - SileroRuntime::process_chunk throws
-// on both a wrong size and a non-contiguous start_sample. Without this the
-// streaming surface is unusable for every framework family.
-//
-// The tail left over after the last whole chunk stays buffered and is emitted
-// zero-padded by flush(), which finalize_stream() calls so trailing audio is
-// not silently dropped.
-class StreamChunker {
-public:
-    void reset(int64_t chunk_samples) {
-        chunk_samples_ = chunk_samples > 0 ? chunk_samples : 0;
-        pending_.clear();
-        input_samples_     = 0;
-        committed_samples_ = 0;
-    }
-
-    int64_t input_samples() const noexcept { return input_samples_; }
-    int64_t committed_samples() const noexcept { return committed_samples_; }
-    int64_t buffered_samples() const noexcept { return input_samples_ - committed_samples_; }
-
-    // Append `n` samples and invoke `emit(chunk)` once per whole chunk now
-    // available. `emit` receives a chunk whose start_sample is the absolute
-    // cursor the family requires for its contiguity check, and returns false
-    // to stop early (abort) - undispatched samples stay buffered rather than
-    // being counted as committed, so a later feed resumes contiguously.
-    template <typename Emit>
-    void feed(const float * pcm, int n, const Emit & emit) {
-        if (n > 0) {
-            pending_.insert(pending_.end(), pcm, pcm + static_cast<std::size_t>(n));
-            input_samples_ += n;
-        }
-        if (chunk_samples_ <= 0) {
-            // Family declares no granularity: pass the feed straight through.
-            if (!pending_.empty() && emit(make_chunk(pending_))) {
-                committed_samples_ += static_cast<int64_t>(pending_.size());
-                pending_.clear();
-            }
-            return;
-        }
-        const auto  chunk  = static_cast<std::size_t>(chunk_samples_);
-        std::size_t offset = 0;
-        while (pending_.size() - offset >= chunk) {
-            const std::vector<float> block(pending_.begin() + static_cast<std::ptrdiff_t>(offset),
-                                           pending_.begin() + static_cast<std::ptrdiff_t>(offset + chunk));
-            if (!emit(make_chunk(block))) {
-                break;
-            }
-            committed_samples_ += static_cast<int64_t>(chunk);
-            offset += chunk;
-        }
-        pending_.erase(pending_.begin(), pending_.begin() + static_cast<std::ptrdiff_t>(offset));
-    }
-
-    // Emit whatever is still buffered, zero-padded up to the family's chunk
-    // size. Only the real samples count toward committed_samples_ so the
-    // caller-visible audio_committed_ms never exceeds what was actually fed.
-    template <typename Emit>
-    void flush(const Emit & emit) {
-        if (pending_.empty()) {
-            return;
-        }
-        const auto real = static_cast<int64_t>(pending_.size());
-        if (chunk_samples_ > 0) {
-            pending_.resize(static_cast<std::size_t>(chunk_samples_), 0.0f);
-        }
-        (void)emit(make_chunk(pending_));
-        committed_samples_ += real;
-        pending_.clear();
-    }
-
-private:
-    AudioChunk make_chunk(const std::vector<float> & samples) const {
-        AudioChunk chunk;
-        chunk.sample_rate  = k_native_sample_rate;
-        chunk.channels     = 1;
-        chunk.start_sample = committed_samples_;
-        chunk.samples      = samples;
-        return chunk;
-    }
-
-    int64_t            chunk_samples_     = 0;
-    int64_t            input_samples_     = 0;
-    int64_t            committed_samples_ = 0;
-    std::vector<float> pending_;
-};
+// framework streaming session requires. Uses the unified engine::runtime::StreamChunker.
+using StreamChunker = ::engine::runtime::StreamChunker;
 
 // An adapter-wrapped model. Owns the framework ILoadedVoiceModel; the
 // framework frees the gguf_context / weights / decode state via the
@@ -532,13 +448,73 @@ public:
         }
     }
 
-    // No run_batch hook is installed. The framework's offline surface takes
-    // one TaskRequest at a time, so an adapter "batch" could only be a serial
-    // loop - which is exactly the dispatcher's generic fallback, and that one
-    // additionally re-validates each utterance, records per-utterance timings
-    // and stores a per-utterance status. Duplicating it here would be strictly
-    // worse; the fallback routes back through run_offline() anyway. Wire a
-    // real run_batch only when a family gains a genuinely batched graph.
+    transcribe_status run_batch(const float * const * pcm, const int * n_samples, int n,
+                                const transcribe_run_params * params) {
+        if (pcm == nullptr || n_samples == nullptr || n <= 0) {
+            return TRANSCRIBE_ERR_INVALID_ARG;
+        }
+        auto * offline = ensure_offline();
+        if (offline == nullptr) {
+            return TRANSCRIBE_ERR_NOT_IMPLEMENTED;
+        }
+        try {
+            std::vector<TaskRequest> requests;
+            requests.reserve(n);
+            for (int i = 0; i < n; ++i) {
+                TaskRequest req;
+                if (pcm[i] != nullptr && n_samples[i] > 0) {
+                    req.audio_input = AudioBuffer{
+                        k_native_sample_rate,
+                        1,
+                        std::vector<float>(pcm[i], pcm[i] + static_cast<std::size_t>(n_samples[i]))};
+                }
+                apply_run_params(req, params);
+                requests.push_back(std::move(req));
+            }
+
+            if (!requests.empty()) {
+                offline->prepare(build_preparation_request(requests[0]));
+            }
+
+            const std::vector<TaskResult> results = offline->run_batch(requests);
+
+            batch_results.clear();
+            batch_results.reserve(n);
+            for (size_t i = 0; i < static_cast<size_t>(n); ++i) {
+                ResultSet rs;
+                if (i < results.size()) {
+                    clear_result();
+                    map_result_into(this, results[i]);
+                    rs.full_text = full_text;
+                    rs.raw_text = raw_text;
+                    rs.segments = segments;
+                    rs.words = words;
+                    rs.tokens = tokens;
+                    rs.has_result = has_result;
+                    rs.result_kind = result_kind;
+                    rs.status = TRANSCRIBE_OK;
+                } else {
+                    rs.has_result = false;
+                    rs.status = TRANSCRIBE_ERR_BACKEND;
+                }
+                batch_results.push_back(std::move(rs));
+            }
+
+            if (!batch_results.empty() && batch_results[0].has_result) {
+                clear_result();
+                full_text = batch_results[0].full_text;
+                raw_text = full_text;
+                segments = batch_results[0].segments;
+                words = batch_results[0].words;
+                tokens = batch_results[0].tokens;
+            }
+
+            return TRANSCRIBE_OK;
+        } catch (const std::exception & e) {
+            transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "adapter run_batch failed: %s", e.what());
+            return TRANSCRIBE_ERR_BACKEND;
+        }
+    }
 
     transcribe_status begin_stream(const transcribe_run_params * run_params) {
         auto * streaming = ensure_streaming();
@@ -910,6 +886,44 @@ transcribe_status adapter_run_impl(struct transcribe_session * ctx, const float 
     return session->run_offline(pcm, n_samples, params);
 }
 
+transcribe_status adapter_run_batch_impl(struct transcribe_session * ctx,
+                                         const float * const * pcm,
+                                         const int * n_samples,
+                                         int n,
+                                         const struct transcribe_run_params * params) {
+    auto * session = static_cast<AdapterSession *>(ctx);
+    return session->run_batch(pcm, n_samples, n, params);
+}
+
+transcribe_status adapter_stream_validate_impl(const struct transcribe_session * ctx,
+                                               const struct transcribe_run_params * run_params,
+                                               const struct transcribe_stream_params * stream_params) {
+    if (ctx == nullptr) {
+        return TRANSCRIBE_ERR_INVALID_ARG;
+    }
+    if (run_params != nullptr && run_params->struct_size > 0 &&
+        run_params->struct_size < sizeof(transcribe_run_params)) {
+        return TRANSCRIBE_ERR_BAD_STRUCT_SIZE;
+    }
+    if (stream_params != nullptr && stream_params->struct_size > 0 &&
+        stream_params->struct_size < sizeof(transcribe_stream_params)) {
+        return TRANSCRIBE_ERR_BAD_STRUCT_SIZE;
+    }
+    return TRANSCRIBE_OK;
+}
+
+transcribe_status adapter_run_validate_impl(const struct transcribe_session * ctx,
+                                            const struct transcribe_run_params * params) {
+    if (ctx == nullptr) {
+        return TRANSCRIBE_ERR_INVALID_ARG;
+    }
+    if (params != nullptr && params->struct_size > 0 &&
+        params->struct_size < sizeof(transcribe_run_params)) {
+        return TRANSCRIBE_ERR_BAD_STRUCT_SIZE;
+    }
+    return TRANSCRIBE_OK;
+}
+
 transcribe_status adapter_stream_begin_impl(struct transcribe_session * ctx,
                                             const struct transcribe_run_params * run_params,
                                             const struct transcribe_stream_params * /*stream_params*/) {
@@ -950,54 +964,70 @@ bool adapter_accepts_ext_kind_impl(const struct transcribe_model * /*model*/,
 // so overlapping names (qwen3_asr, voxtral_realtime, moss) keep their
 // transcribe.cpp handlers until Phase 1 consolidation.
 static const Arch adapter_archs[] = {
-    {"silero_vad",          &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl, nullptr, nullptr,
-     &adapter_stream_begin_impl,   &adapter_stream_feed_impl,   &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
-     &adapter_accepts_ext_kind_impl, nullptr},
-    {"marblenet_vad",       &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl, nullptr, nullptr,
-     &adapter_stream_begin_impl,   &adapter_stream_feed_impl,   &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
-     &adapter_accepts_ext_kind_impl, nullptr},
-    {"citrinet_asr",        &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl, nullptr, nullptr,
-     &adapter_stream_begin_impl,   &adapter_stream_feed_impl,   &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
-     &adapter_accepts_ext_kind_impl, nullptr},
-    {"nemotron_asr",        &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl, nullptr, nullptr,
-     &adapter_stream_begin_impl,   &adapter_stream_feed_impl,   &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
-     &adapter_accepts_ext_kind_impl, nullptr},
-    {"qwen3_asr",           &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl, nullptr, nullptr,
-     &adapter_stream_begin_impl,   &adapter_stream_feed_impl,   &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
-     &adapter_accepts_ext_kind_impl, nullptr},
-    {"fun_asr_nano",        &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl, nullptr, nullptr,
-     &adapter_stream_begin_impl,   &adapter_stream_feed_impl,   &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
-     &adapter_accepts_ext_kind_impl, nullptr},
-    {"sense_asr",           &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl, nullptr, nullptr,
-     &adapter_stream_begin_impl,   &adapter_stream_feed_impl,   &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
-     &adapter_accepts_ext_kind_impl, nullptr},
-    {"hviske_asr",          &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl, nullptr, nullptr,
-     &adapter_stream_begin_impl,   &adapter_stream_feed_impl,   &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
-     &adapter_accepts_ext_kind_impl, nullptr},
-    {"higgs_audio_stt",     &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl, nullptr, nullptr,
-     &adapter_stream_begin_impl,   &adapter_stream_feed_impl,   &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
-     &adapter_accepts_ext_kind_impl, nullptr},
-    {"vibevoice_asr",       &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl, nullptr, nullptr,
-     &adapter_stream_begin_impl,   &adapter_stream_feed_impl,   &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
-     &adapter_accepts_ext_kind_impl, nullptr},
-    {"kroko_asr",           &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl, nullptr, nullptr,
-     &adapter_stream_begin_impl,   &adapter_stream_feed_impl,   &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
-     &adapter_accepts_ext_kind_impl, nullptr},
-    {"parakeet_tdt",        &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl, nullptr, nullptr,
-     &adapter_stream_begin_impl,   &adapter_stream_feed_impl,   &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
-     &adapter_accepts_ext_kind_impl, nullptr},
-    {"voxtral_realtime",    &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl, nullptr, nullptr,
-     &adapter_stream_begin_impl,   &adapter_stream_feed_impl,   &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
-     &adapter_accepts_ext_kind_impl, nullptr},
-    {"sortformer_diar",     &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl, nullptr, nullptr,
-     &adapter_stream_begin_impl,   &adapter_stream_feed_impl,   &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
-     &adapter_accepts_ext_kind_impl, nullptr},
-    {"roformer",            &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl, nullptr, nullptr,
-     &adapter_stream_begin_impl,   &adapter_stream_feed_impl,   &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
-     &adapter_accepts_ext_kind_impl, nullptr},
-    {"moss",                &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl, nullptr, nullptr,
-     &adapter_stream_begin_impl,   &adapter_stream_feed_impl,   &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
-     &adapter_accepts_ext_kind_impl, nullptr},
+    {"silero_vad",          &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"marblenet_vad",       &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"citrinet_asr",        &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"nemotron_asr",        &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"qwen3_asr",           &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"fun_asr_nano",        &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"sense_asr",           &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"hviske_asr",          &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"higgs_audio_stt",     &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"vibevoice_asr",       &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"kroko_asr",           &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"parakeet_tdt",        &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"voxtral_realtime",    &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"sortformer_diar",     &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"roformer",            &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"moss",                &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
 };
 constexpr size_t k_n_adapter_archs = sizeof(adapter_archs) / sizeof(adapter_archs[0]);
 

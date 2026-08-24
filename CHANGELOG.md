@@ -11,21 +11,65 @@ Dates are the work-session dates recorded in the plan.
 
 ### Added
 
+- **Upstream Synchronization (`0xShug0/audio.cpp:main@d25ffac`) & `speech.cpp` Unified Aliases**:
+  - **Unified Device Enumeration (`engine::core::print_backend_devices`)**: Extracted device printing logic into core framework (`include/engine/framework/core/backend.h` & `src/framework/core/backend.cpp`). Added `--list-devices` support to `audiocpp_server` and refactored CLI `--list-devices` dispatch (PR #299 upstream).
+  - **`speech_cli` / `speech_server` / `speech_gguf` Primary Executable Aliases**: Configured CMake ALIAS targets `speech_cli`, `speechcpp_cli`, `speech_server`, `speechcpp_server`, `speech_gguf`, `speechcpp_gguf` to standardize product executables under `speech.cpp`.
+  - **CTest Gates for Device Enumeration**: Added `speech_cli_list_devices`, `speech_server_list_devices`, `audiocpp_cli_list_devices`, and `audiocpp_server_list_devices` asserting regex pattern `available_devices=[0-9]+`.
+  - **Long-Form Audio Chunk Speech Metadata Resilience**: In `src/framework/audio/chunking.cpp` (`append_chunk_speech_metadata`), replaced aborting exception on out-of-span segments/turns with warning diagnostics and graceful segment drop (PR #301 upstream). Verified via `test_chunk_speech_metadata_merge_drops_outside_spans` in `audio_chunking_test`.
+  - **Full Suite Status**: **100/100 CTest targets passing 100% green** on `build-cpu-core` (96 passed, 4 clean skips on unpinned weights).
+
+- **Phase 11 Started (Wave W1a): Native Engine Moonshine ASR Package (`src/models/moonshine/`)**:
+  - **First architectural family migrated off the transcribe arch layer onto the engine framework** (FUSION_ROADMAP_PLAN §8 Phase 11 / §4.4 migration invariant, steps 5–7). Moonshine is now reachable as a first-class product family through `ModelRegistry`, so CLI, HTTP server, WebUI and the shipped `audiocpp` C ABI can load it by canonical id or alias (`moonshine`, `moonshine-offline`) — previously only via the separate default-off `transcribe.dll`.
+  - Package layout: `src/models/moonshine/{graphs,assets,runtime,session}.cpp` with internal headers under `include/engine/models/moonshine/`. Encoder/decoder graph topology, partial-RoPE handling, head-dim padding policy and greedy decode loop are ported numerics-identically from `src/runtime/arch/moonshine/`; weight upload goes through `core::BackendWeightStore` (keeping `SharedWeightRegistry` activation), tokenization through the Phase-9 `TokenizerHub` (`load_tokenizer_from_gguf`), cancellation/progress through `RunControl`.
+  - Hparams/tokenizer are read from the `stt.*` / `tokenizer.ggml.*` GGUF metadata keys; `model_specs/moonshine.json` sources block corrected (the pinned packages carry no embedded config/tokenizer sidecars — the previous required file mappings could never have loaded).
+  - **Engine-path gate `moonshine_engine_smoke_test`** (CTest #85): loads the pinned `moonshine-tiny-Q8_0.gguf` through a `ModelRegistry`, runs the four LibriSpeech fixtures offline, gates corpus WER ≤ 10%, asserts ordered `run_batch()` results and that `request_abort()` unwinds `run()`. Measured: **corpus WER 1.449% (1/69 edits) — identical to the arch-side baseline**; transcripts text-identical to the `transcribe.dll` path.
+  - Arch copy `src/runtime/arch/moonshine/` remains buildable and green (§4.4 coexistence requirement); retirement is deferred to its own gated step with an Appendix B ledger row.
+  - Full suite: **96/96 CTest targets green** on `build-cpu-core` (92 passed, 4 clean skips on unpinned weights).
+
+- **Phase 10 Completed: Attention & Conformer Module Fusion & Overlap Resolution (§10.1–§10.4)**:
+  - **Unified SAN-M Encoder Subsystem**: Consolidated `src/framework/modules/speech_encoders/sanm.{cpp,h}` and `src/runtime/sanm/sanm.{cpp,h}` with shared sinusoidal positional encoding table generator (`build_sinusoidal_pe`, `make_sinusoidal_positions`), fused QKV linear projections, optional attention/conv padding masks, and direct depthwise conv lowering with `TRANSCRIBE_CONV_DIRECT_DW` / `TRANSCRIBE_CONV_NO_DIRECT_DW` toggle support. Verified with `fun_asr_nano_sanm_probe`, `fun_asr_nano_assets_test`, and `fun_asr_nano_frontend_probe`.
+  - **Shaw Block-Local Relative Attention**: Implemented `engine::modules::build_shaw_block_attention` in `include/engine/framework/modules/attention/shaw_attention.h` and `src/framework/modules/attention/common_relative_attention.cpp`; delegated `transcribe::granite_conformer::shaw_block_attn` to unified engine module.
+  - **Unified Causal LM Transformer Operations**: Implemented `include/engine/framework/modules/transformers/causal_lm_ops.h` and `src/framework/modules/transformers/causal_lm_ops.cpp`, unifying KV-cache context bucket sizing (`pick_kv_cache_context`), chunked prefill mask trapezoid computation (`fill_prefill_chunk_mask`), and prefill chunk size calculation (`prefill_chunk_size`).
+  - **Overlap Bake-Off & Resolution Certification**: Published `docs/reports/overlap_bakeoff.md` resolving all 6 architectural overlaps under V6 Decision R3 without feature loss.
+  - **Verification**: Full CTest suite 95/95 test targets 100% green (91 passed, 4 clean skips on unpinned weights).
+- **Phase 9 Completed: Unified Mel & Tokenizer Subsystems (§9.1–§9.4)**:
+  - **`engine::audio::MelExtractor` & `FrontendSpec`**: Implemented single-source unified frontend subsystem supporting `MelSpectrogram` (Whisper, Parakeet, GigaAM, NeMo, SenseVoice), `KaldiFbank` (80-dim HTK filterbanks), and `RawPcm` (Moonshine passthrough). Full support for Hann periodic/symmetric, Hamming, and custom windows, Slaney filterbank area normalization, non-zero support span indexing (`fb_begin_`/`fb_end_`), SIMD/threaded STFT, and `PerFeature`, `PerUtterance`, `Global`, and `None` normalization modes.
+  - **Model Spec Schema v2 Frontend Block**: Added `"frontend"` configuration validation to `engine::model_spec::validate_spec` with seamless backward compatibility for schema version 1.
+  - **`engine::text::TokenizerHub`**: Unified tokenization subsystem supporting Unigram, BPE, Byte-Level BPE, Tiktoken raw bytes, SentencePiece, and HuggingFace JSON tokenizers with bidirectional `encode()` and `decode()`, $O(1)$ piece lookup, control token classification, and GPT-2 byte mapping inversion.
+  - **Neural Codec Interface (`IAudioCodec`)**: Added unified `encode()` / `decode()` abstraction across neural codecs with `SharedWeightRegistry` integration.
+  - **Parity & Contract Verification**: Added 3 unit tests (`frontend_contract_test`, `frontend_parity_test`, `tokenizer_parity_test`). Full CTest suite 95/95 test targets 100% green (91 passed, 4 clean skips on unpinned weights).
+- **Phase 8 Completed: Unified Streaming Contracts & Exception Boundary (§8.1–§8.8)**:
+  - **`StreamingSessionBase` Lifecycle Engine**: Implemented 4-state lifecycle machine (`Idle` $\to$ `Active` $\to$ `Finished` / `Failed`, `reset()`), monotonic revision counter, commitment policies (`Auto`, `OnFinalize`, `StablePrefix` with $N$-agreement), and pre-clear validation hooks.
+  - **Unified `RunControl`**: Thread-safe, lockless abort polling (`poll_abort()`, `request_abort()`, `reset_abort()`), and synchronized progress emission throwing `ProgressCanceled`. Integrated into `RuntimeSessionBase` and `IVoiceTaskSession`.
+  - **Unified `StreamChunker`**: PCM sample re-blocking, exact chunk boundary alignment, contiguous start sample cursor tracking, and zero-padded tail flushing. Replaced duplicate implementation in adapter.
+  - **Telemetry Extension**: Added `DecodeTelemetry` structure and wired `decode_telemetry` vector into `TaskResult`.
+  - **Universal C ABI Exception Containment**: Wrapped 100% of exported C API functions in `audiocpp_capi.cpp` (device discovery, model info/capabilities, WAV I/O, artifacts, and all `audiocpp_free_*` functions) in `try { ... } catch (...) { ... }` exception guards.
+  - **Verification**: Added 4 unit tests (`run_control_unit_test`, `stream_chunker_unit_test`, `streaming_session_base_unit_test`, `capi_exception_containment_test`). 92/92 test targets green.
+- **Phase 7 Activated: Process-Wide `SharedWeightRegistry` & `ScopedWeightShareKey` (§7.4)**:
+  Eliminated redundant weight uploads across concurrent sessions with process-wide reference-counted
+  GPU/host weight buffer sharing, dropping per-session overhead from ~3 GB to ~34 MB.
+  Integrated telemetry counters (`hit_count()`, `miss_count()`, `conflict_count()`), wrapped all model
+  load and session creation call sites (`audiocpp_load_model_ex`, CLI, server `runtime.cpp`, workflow runner),
+  and verified via `test_shared_weight_vram`.
+- **Phase 7 Activated: Batched ASR Decode & Pre-Clear Validation in `ArchAdapter` (§7.5)**:
+  Wired native multi-utterance lockstep decoding across all 16 adapter architecture slots via
+  `IOfflineVoiceTaskSession::run_batch` forwarding, preserving batch contracts (mirroring slot 0 in
+  session result, filling per-utterance results). Added C ABI batch entry points `audiocpp_asr_batch` and
+  `audiocpp_free_text_batch`. Added pre-clear validation hooks `stream_validate` and `run_validate` across
+  all adapter architecture entries, preventing pre-clear destruction of existing results upon invalid arguments.
+- **Phase 7 Activated: Unified Family Registry v1 (`family_registry.h` & `family_registry.cpp`) (§7.8)**:
+  Created single-source static catalog mapping 46 canonical voice model families, aliases, GGUF arch identifiers,
+  and specification paths. Verified via `family_registry_unit` in reporting mode.
+- **Phase 7 Ported: Comprehensive Regression Test Suite & Fixtures (§7.1)**:
+  Ported 51 translation units from `transcribe.cpp/tests/` into `tests/transcribe/`, along with 87 golden fixtures
+  across 19 directories, 36 tolerance manifests, and 13 GGUF binary test fixtures.
 - **Universal `audiocpp` C ABI Subsystem & Shared Library (`audiocpp.dll` / `libaudiocpp.so`)**:
-  Exposes 46 exported C APIs covering all 14 audio tasks (TTS, ASR, VAD, Diarization,
+  Exposes 48 exported C APIs covering all 14 audio tasks (TTS, ASR, VAD, Diarization,
   Separation, Alignment, Voice Conversion, Denoise, Super-Resolution) with opaque handles,
   strict C++ exception containment, and hidden internal GGML symbols.
 - **Universal Multi-Task Progress Reporting & Synchronous Cancellation**:
   Added `ProgressInfo`, `ProgressCallback`, and `ProgressCanceled` in `session.h` and
   `session_base.cpp`, wired directly into `audiocpp_set_progress_callback(model, cb, user_data)`.
-- **High-Throughput Batched Offline ASR Decoders**:
-  Implemented native multi-utterance lockstep decoding across all 5 major ASR model families:
-  `Qwen3-ASR` (`DecodeGraphBatched`), `Voxtral Realtime` (parallel frontends), `Citrinet ASR`
-  (batched CTC graph), `VibeVoice ASR` (`VibeVoiceDecoderCachedStepGraphBatched`), and
-  `Higgs Audio STT` (`DecodeGraphBatched`).
-- **Process-Wide `SharedWeightRegistry` & `ScopedWeightShareKey`**:
-  Eliminated redundant weight uploads across concurrent sessions with process-wide reference-counted
-  GPU/host weight buffer sharing, dropping per-session overhead from ~3 GB to ~34 MB.
 - **Phase 3 Native Long-Form VAD Chunk Planning & Re-stitching (`vad::plan`)**:
   Greedy gap merging, boundary padding, timestamp offset re-stitching, transactional rollback,
   and standalone `transcribe_vad` C ABI.
@@ -36,7 +80,7 @@ Dates are the work-session dates recorded in the plan.
 - **Phase 2 Toolchain Modernization & Build Provenance**:
   Integrated `ccache` compiler launcher auto-detection into Windows build scripts, configured
   3-outlet build provenance (`transcribe-build-info`, `audiocpp_build_info`, Windows `.rc` resources).
-- **Whisper & Moonshine Engine Model Spec Catalogs**:
+- **Whisper & Moonshine Engine Model Spec Catalogs (Catalog only — no engine loader yet; Phase 11)**:
   Added comprehensive schema-v1 catalog specifications for `model_specs/whisper.json`
   (16 packages covering tiny, base, small, medium, large-v3, large-v3-turbo, and English-only variants),
   `model_specs/moonshine.json` (6 packages: tiny, base, small), and
@@ -48,6 +92,14 @@ Dates are the work-session dates recorded in the plan.
 
 ### Fixed
 
+- **Phase 7 Defect D1 Remediation: GGUF Sniff Architecture Precedence Collision**:
+  In `src/runtime/transcribe.cpp`, routed model architecture sniffing to `transcribe::adapter_find_arch(family.c_str())`,
+  ensuring adapter architecture table lookup takes precedence over engine fallbacks for overlapping architectures
+  (`qwen3_asr`, `voxtral_realtime`, `moss`).
+- **Phase 7 Defect D2 Remediation: Pre-Clear Result Destruction on Invalid Parameters**:
+  Added `stream_validate` and `run_validate` hooks across all 16 `adapter_archs` entries in
+  `src/runtime/transcribe-arch-adapter.cpp`, guaranteeing that invalid session parameters or unrecognized
+  extensions fail before clearing existing transcription or diarization results.
 - **`AUDIOCPP_PYTHON` never worked on Windows: `cmd.exe` mangled every quoted
   program path.** `ModelInstaller` builds helper commands as
   `"<python>" -u "<script>" ... > "<log>" 2>&1` and runs them through
