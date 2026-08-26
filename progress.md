@@ -45,7 +45,7 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | **End-to-end ASR streaming text** | **Done — streamed 4.35% == offline 4.35%, divergence 0** | **100%** |
 | Test suite status | **103/103 total (99 passed, 4 clean skips on unpinned weights) 100% green** | **100%** |
 | **Completed increment** | **Upstream `c79e588` (0 behind), ggml 0.22.0 (CPU+CUDA certified), Phase 11 W1a + W1b + W2a** | **DONE** |
-| **Next increment** | **Phase 10.5, family 3 of 5: `sortformer_diar`** — the largest of the five: port the arch's chunked diarization scheduler (AOSC speaker cache + FIFO + preset operating points) into the engine package, which is offline-only today; then `sense_asr`, `fun_asr_nano`; then 11a | Ready |
+| **Next increment** | **Phase 10.5, family 3 of 5: `sortformer_diar`, step 2** — port the arch's chunked diarization scheduler (AOSC speaker cache + FIFO + preset operating points, ~475 LOC of host logic plus a pre-encode/stream-infer graph split) into the engine package, which is offline-only today, and answer for v2-package support; step 1 (first registered gate + cancellation) landed in `65ab43c`. Then `sense_asr`, `fun_asr_nano`; then 11a | Ready |
 
 ## DONE this session (plan R12 records all of it)
 
