@@ -267,8 +267,14 @@ Every agent working on this repository must strictly adhere to these 7 protocol 
 
 ## 4. Current State & Handoff Summary for AI Agents
 
-- **Current Timestamp**: 2026-08-26 (Upstream reconciliation to `c79e588` — **0 behind** — on top of the 2026-08-25 Phase 11 W1a close)
+- **Current Timestamp**: 2026-08-26 (Upstream reconciliation to `c79e588` — **0 behind**; dual-parentage doctrine recorded; ggml bumped to `36da5713` / v0.22.0 — on top of the 2026-08-25 Phase 11 W1a close)
 - **Last Completed Increments**:
+  - **Dual Parentage recorded + ggml bumped to `36da5713` (v0.22.0)**:
+    - **`speech.cpp` is equally a child of `audio.cpp` and of `transcribe.cpp`** — forking audio.cpp was a convenience, not precedence. Recorded in `AGENTS.md` § "Dual Parentage" and **Operating Rule 7**; the Master Key and Target Repository lines above were corrected. The doctrine had eroded because only audio.cpp has an `upstream` remote (so only it yields a "N behind" number), and the concrete cost was treating transcribe.cpp's ggml bump as a curiosity rather than as our own dependency floor moving.
+    - **`scripts/sync-deps.sh`** — read-only drift report over all three sources (audio.cpp remote, transcribe.cpp sibling, ggml vs upstream HEAD **and** vs parent transcribe.cpp's pin). `--fetch` fast-forwards siblings. Never pulls/merges/re-vendors speech.cpp. **Run before any release state.**
+    - **ggml `8c63e709` (0.20.2) → `36da5713` (0.22.0)**, all 7 patches applying. **0005 rebased** (upstream rewrote `concat_any` into row-wise memcpy — it converged on most of that fork delta; byte math moved to block-aware `ggml_row_size`, fixing a latent quantized over-count in our own patch). **0007 regenerated** — the old file was hand-written, never round-trip verified, and `git apply`-corrupt (21-line declared hunk over a 35-line body, no trailing newline); its content was in the tree, so **the delta was one sync from silent loss**.
+    - API drift purely additive; **no engine source changes required**. Build 444 targets clean; **CTest 100/100** unchanged from baseline; `lint_teardown` green at `src/runtime`; re-sync reports **`0 path(s) changed`** — reproducibility certified.
+    - **Not covered**: CUDA/HIP/Metal/Vulkan are not built in `cpu-core` — patch 0007's CUDA entry points and the 0.22.0 CUDA kernel churn need an `sp_cuda` run.
   - **Upstream Reconciliation (`0xShug0/audio.cpp:main@c79e588`) — 63 ahead, 0 behind**:
     - Root-caused the recurring "6 commits behind": the prior sync (`9b34fd2`) content-copied instead of merging, so the merge-base stayed at `62735ea` and git re-reported already-applied commits. **2 of the 6 were phantoms** (`288a271` `--list-devices`, `d25ffac` chunk metadata — both verified present in the tree by symbol, not by subject line).
     - Cherry-picked `4ec485d` supertonic voice preset (→ `90659b1`) and `d03b957` IndexTTS2 HIP F16 KV/conv default (→ `3682698`); both applied clean with upstream authorship preserved.

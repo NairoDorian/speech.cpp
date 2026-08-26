@@ -1,6 +1,6 @@
 # Progress — Unified_Audio.cpp (speech.cpp ggml fork) merge & improve
 
-Status snapshot: **Upstream audio.cpp main fully reconciled at `c79e588` — 63 ahead, 0 behind (the recurring "6 behind" was a lagging merge-base, now fixed). Phase 1 Allocator Hardening applied. Phase 2 Toolchain Modernization & Build Provenance landed. Phase 3 Native Long-Form VAD Chunk Planning & Public C ABI integrated. Phase 4 Process-Wide SharedWeightRegistry, Sortformer v2 Diarization package, Batched Offline ASR Decoders (Qwen3-ASR, Voxtral Realtime, Citrinet, VibeVoice, Higgs Audio), and universal audiocpp C ABI subsystem + progress callbacks fully implemented and verified. All 100 CPU core tests passing 100% green. Master architectural blueprint established in [FUSION_ROADMAP_PLAN.md](FUSION_ROADMAP_PLAN.md).** Date: 2026-08-26
+Status snapshot: **Upstream audio.cpp main fully reconciled at `c79e588` — 63 ahead, 0 behind (the recurring "6 behind" was a lagging merge-base, now fixed). Phase 1 Allocator Hardening applied. Phase 2 Toolchain Modernization & Build Provenance landed. Phase 3 Native Long-Form VAD Chunk Planning & Public C ABI integrated. Phase 4 Process-Wide SharedWeightRegistry, Sortformer v2 Diarization package, Batched Offline ASR Decoders (Qwen3-ASR, Voxtral Realtime, Citrinet, VibeVoice, Higgs Audio), and universal audiocpp C ABI subsystem + progress callbacks fully implemented and verified. **ggml bumped to `36da5713` (v0.22.0)** to match parent transcribe.cpp, with the 7-patch stack rebased and reproducibility certified. All 100 CPU core tests passing 100% green on the new ggml. Master architectural blueprint established in [FUSION_ROADMAP_PLAN.md](FUSION_ROADMAP_PLAN.md).** Date: 2026-08-26
 
 ## Repo layout (important, non-obvious)
 `Unified_Audio.cpp/` is a **plain container directory with no git repo of its
@@ -9,8 +9,8 @@ own**. It holds five independent repositories (three primary, two hardened refer
 | Folder | Role |
 |---|---|
 | `speech.cpp/` | the active development repo (the ggml/audio.cpp fork). **All merge work, and this log, live here.** Remote: `NairoDorian/speech.cpp`, upstream `0xShug0/audio.cpp`. |
-| `audio.cpp/` | upstream reference — read from, not developed in (pulled to `c79e588`, 2026-08-26) |
-| `transcribe.cpp/` | merge source — read from, not developed in (pulled to `2102bca`, 2026-08-26 — carries a ggml bump to upstream master `36da5713` / v0.22.0). |
+| `audio.cpp/` | **parent** — read from, never committed to (pulled to `c79e588`, 2026-08-26). Has a git `upstream` remote here, so it is the only source that yields a merge-base. |
+| `transcribe.cpp/` | **parent, equally authoritative** — read from, never committed to (pulled to `2102bca`, 2026-08-26 — carried the ggml bump to `36da5713` / v0.22.0 that we then adopted). No remote here, so its drift is invisible to git and must be triaged by hand — that is a tooling limit, **not** a hierarchy. See AGENTS.md "Dual Parentage". |
 | `audio_cunba/` (pulled to `8cf5136`) & `transcribe_cunba/` (pulled to `2345350`) | hardened reference trees containing allocator fixes, VAD chunk planning, shared weights, batched decoders, C ABI, and build acceleration. |
 
 Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
@@ -21,7 +21,8 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 ## Overall progress (toward "Unified_Audio transcribes on CPU")
 | Area | Status | % |
 |---|---|---|
-| Merge: ggml convergence (pin 8c63e709 + patches 0001–0006), CPU+CUDA certified | Done (prior sessions) | 100% |
+| Dependency: ggml pin `36da5713` (v0.22.0) + patches 0001–0007, matched to parent transcribe.cpp | Done 2026-08-26 — suite unchanged, re-sync reproduces exactly (0 paths) | 100% |
+| Doctrine: dual parentage (transcribe.cpp is a co-parent) + `scripts/sync-deps.sh` routine | Done 2026-08-26 (AGENTS.md, tracker Rule 7) | 100% |
 | Merge: Upstream audio.cpp main synchronization (`c79e588`) | Done — 0 behind, merge-base reconciled, all 6 dispositioned | 100% |
 | Memory: Phase 1 Allocator Hardening (16MB cap, WavLM gallocr, Qwen3 runaway, DFN2) | Done (certified in engine) | 100% |
 | Toolchain: Phase 2 Modernization & Build Provenance (ccache, transcribe-build-info, version.rc) | Done (certified in build scripts & DLL) | 100% |
@@ -82,7 +83,61 @@ documented skips), unchanged from baseline. Caveat recorded honestly: at
 neither fix is runtime-exercised by this suite, and the IndexTTS2 change is
 HIP-only (needs an AMD GPU to observe).
 
-### 1. Phase 11 Wave W1a — Native Engine Moonshine (offline), closed
+
+### 1. Dual parentage recorded + ggml bumped to 0.22.0 (2026-08-26)
+
+**Doctrine first.** `speech.cpp` is **equally a child of `audio.cpp` and of
+`transcribe.cpp`**. Forking audio.cpp was a convenience — it was the larger
+tree to start from — not a statement of precedence. The distinction had been
+quietly eroding because only audio.cpp has a git `upstream` remote, so only it
+yields a merge-base and an "N behind" number; transcribe.cpp drift is invisible
+to git here, and the docs reinforced it by calling transcribe.cpp a "merge
+source" / "read-only reference tree". The concrete failure: transcribe.cpp
+bumped ggml to `36da5713` (v0.22.0) while we sat on `8c63e709` (0.20.2), and
+that was treated as a curiosity to note rather than as **our own dependency
+floor moving**. Now recorded in `AGENTS.md` § "Dual Parentage" and tracker
+**Operating Rule 7**.
+
+**Routine.** `scripts/sync-deps.sh` reports drift across all three sources —
+audio.cpp via the `upstream` remote, transcribe.cpp via the sibling checkout,
+ggml compared both to upstream HEAD **and to parent transcribe.cpp's pin**.
+`--fetch` fast-forwards the siblings. It never pulls/merges/re-vendors
+speech.cpp; it prints the remediation command per stale item. Run it regularly
+and **always before a release state**.
+
+**The bump.** `8c63e709` (0.20.2) → `36da5713` (0.22.0). All 7 tracked patches
+apply; 88 paths changed (the big deletion is upstream splitting
+`ggml-metal.metal`, 11,820 lines, into `ggml-metal/kernels/` — restructuring,
+not loss). Two patches needed real work:
+
+- **0005 concat fast paths — rebased.** Upstream **rewrote**
+  `ggml_compute_forward_concat_any` into a row-wise `memcpy` loop, i.e. it has
+  *converged on most of this fork delta* (which existed to replace 0.20.2's
+  scalar element walk). The `len` local the patch's byte math used is gone;
+  byte counts now go through `ggml_row_size`, which is block-aware — this also
+  removes a latent over-count for quantized types in our own delta.
+  `concat_f32` is untouched upstream and keeps its full win. Remaining
+  `concat_any` win is memcpy *count* only; flagged to benchmark before the
+  next bump.
+- **0007 CUDA trim-pools/clear-graph — regenerated.** The old file was
+  hand-written and had **never been round-trip verified**: a hunk declared a
+  21-line new side for a 35-line body, and there was no trailing newline, so
+  `git apply` called it corrupt. Its content was in the vendored tree anyway —
+  **the delta was one sync away from silent loss**, precisely what
+  `patches/ggml/` exists to prevent. It is also the only patch whose targets
+  carry CRLF blobs upstream, which is why it never got a clean run.
+
+API drift is **purely additive** (`ggml_clamp_inplace`, `ggml_rope_set_offset`,
+`ggml_backend_cuda_allreduce_tensor`); **no engine source changes were needed.**
+
+Verified: clean build (444 targets), **CTest 100/100** unchanged from the
+0.20.2 baseline — `moonshine_engine_smoke_test` and `ggml_fork_ops_cpu_test`
+both green — `lint_teardown` green at its `src/runtime` scope, and a re-sync
+reports **`0 path(s) changed`**: `sync + patches == committed tree`, exactly.
+**Not covered:** CUDA/HIP/Metal/Vulkan are not built in `cpu-core`, so patch
+0007's CUDA entry points and the 0.22.0 CUDA kernel churn are compile-
+unverified pending an `sp_cuda` run.
+### 2. Phase 11 Wave W1a — Native Engine Moonshine (offline), closed
 First family migration of the arch layer onto the engine framework
 (FUSION_ROADMAP_PLAN §8, §4.4 steps 5–7). New package `src/models/moonshine/`
 (`graphs/assets/runtime/session` + internal headers in
@@ -104,7 +159,7 @@ measured **1/69 edits == arch baseline**), ordered `run_batch`,
 `request_abort()` unwinds `run()`. Arch copy untouched and still green.
 Suite: 96/96 green.
 
-### 2. Streaming ASR text validation — NEXT #1, closed
+### 3. Streaming ASR text validation — NEXT #1, closed
 `tests/asr_stream_text_wer_test.cpp` + CTest gate `asr_stream_text_wer_test`:
 streams the four LibriSpeech fixtures into **moonshine-streaming-tiny Q8_0**
 (48 MB, MIT, `handy-computer/moonshine-streaming-tiny-gguf` — the exact model
@@ -122,7 +177,7 @@ became a pinned-model table (both gate models; `--only streaming` selects);
 shared scoring lives in `tests/asr_test_text.h`. Report updated:
 `docs/reports/asr_e2e_wer_gate.md`.
 
-### 3. The three "environment/asset" failures — NEXT #2, all fixed, none was assets
+### 4. The three "environment/asset" failures — NEXT #2, all fixed, none was assets
 - `model_spec_system_test` + `fun_asr_nano_assets_test`: model-spec
   resolution walks UP from the cwd, so they only ever passed from build
   trees inside the repo. Fixed with `WORKING_DIRECTORY` registrations.
@@ -143,19 +198,19 @@ shared scoring lives in `tests/asr_test_text.h`. Report updated:
      `~ModelInstaller` (first D7-teardown application to app-layer code).
      Test now passes in 2.7 s.
 
-### 4. `asr_standalone_gguf_test` — NEXT #3, closed by correction
+### 5. `asr_standalone_gguf_test` — NEXT #3, closed by correction
 Filed for three sessions as "needs citrinet+hviske GGUFs". It does not: the
 fixtures are synthetic (dummy safetensors → GGUF), and the failure was the
 same cwd spec-resolution defect. `WORKING_DIRECTORY` registration fixed it;
 the old download-and-pin recommendation is withdrawn. (A real citrinet/hviske
 WER gate would be new, optional work — the plan's §5 Phase-5 corpus item.)
 
-### 5. `scaled_dot_product_attention_test` skips without CUDA
+### 6. `scaled_dot_product_attention_test` skips without CUDA
 It exists to pin the CUDA SDPA lowerings (R10) and hard-required a CUDA
 device, failing CPU-only builds. Now probes `list_backend_devices()` and
 skips (exit 2, `SKIP_RETURN_CODE 2`); stays a hard gate on CUDA builds.
 
-### 6. Performance pass on transcribe.cpp runtime families
+### 7. Performance pass on transcribe.cpp runtime families
 Closed the last depthwise-1D-conv im2col sites in the runtime and a couple
 of decode/frontend hotspots, all with env-override kill switches and
 numerical parity:
