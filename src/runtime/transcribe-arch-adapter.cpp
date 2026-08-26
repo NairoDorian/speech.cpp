@@ -1091,9 +1091,9 @@ bool adapter_accepts_ext_kind_impl(const struct transcribe_model * model,
 // adapter is family-agnostic at the dispatch surface — load() recovers the
 // family from loader.arch() and routes through the ModelRegistry. The table is
 // consulted by adapter_find_arch() only AFTER the builtin transcribe.cpp table
-// so the overlapping names still carried there (voxtral_realtime, moss) keep
-// their transcribe.cpp handlers until Phase 10.5 retires them; qwen3_asr's
-// was retired first, so that name resolves here alone.
+// so the one overlapping name still carried there (moss) keeps its
+// transcribe.cpp handler until Phase 10.5 retires it; qwen3_asr and
+// voxtral_realtime were retired first, so those names resolve here alone.
 static const Arch adapter_archs[] = {
     {"silero_vad",          &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
      &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,

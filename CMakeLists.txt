@@ -1666,6 +1666,7 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
         src/runtime/transcribe-bin-loader.cpp
         src/runtime/transcribe-debug.cpp
         src/runtime/transcribe-env.cpp
+        src/runtime/transcribe-family-ext.cpp
         src/runtime/transcribe-flash-policy.cpp
         src/runtime/transcribe-kaldi-fbank.cpp
         src/runtime/transcribe-load-common.cpp

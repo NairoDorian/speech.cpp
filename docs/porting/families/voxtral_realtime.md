@@ -1,5 +1,16 @@
 # Voxtral Realtime
 
+> **speech.cpp status (Phase 10.5, 2026-08-26):** the transcribe.cpp arch this
+> document describes (`src/runtime/arch/voxtral_realtime/`, 4,996 LOC) has been
+> retired; `src/models/voxtral_realtime/` is the single implementation and
+> carries the arch's distinguishing features - the typed stream extension's
+> `num_delay_tokens` and `min_decode_interval_ms` (now request options, still
+> reachable through `transcribe/voxtral_realtime.h` via the ArchAdapter) and
+> cooperative cancellation. The arch tree remains readable in the parent repo
+> (transcribe.cpp @ `2102bca`, `src/arch/voxtral_realtime/`). Gates:
+> `voxtral_realtime_engine_smoke_test`, `voxtral_realtime_delay_test`,
+> `voxtral_realtime_ext_abi_test`.
+
 Status: shipped (Stage 8, 2026-06-06)
 
 Release WER (full LibriSpeech test-clean, 2620 utts, offline b8, L40S): BF16

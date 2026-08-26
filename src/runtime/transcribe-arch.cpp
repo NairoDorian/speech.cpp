@@ -33,10 +33,6 @@ namespace voxtral {
 extern const Arch arch;
 }
 
-namespace voxtral_realtime {
-extern const Arch arch;
-}
-
 namespace canary_qwen {
 extern const Arch arch;
 }
@@ -88,7 +84,7 @@ const Arch * find_arch(const char * name) {
 
     static const Arch * const k_archs[] = {
         &parakeet::arch,         &cohere::arch,      &canary::arch,     &voxtral::arch,
-        &voxtral_realtime::arch, &canary_qwen::arch, &whisper::arch,    &moonshine::arch, &moonshine_streaming::arch,
+        &canary_qwen::arch,      &whisper::arch,     &moonshine::arch,  &moonshine_streaming::arch,
         &sensevoice::arch,       &funasr_nano::arch, &gigaam::arch,     &granite::arch,   &granite_nar::arch,
         &medasr::arch,           &moss::arch,        &sortformer::arch,
     };
@@ -106,11 +102,12 @@ const Arch * find_arch(const char * name) {
 
     // Phase 0.H: consult the ArchAdapter table (audio.cpp framework families)
     // AFTER the builtin transcribe.cpp families so a name collision keeps the
-    // builtin handler (e.g. moss, voxtral_realtime) until Phase 10.5 retires
-    // it family by family. qwen3_asr's builtin went first (2026-08-26): the
-    // name now resolves only through the adapter, and audio.cpp GGUFs never
-    // reached this table anyway (their general.architecture is "audiocpp";
-    // transcribe_model_load_file routes those to the framework registry).
+    // builtin handler (moss is the last one left) until Phase 10.5 retires it
+    // family by family. qwen3_asr and voxtral_realtime went first
+    // (2026-08-26): those names now resolve only through the adapter, and
+    // audio.cpp GGUFs never reached this table anyway (their
+    // general.architecture is "audiocpp"; transcribe_model_load_file routes
+    // those to the framework registry).
     if (const Arch * a = adapter_find_arch(name)) {
         return a;
     }
