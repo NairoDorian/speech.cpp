@@ -87,10 +87,14 @@ Every agent working on this repository must strictly adhere to these 7 protocol 
 | **Phase 7** | **Safety net, ground truth & activation** | **`[x] DONE`** | **88 CTest targets 100% green, D1 & D2 fixed** |
 | **Phase 8** | **Contract convergence & exception boundary** | **`[x] DONE`** | **`StreamingSessionBase`, `RunControl`, ABI guards (92 targets)** |
 | **Phase 9** | **Unified Mel & Tokenizer subsystems** | **`[x] DONE`** | **`MelExtractor`, `TokenizerHub`, parity tests (95 targets)** |
-| **Phase 10** | **Attention & Conformer module fusion** | **`[x] DONE`** | **Unified `sanm`, `shaw_attn`, `causal_lm_ops`, bake-off certified** |
-| **Phase 11** | Architectural family migration (Waves W1–W6) | `[~] IN PROGRESS — W1 complete, W2a DONE` | 18 families migrated to unified engine |
-| **Phase 12** | Unified `speech.h` C ABI & language bindings | `[ ] PENDING` | Single unified DLL, Python/C#/Node bindings |
-| **Phase 13** | End-to-end multi-stage pipeline composition | `[ ] PENDING` | VAD + Diarization + ASR + Alignment graphs |
+| **Phase 10** | **Attention & Conformer module fusion** | **`[x] DONE`** (modules) · **`[ ] VERDICTS ONLY`** (feature-merges + deletions — see 10.5) | **Unified `sanm`, `shaw_attn`, `causal_lm_ops`, bake-off certified; 0 of 5 loser-feature merges executed** |
+| **Phase 10.5** | **Execute the Phase-10 verdicts** — 5 feature-merges, 5 arch deletions, ledger rows *(roadmap v6.0)* | `[ ] NEXT` | B11–B15 revert commits filled; no shadowed GGUF arch |
+| **Phase 11a** | **ASR runtime layer** — `EncDecKVCache`, decode drivers, `AsrResult`/`AsrLimits`, long-form over `audio/chunking`; re-base W1a/W1b/W2a; fold Whisper onto `WhisperEmbeddingModule`; `.bin` as `TensorSource`; delete `transcribe-vad*` *(v6.0)* | `[ ] PENDING` | 3 engine gates unchanged on the shared layer; 0 private KV caches; W2a truncation surfaced (L11) |
+| **Phase 12** | **`speech.h` thin over the engine** — pulled forward; `audiocpp.h` frozen → shim *(v6.0)* | `[ ] PENDING` | `abi_compat_test`; one artifact |
+| **Phase 11b** | Remaining 9 families as **thin packages**, each deleting its arch dir in-wave | `[~] 3 of 18 DONE (W1a, W1b, W2a at exact arch parity)` | per-family golden + WER parity |
+| **Phase 11c** | **Delete `src/runtime/` in full** *(v6.0 — reverses v5's "keep the dispatcher")* | `[ ] PENDING` | `ls src/runtime` absent; `lint_teardown` over `src/` → 0 |
+| **Phase 13** | Bindings retarget — transcribe's 6 existing bindings → one generated IR over `speech.h` | `[ ] PENDING` | `generate.py --check` green ×6 |
+| **Track M** | Methodology parity for audio.cpp's own families — goldens + tolerances + `validate.py` per phase quota *(v6.0)* | `[ ] CONTINUOUS` | families under `validate.py` count rises every phase |
 | **Phase 14** | Cleanup, benchmarking, licensing & 1.0 release | `[ ] PENDING` | Deletion ledger cleared, zero deprecations |
 
 ---
@@ -319,12 +323,9 @@ Every agent working on this repository must strictly adhere to these 7 protocol 
   - **Phase 11 Wave W1a — Native Engine Moonshine (offline)** — `100% DONE`
     - Package `src/models/moonshine/` + internal headers in `include/engine/models/moonshine/`.
     - Gate `moonshine_engine_smoke_test`: engine-path corpus WER **1.449% (1/69 edits) == arch baseline**.
-- **IMMEDIATE NEXT TASK FOR AGENT**:
-  - **Three families are now native and all three match their arch baselines exactly** — W1a moonshine (1/69), W1b moonshine_streaming (3/69, divergence 0), W2a whisper (3/69). Options, in rough value order:
-  - **(a) Execute Phase 11 Wave W2b** (finish Whisper): temperature-fallback ladder + DecodeTelemetry, timestamps, long-form seek continuation, language detection for multilingual variants, batched decode, and a static-topology step graph. The last one is also the RTF fix — W2a rebuilds the step graph per token (RTF 0.155 vs the arch's 0.047); that is dispatch overhead, not numerics.
-  - **(b) Wave W1 retirement step** (gated, needs user review): delete `src/runtime/arch/{moonshine,moonshine_streaming}/` with Appendix B rows B16a/B16b. **Check first** whether `asr_e2e_wer_test` / `asr_stream_text_wer_test` still have a subject — those gates drive the ARCH path through the C ABI, so retiring the arch directories moves or removes them. Whisper's arch must stay until W2b lands.
-  - **(c) Wave W3** (`gigaam`, `medasr`, `cohere`) — gigaam retires the third private mel implementation.
-  - **Carry these two lessons into every remaining family port:**
-    - `MelExtractor` writes **mel-major**; a ggml graph input declared `[n_mels, n_frames]` needs **frame-major**. Transpose on upload. A transposed mel does not crash and does not look wrong in summary statistics — it produces confident, fluent, unrelated text at ~94% WER, and only an end-to-end numeric gate catches it.
-    - `StreamingSessionBase` guarantees **append-only** committed text, NOT that `committed_text()` stays a live prefix of `full_text()`.
+- **IMMEDIATE NEXT TASK FOR AGENT** *(roadmap v6.0, 2026-08-26)*:
+  - **Read first**: `docs/reports/fusion_review_2026-08-26.md` (why the plan changed) and `FUSION_ROADMAP_PLAN.md` §0.4, §5.6–5.9, Phases 10.5 / 11a / 12 / 11b / 11c.
+  - **Execute Phase 10.5**: for each of `qwen3_asr` (speculative drafts + `qwen3_asr_bpe_parity`), `voxtral_realtime` (cache-aware streaming windows), `sortformer_diar` (streaming presets + typed ext), `sense_asr` (verify goldens), `fun_asr_nano` (WER gate at the arch baseline) — merge the arch's distinguishing feature into the engine winner, prove it on `tests/golden/<family>/`, then delete `src/runtime/arch/<family>/` as its own commit with the Appendix B row (B11–B15) filled in. These are the **first deletions in the project**; the ledger must work here before 11c.
+  - **Rules that bind from today** (v6.0): no new entry points in `capi/audiocpp.h` (F14); no family port before Phase 11a exists (F13) — the per-family procedure now forbids private KV caches, decode loops, loaders and mels; every ASR result must carry `truncated` honestly (L11); `scripts/sync-deps.sh` at the phase boundary (L13).
+  - **Known defect to fix in 11a.3, not before**: the W2a Whisper package silently truncates audio > 30 s (`WhisperSession::run` drops `transcription.truncated`; `TaskResult` has no field for it). It is recorded, gated by A21, and fixed when `AsrLimits` lands — not patched locally.
   - Then run full verification, update all tracking docs, and pause for user review.

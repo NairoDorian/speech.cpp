@@ -430,6 +430,23 @@ failures was actually about assets.
    - Added dedicated unit test suites `tests/unittests/vad_plan_unit.cpp` and `tests/unittests/vad_merge_unit.cpp`.
    - CPU test suite stands at **53/53 tests passing (100% green in ~22s)**.
 
+### R14. Code-grounded re-review; roadmap v6.0; V6 decisions superseded (2026-08-26)
+
+Both parents were re-read from their code (`audio.cpp@c79e588`, `transcribe.cpp@2102bca`) before re-reading the plans; the review is `docs/reports/fusion_review_2026-08-26.md` and it produced `FUSION_ROADMAP_PLAN.md` **v6.0**, which is now the authoritative forward plan.
+
+**Findings that changed the plan** (evidence in the review):
+
+- **Phase 10's central deliverable was never executed.** The bake-off verdicts exist; none of the five "merge the loser's features into the winner" tasks and none of the deletions do (`grep -c 'spec_k_drafts\|speculative' src/models/qwen3_asr/*.cpp` → 0, etc.). Zero Appendix B deletions have landed. → roadmap **Phase 10.5**, next.
+- **The engine has no ASR runtime layer**, so each migrated family re-created a KV cache, a decode loop, and (for Whisper) an encoder the framework already ships and a private `.bin` loader. Five arch KV caches are field-identical; 15 of 18 arch `model.cpp` hand-roll argmax decode. → roadmap **Phase 11a**, §5.6.
+- **`capi/audiocpp.h` is a third C ABI** (55 fns, no `struct_size`, default ON) while `transcribe.h` (98 fns, size-aware) is OFF. → **Phase 12 pulled forward**; `audiocpp.h` frozen.
+- **`transcribe-vad*` is a verbatim port of `audio/chunking.cpp`** (its own comment says so). → deleted, §5.7.
+- **The engine lacks transcribe's input-limits contract**; W2a truncates > 30 s silently. → law **L11**, §4.2 row, A21.
+- **`src/runtime/` is deleted in full** at the end (v5 kept the dispatcher). → **Phase 11c**.
+
+**Decisions superseded** (never reconciled after v5 adopted the engine-spine architecture): **D2, D3, D4, D14, D15, D18, D19, D23** — see roadmap Appendix F for what replaces each. D16's pin is now `36da5713` (ggml 0.22.0, R13/2026-08-26 sync). All other decisions and R1–R13 stand.
+
+**Doctrine added:** L11 never truncate silently; L12 measure the real flow (`PASSOVER.md` methodology, `cleanup_gpu()` off-limits, kill switches); L13 dual parentage + `scripts/sync-deps.sh` at every phase boundary.
+
 ## 0. Vision Statement
 
 **Goal:** Merge `transcribe.cpp` fully into `audio.cpp` (via the `speech.cpp`

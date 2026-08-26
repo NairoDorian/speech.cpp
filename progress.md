@@ -45,7 +45,7 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | **End-to-end ASR streaming text** | **Done — streamed 4.35% == offline 4.35%, divergence 0** | **100%** |
 | Test suite status | **103/103 total (99 passed, 4 clean skips on unpinned weights) 100% green** | **100%** |
 | **Completed increment** | **Upstream `c79e588` (0 behind), ggml 0.22.0 (CPU+CUDA certified), Phase 11 W1a + W1b + W2a** | **DONE** |
-| **Next increment** | **Phase 11 Wave W2b**: temperature-fallback ladder + DecodeTelemetry, timestamps, long-form seek, language detection, batched decode | Ready |
+| **Next increment** | **Roadmap v6.0 Phase 10.5** — execute the five Phase-10 verdicts (feature-merge, then the first deletions in the project); then 11a (ASR runtime layer) | Ready |
 
 ## DONE this session (plan R12 records all of it)
 
@@ -249,7 +249,39 @@ Suite: **103/103 green**. Arch copy untouched (§4.4 coexistence).
 W2b remains: temperature-fallback ladder + DecodeTelemetry, timestamps,
 long-form seek continuation, language detection for multilingual variants,
 batched decode, and the static-topology step graph.
-### 4. Phase 11 Wave W1a — Native Engine Moonshine (offline), closed
+
+### 4. Full fusion review from the parents' code → roadmap v6.0 (2026-08-26)
+
+On request, the merge was reconsidered from scratch: both parents re-read from
+code (`audio.cpp@c79e588`, `transcribe.cpp@2102bca`) *before* re-reading the
+plans, an independent architecture formed, then compared. Deliverables:
+`docs/reports/fusion_review_2026-08-26.md` (the review, every number with its
+command), `FUSION_ROADMAP_PLAN.md` **v6.0** (the updated authoritative plan),
+V6 **R14** (superseded decisions), tracker phase table + next task.
+
+**The v5 architecture survives.** Engine as the spine, `speech.h` with
+transcribe's `struct_size`/ext-kind/exception discipline, bindings as a
+retarget of transcribe's six, methodology for every family, migration
+invariant, ledger — all confirmed from the code. What changed:
+
+| # | Finding (measured) | Plan change |
+|---|---|---|
+| 1 | **Phase 10's feature-merges were never executed** — 0 refs to spec-decode in `models/qwen3_asr`, 0 cache-aware in `voxtral_realtime`, 0 presets in `sortformer_diar`; **zero deletions in the whole project** | **Phase 10.5, next**: 5 merges, 5 deletions, first ledger rows |
+| 2 | **No ASR runtime layer** — 5 arch KV caches field-identical + 3 engine copies (mine); 15/18 arch `model.cpp` hand-roll argmax; W2a re-implemented `WhisperEmbeddingModule` and wrote a private `.bin` parser | **Phase 11a**: `EncDecKVCache`, decode drivers, `AsrResult`/`AsrLimits`; re-base the 3 ports; A24 dedup lint |
+| 3 | **`capi/audiocpp.h` is a third C ABI** — 55 fns, **0 `struct_size`**, default ON; `transcribe.h` (98 fns) OFF; no app consumes either | **Phase 12 pulled forward**; `audiocpp.h` frozen (F14) |
+| 4 | **`transcribe-vad*` is a verbatim port of `audio/chunking.cpp`** (its own comment) | delete (§5.7) |
+| 5 | **Engine has no input-limits contract**; W2a silently truncates > 30 s (I wrote that) | law **L11**, §4.2 row, A21; fixed in 11a.3 |
+| 6 | `GraphExecutor` is single-backend; no `BackendPlan`-style CPU fallback | §4.2 row; 11a.6 scheduler path |
+| 7 | v5 kept the transcribe dispatcher under `src/runtime/` forever | **reversed**: Phase 11c deletes `src/runtime/` in full (95 kLOC) |
+| 8 | "audio.cpp learns from transcribe" scheduled last (14.3) | **Track M**: a per-phase quota |
+| 9 | V6 D2/D3/D4/D14/D15/D18/D19/D23 contradict the built architecture | roadmap Appendix F: superseded |
+
+Honest accounting of this session's own ports: numerically exact, gated at
+arch parity, product-registered — and each added a private KV cache and decode
+loop, one re-implemented an existing module, one truncates silently. That is
+the multiplier Phase 11a exists to stop.
+
+### 5. Phase 11 Wave W1a — Native Engine Moonshine (offline), closed
 First family migration of the arch layer onto the engine framework
 (FUSION_ROADMAP_PLAN §8, §4.4 steps 5–7). New package `src/models/moonshine/`
 (`graphs/assets/runtime/session` + internal headers in
@@ -271,7 +303,7 @@ measured **1/69 edits == arch baseline**), ordered `run_batch`,
 `request_abort()` unwinds `run()`. Arch copy untouched and still green.
 Suite: 96/96 green.
 
-### 5. Streaming ASR text validation — NEXT #1, closed
+### 6. Streaming ASR text validation — NEXT #1, closed
 `tests/asr_stream_text_wer_test.cpp` + CTest gate `asr_stream_text_wer_test`:
 streams the four LibriSpeech fixtures into **moonshine-streaming-tiny Q8_0**
 (48 MB, MIT, `handy-computer/moonshine-streaming-tiny-gguf` — the exact model
@@ -289,7 +321,7 @@ became a pinned-model table (both gate models; `--only streaming` selects);
 shared scoring lives in `tests/asr_test_text.h`. Report updated:
 `docs/reports/asr_e2e_wer_gate.md`.
 
-### 6. The three "environment/asset" failures — NEXT #2, all fixed, none was assets
+### 7. The three "environment/asset" failures — NEXT #2, all fixed, none was assets
 - `model_spec_system_test` + `fun_asr_nano_assets_test`: model-spec
   resolution walks UP from the cwd, so they only ever passed from build
   trees inside the repo. Fixed with `WORKING_DIRECTORY` registrations.
@@ -310,19 +342,19 @@ shared scoring lives in `tests/asr_test_text.h`. Report updated:
      `~ModelInstaller` (first D7-teardown application to app-layer code).
      Test now passes in 2.7 s.
 
-### 7. `asr_standalone_gguf_test` — NEXT #3, closed by correction
+### 8. `asr_standalone_gguf_test` — NEXT #3, closed by correction
 Filed for three sessions as "needs citrinet+hviske GGUFs". It does not: the
 fixtures are synthetic (dummy safetensors → GGUF), and the failure was the
 same cwd spec-resolution defect. `WORKING_DIRECTORY` registration fixed it;
 the old download-and-pin recommendation is withdrawn. (A real citrinet/hviske
 WER gate would be new, optional work — the plan's §5 Phase-5 corpus item.)
 
-### 8. `scaled_dot_product_attention_test` skips without CUDA
+### 9. `scaled_dot_product_attention_test` skips without CUDA
 It exists to pin the CUDA SDPA lowerings (R10) and hard-required a CUDA
 device, failing CPU-only builds. Now probes `list_backend_devices()` and
 skips (exit 2, `SKIP_RETURN_CODE 2`); stays a hard gate on CUDA builds.
 
-### 9. Performance pass on transcribe.cpp runtime families
+### 10. Performance pass on transcribe.cpp runtime families
 Closed the last depthwise-1D-conv im2col sites in the runtime and a couple
 of decode/frontend hotspots, all with env-override kill switches and
 numerical parity:

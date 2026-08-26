@@ -2,10 +2,10 @@
 
 > **Document Status**: Authoritative Master Plan & Architectural Blueprint
 > **Target System**: `speech.cpp` — the single, fully-fused native speech & audio intelligence framework
-> **Version**: 5.0 (Evidence-Based Master Production Edition)
-> **Date**: 2026-08-23
-> **Supersedes**: v4.0 (2026-08-23). See [§2.5 Corrections Ledger](#25-corrections-ledger-v40--v50) for every changed claim.
-> **Tree audited at**: `c776b81` (`main`, 57 commits ahead of `upstream/audio.cpp@62735ea`, 0 behind)
+> **Version**: 6.0 (Code-Grounded Re-Review Edition)
+> **Date**: 2026-08-26
+> **Supersedes**: v5.0 (2026-08-23). See [§0.4](#04-what-changed-structurally-from-v5) for the structural changes and [`docs/reports/fusion_review_2026-08-26.md`](docs/reports/fusion_review_2026-08-26.md) for the review that produced them.
+> **Tree audited at**: `5e1a7e5` (`main`, 66 commits ahead of `upstream/audio.cpp@c79e588`, 0 behind); parents read at `audio.cpp@c79e588`, `transcribe.cpp@2102bca`
 
 ---
 
@@ -38,6 +38,18 @@ v4 was a 547-line target-state sketch. v5 keeps its vision and adds the three th
 1. **A verified ground-truth section** (§2) — v4's file paths, state-machine names, threshold values and completion claims did not match the tree.
 2. **A reachability analysis** (§2.3) — the most consequential omission in v4. A large fraction of what both projects contribute is currently *unreachable from any public surface*, which changes what the roadmap is actually for.
 3. **A safety net before demolition** (Phase 7) — v4 proposed deleting ~74 kLOC of ASR code whose regression suite was never ported into this repository. v5 makes porting that suite the entry gate for every deletion.
+
+### 0.4 What changed structurally from v5
+
+v6.0 is the result of re-reading **both parents from their code** — `audio.cpp@c79e588` and `transcribe.cpp@2102bca` — before re-reading this plan, then comparing (full method and evidence: `docs/reports/fusion_review_2026-08-26.md`). The v5 architecture survives; five things it lacked or got wrong are corrected:
+
+1. **An ASR runtime layer** (§4.3, §5.6, Phase 11a). v5's target state had a session layer and a modules layer with nothing between them for ASR. The cost is now measured: the three families migrated so far each carry a private KV cache and a private greedy decode loop, and Whisper re-implemented an encoder the framework already ships as `WhisperEmbeddingModule`. Twelve more families would pay the same multiplier. The layer — one `EncDecKVCache`, shared decode drivers, cross-indexed result rows, the limits contract — is built once, the three ports are re-based onto it, and every later port becomes graphs + assets + a thin session.
+2. **`src/runtime/` is deleted in full** (§5.7, Phase 11c). v5 kept the transcribe dispatcher, loader, model/session bases, VAD and bin-loader "as what the C ABI genuinely needs." That would make `speech.h` a three-layer implementation and freeze the `Arch` vtable as a permanent second session contract. Phase 8 moved the dispatcher's discipline into `StreamingSessionBase`; nothing is left for the dispatcher to own. `speech_capi.cpp` sits directly on the engine base classes. Every line of the 95 kLOC gets a ledger row.
+3. **Phase 12 is pulled forward** and the Phase-10 verdicts are executed **now** (§8). The "third façade" v5 warned against already ships by default (`capi/audiocpp.h`, 55 functions, no `struct_size`), and Phase 10's central deliverable — *merge the loser's features before retirement* — was never performed (0 references to speculative decoding in `models/qwen3_asr`, 0 to cache-aware windows in `models/voxtral_realtime`, 0 to streaming presets in `models/sortformer_diar`; zero deletions executed). Both are cheaper to fix before the remaining ports than after.
+4. **Three contracts transcribe enforces that the engine lacks** enter the doctrine: never truncate silently (L11 — W2a currently trims audio > 30 s and drops the flag); measure the real flow with `PASSOVER.md`'s methodology (L12); dual parentage with the dependency-sync routine at every phase boundary (L13). §4.2 gains rows for input limits, backend execution (`BackendPlan` scheduler fallback vs single-backend `GraphExecutor`), concurrency, and product registration.
+5. **Methodology parity for `audio.cpp`'s own families is a per-phase quota**, not Phase 14.3. The Master Key says both parents learn in parallel; v5 scheduled the "audio.cpp learns from transcribe" half last.
+
+V6 decisions D2, D3, D4, D14, D15, D18, D19 and D23 predate the engine-spine architecture and are recorded as superseded in Appendix F — they were never formally reconciled before.
 
 ---
 
@@ -153,6 +165,8 @@ The second-highest-value deliverable is **activating what is already built**: tw
 | 4 — Batched offline ASR decode | COMPLETED, 5 families | ⚠️ **UNREACHABLE** | Overrides exist in `qwen3_asr`, `voxtral_realtime`, `citrinet_asr`, `vibevoice_asr`, `higgs_audio_stt`; no public entry point calls `run_batch`, and the ArchAdapter nulls the hook. → **Phase 7 · 7.5** |
 | 5 — Universal `audiocpp` C ABI | COMPLETED, "strict C++ exception containment" | ⚠️ **PARTIAL** | 17 of ~43 exported definitions are wrapped in `AUDIOCPP_CATCH`; ~26 are not — including `audiocpp_device_count`, `audiocpp_device_info`, `audiocpp_list_devices`, `audiocpp_backend_available`, `audiocpp_model_info`, `audiocpp_model_capabilities`, `audiocpp_write_wav`, `audiocpp_free_model`, `audiocpp_stream_free`. `transcribe.cpp`'s doctrine names this exact class: *"Device and registry queries are not pure reads; guard them."* → **Phase 8 · 8.5** |
 | 6 — Whisper GPU cleanup, arch sync, model specs | COMPLETED | ⚠️ **PARTIAL** | `cleanup_gpu` sync and Whisper suppress tables confirmed. The three new specs have **no engine loader behind them** — `--family whisper` resolves a catalog entry and then fails to load. → **Phase 11** |
+| 10 — Overlap resolution (v6.0 re-audit, 2026-08-26) | COMPLETED, "loser's features merged into the winner before retirement" | ❌ **VERDICTS ONLY** | `grep -c 'spec_k_drafts\|speculative' src/models/qwen3_asr/*.cpp` → 0; `grep -ci cache.aware src/models/voxtral_realtime/*.cpp` → 0; `grep -ci preset src/models/sortformer_diar/*.cpp` → 0; no `fun_asr_nano` WER gate. The bake-off report exists; none of the five feature merges and none of the deletions do. → **Phase 10.5** |
+| 5 — `audiocpp.h` as the product's C ABI (v6.0 re-audit) | "Universal C ABI subsystem" | ❌ **THIRD FAÇADE** | `grep -c struct_size capi/include/audiocpp.h` → 0; no extension kinds, no ABI hash; built by default while `transcribe.h` (98 fns, size-aware) is OFF; consumed by 4 tests and no app. This is exactly the façade Phase 12's entry note warns against. → **Phase 12 (pulled forward)** |
 
 Documentation actions produced by this audit (Phase 7 · 7.0):
 
@@ -244,6 +258,9 @@ These govern every decision downstream. When a phase task conflicts with a law, 
 | **L8** | **Gates ratchet, never loosen.** A threshold may be tightened when a measurement justifies it, never relaxed to make a change land. | The current 10% WER bound has 6.9× headroom over the 1.45% baseline; a 5-word accuracy regression is invisible to it. | §7.3 |
 | **L9** | **Exception containment is a build-time property.** No C++ exception may escape a public C entry point; no raw ggml teardown call may appear in library code. Both are lint-enforced, not review-enforced. | `transcribe.cpp`'s doctrine, already half-adopted here: `lint_teardown.cmake` exists but is scoped to `src/runtime/` only. 167 raw teardown sites remain in 75 files outside it. | Phase 8 · 8.4/8.5 |
 | **L10** | **Parity is measured against a pinned oracle.** Numerical claims cite a reference implementation at a pinned revision and a per-tensor tolerance file — never "looks right". | `transcribe.cpp` ships 35 tolerance files and 66 golden manifests naming HF repo + revision + reference script + revision. `speech.cpp` has 1 tolerance file. | Phase 7 · 7.1; §7.3 gate class G2 |
+| **L11** | **Never truncate silently.** Every model reports its usable limit (`max_audio_ms`, per-session limits); over-length input is rejected up front (`INPUT_TOO_LONG`) or the result carries `truncated = true` and the ABI returns `OUTPUT_TRUNCATED`. A partial result is never presented as a complete one. | transcribe's `docs/input-limits.md` contract. The engine has no home for it: `TaskResult` has no truncation flag, `CapabilitySet` no `max_audio_ms`; the W2a Whisper package trims audio > 30 s and drops the flag. | §4.2 row "Input limits"; Phase 11a · ASR layer; A21 |
+| **L12** | **Measure the real flow, then read the code.** Benchmarks use ≥ 4 runs, drop the first, interleave the arms within each round, prefer stage counters over wall clock, and **revert any win inside the noise floor**. Every optimisation ships with a kill-switch env var. `cleanup_gpu()` / per-run `safe_sched_free` is off-limits. A change whose correctness depends on a platform or path the test run does not exercise is reviewed by reading, not by more benchmarking. | `transcribe.cpp/PASSOVER.md` §1 (a "55% win" that was 45% worse on the real flow) and §8 (six defects invisible on the machine that wrote them). | CONTRIBUTING; every G5 gate |
+| **L13** | **Two parents, one child.** `speech.cpp` is equally a child of `audio.cpp` and `transcribe.cpp`; the audio.cpp fork base is a convenience, not a precedence. A dependency bump in either parent is ours. `scripts/sync-deps.sh` runs at every phase boundary; upstream syncs end in a recorded merge, never a content copy. | The ggml floor moved in transcribe.cpp and was treated as news; the "6 behind" count was a lagging merge-base for two sessions. | §9.0; tracker Rules 6–7 |
 
 ---
 
@@ -278,6 +295,10 @@ This table is the specification for Phase 8. Each ❌ row is a task.
 | Task breadth | ASR + diarization | **14 task kinds**, artifacts, voice conditioning, named multi-output audio | Engine wins outright — keep as-is |
 | Catalog / packaging | ❌ none | `model_specs/*.json` schema v1: packages, sources, options, UI, languages, dependencies | Engine wins outright — extend with a `frontend` + `parity` block (§5.1) |
 | Product reach | ❌ none (library only) | CLI, HTTP server, WebUI, workflow | Engine wins outright |
+| **Input limits** *(v6.0)* | `LimitsBasis` on the model → `caps.max_audio_ms`, `transcribe_session_get_limits()`; `INPUT_TOO_LONG` up front, `OUTPUT_TRUNCATED` + `was_truncated()` after; three documented buckets | ❌ `AudioPreparationContract.max_input_samples` exists but nothing derives it; no `max_audio_ms`, no truncation flag; `CapacityError` for prefill that does not fit | `CapabilitySet.max_audio_ms` + `TaskResult.truncated` + `AsrLimits` in the ASR layer; `CapacityError` maps to `INPUT_TOO_LONG` at the ABI (L11) |
+| **Backend execution** *(v6.0)* | `BackendPlan { primary, scheduler_list }` over `ggml_backend_sched`: an op the GPU backend lacks falls back to CPU inside one graph | ❌ `GraphExecutor` = one `ggml_gallocr` on the session's single backend; unsupported op ⇒ failure | `GraphExecutor` gains an optional scheduler path (primary + CPU fallback) selected per family; default stays single-backend where every op is supported |
+| **Concurrency** *(v6.0)* | ❌ documented 0.x limitation: one run/stream in flight per *model* (sessions share backends) | ✅ per-session `ExecutionContext`; `SharedWeightRegistry` makes extra sessions cheap | The engine's rule becomes the ABI's threading contract: sessions are independent; a model may serve N concurrent sessions; documented in `speech.h` |
+| **Product registration** *(v6.0)* | the `Arch` registry is the product | a package can build, pass its gate, and still be absent from `audiocpp_add_model` (Whisper was, until `5e1a7e5`) | `family_registry_unit` asserts every `src/models/<f>` with a loader is registered and in a composite (A22) |
 
 **Reading the table.** Neither side dominates. transcribe owns *runtime discipline*; the engine owns *breadth, packaging and product surface*. The fused system takes all of column 2 into the base classes of column 3, and none of column 3's breadth is sacrificed. That is the Reciprocity Rule made concrete.
 
@@ -291,6 +312,7 @@ This table is the specification for Phase 8. Each ❌ row is a task.
 │    • speech_*  — size-aware, versioned, exception-contained, 14 tasks + streaming        │
 │    • typed per-family extension slots (speech_ext, kind-probed per slot)                 │
 │    • compat shims:  audiocpp.h  and  transcribe/transcribe.h  → inline forwarders        │
+│    • implemented THINLY over the engine base classes — no transcribe dispatcher beneath   │
 ├──────────────────────────────────────────────────────────────────────────────────────────┤
 │  Generated bindings (one libclang IR → four targets, CI-gated on header ABI hash)        │
 │    Python (ctypes)  ·  TypeScript (koffi)  ·  Rust (sys + safe)  ·  Swift (SPM)          │
@@ -304,6 +326,18 @@ This table is the specification for Phase 8. Each ❌ row is a task.
 │    StreamingSessionBase — 4-state lifecycle · revision counter · commitment policy ·      │
 │                           pre-clear validate · chunk buffering (StreamChunker)           │
 │    PipelineSession      — VAD-plan → ASR → diarize → re-stitch, in-process, no IPC       │
+├──────────────────────────────────────────────────────────────────────────────────────────┤
+│  ASR Runtime Layer  (v6.0 — src/framework/asr/; the layer neither parent had)            │
+│    • EncDecKVCache — ONE self+cross cache (batched), replacing 5 arch + 3 engine structs  │
+│    • Decode drivers — CTC greedy · RNN-T/TDT greedy with batched joint window ·           │
+│      AR greedy with suppress masks + temperature-fallback ladder + DecodeTelemetry ·      │
+│      speculative drafts (spec_k_drafts) as one implementation for every AR family        │
+│    • AsrResult — tokens / words / segments / speaker turns, cross-indexed, committed      │
+│      counts, raw vs post-processed text, per-utterance timings                           │
+│    • AsrLimits — LimitsBasis → max_audio_ms · truncated flag · INPUT_TOO_LONG (L11)       │
+│    • Long-form driver over audio/chunking (VAD / fixed / seek) with timestamp stitching   │
+│    • Feature bits (initial prompt, temperature fallback, long-form, PNC, ITN, diarize)    │
+│  A family above this line is graphs + assets + a thin session. Nothing else.             │
 ├──────────────────────────────────────────────────────────────────────────────────────────┤
 │  Canonical family set  (one implementation per model, one id, one spec)                  │
 │   ┌────────────────────────┬─────────────────────────────┬────────────────────────────┐  │
@@ -324,7 +358,7 @@ This table is the specification for Phase 8. Each ❌ row is a task.
 │       none/global/per-feature/per-utterance norm · preemphasis · dither) + Kaldi fbank    │
 │    • Tokenizer hub: encode + decode + special-token ids over GGUF vocab, SentencePiece,   │
 │      HF tokenizer.json, byte-level BPE, unigram, WordPiece                                │
-│    • Chunking & VAD: vad::plan + deterministic global timestamp re-stitching              │
+│    • Chunking & VAD: audio/chunking (Fixed · QuietEnergy · VAD · overlap-add · stitching) │
 │    • Codec hub: Mimi · MioCodec · EnCodec · SNAC · DAC · Vocos (audio.cpp heritage)        │
 │    • Core: Conformer · SAN-M · Causal-LM · RoPE · SDPA · SwiGLU · RMSNorm · LayerNorm      │
 ├──────────────────────────────────────────────────────────────────────────────────────────┤
@@ -536,6 +570,34 @@ Gate — `family_registry_unit` asserts all of:
 4. every registered GGUF arch name resolves to exactly one dispatch target — which is what makes the `qwen3_asr` / `voxtral_realtime` / `moss` shadowing (D1) a **compile-visible** conflict rather than a silent precedence rule.
 
 The current orphan list this gate would flag on day one: specs without a loader — `whisper`, `moonshine`, `moonshine_streaming`; arches without a spec — `canary`, `canary_qwen`, `cohere`, `gigaam`, `granite`, `granite_nar`, `medasr`.
+
+### 5.6 The ASR runtime layer — KV caches and decode drivers *(v6.0)*
+
+**Measured duplication** (`docs/reports/fusion_review_2026-08-26.md` §3.1): five arch KV caches — `WhisperKvCache`, `MoonshineKvCache`, `MoonshineStreamingKvCache`, `CanaryKvCache`, `CohereKvCache` — are **field-identical** (`self_k/self_v/cross_k/cross_v/n_ctx/n/head/T_enc/n_batch/cross_populated`; Whisper adds `T_enc_pad`), and the three migrated engine packages each carry a copy. **15 of 18** arch `model.cpp` files hand-roll an argmax decode loop. RNN-T/TDT greedy exists in `gigaam`, `parakeet`, `sortformer` and three engine `tdt_decoder_runner` variants.
+
+| Component | Sources folded in | Home |
+|---|---|---|
+| `EncDecKVCache` | the 5 arch structs, the 3 engine copies; batched (`n_batch`) from day one; optional `T_enc_pad` for Metal FA | `framework/asr/enc_dec_kv_cache.{h,cpp}` — built on `TransformerKVCache`'s buffer/import/export discipline |
+| `decode/ctc_greedy` | `citrinet_asr`, `gigaam` CTC, `medasr`, `parakeet` CTC | `framework/asr/decode/` |
+| `decode/transducer_greedy` | `parakeet` (with the frame-batched joint window, `TRANSCRIBE_RNNT_BATCH_W` kill switch, `_BATCH_CHECK` argmax-flip verifier), `gigaam` RNN-T, `sortformer`; unify with engine `tdt_decoder_*` | `framework/asr/decode/` |
+| `decode/ar_greedy` | the 15 hand-rolled loops: prompt pass + step loop, suppress / begin-suppress masks, timestamp rules, temperature-fallback ladder + `DecodeTelemetry` (whisper), speculative drafts (`spec_k_drafts` — one implementation replacing `qwen3_asr`'s and `voxtral_realtime`'s) | `framework/asr/decode/` |
+| `AsrResult` | `transcribe_session`'s `TokenEntry/WordEntry/SegmentEntry/SpeakerSegmentEntry` + committed counts + `raw_text` + timings; projected onto `TaskResult` / `StreamEvent` | `framework/asr/result.h` |
+| `AsrLimits` | `transcribe_model::LimitsBasis` → `CapabilitySet.max_audio_ms`, `TaskResult.truncated`, session limits query | `framework/asr/limits.h` |
+| long-form driver | whisper's seek-continuation (HF 5.x), `transcribe-vad-integrate`'s offset stitching, over `audio/chunking` | `framework/asr/long_form.{h,cpp}` |
+
+**Method.** Same as §5.3: behaviour-preserving, behind a switch, both against the golden manifests, then the switch goes. The three migrated families are re-based first (Phase 11a) — they are the proof the layer is sufficient before any further port.
+
+### 5.7 VAD chunk planning — one implementation *(v6.0)*
+
+`src/runtime/transcribe-vad.cpp` says it in its own comment: *"Direct port of audio.cpp's plan_vad_audio_chunks (chunking.cpp)."* `audio/chunking.h` is the richer of the two (Fixed / QuietEnergy / VAD planners, overlap-add, word-timestamp and speech-metadata stitching) and is upstream-owned. `transcribe-vad{,-integrate}.{h,cpp}` are deleted; `vad_plan_unit` / `vad_merge_unit` are re-pointed at `plan_vad_audio_chunks` / `append_chunk_speech_metadata`; the `speech_vad()` ABI entry calls the engine. v5's §4.3 line naming `vad::plan` is corrected above.
+
+### 5.8 Loaders — the legacy whisper.cpp `.bin` becomes a `TensorSource` *(v6.0)*
+
+Today: transcribe `Loader` + `transcribe-bin-loader` on one side, engine `TensorSource` (GGUF / safetensors / torch-bin) on the other, and W2a added a **third** private `.bin` parser in `models/whisper/assets.cpp`. Correct home: `assets/whisper_bin_tensor_source.cpp` implementing `TensorSource`, so `BackendWeightStore::load_tensor` works unchanged and the family carries no loader code. The three `.bin` unit tests (`whisper_bin_parser_unit`, `whisper_bin_suppress_unit`, `whisper_bin_tokenize_parity`) migrate with it (F6).
+
+### 5.9 The Whisper encoder already exists upstream *(v6.0)*
+
+`modules/speech_encoders/whisper_embedding.h` ships `WhisperEmbeddingModule` — conv1, conv2, positional embedding, N layers, final norm — and `qwen3_asr` already consumes it. W2a's `models/whisper/graphs.cpp` re-implemented it. Phase 11a folds the Whisper encoder onto the module (both against `tests/golden/whisper/`), leaving the family with the decoder graph only.
 
 ---
 
@@ -874,7 +936,7 @@ Two new tests, both cheap, both currently red:
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────┐
-│                         MASTER FUSION EXECUTION PLAN (v5.0)                          │
+│                         MASTER FUSION EXECUTION PLAN (v6.0)                          │
 ├──────────────────────────────────────────────────────────────────────────────────────┤
 │ Phase 1  Engine Hardening & Allocator Guards                            [COMPLETED]  │
 │ Phase 2  Toolchain Modernization & Build Provenance                     [COMPLETED]  │
@@ -883,21 +945,32 @@ Two new tests, both cheap, both currently red:
 │ Phase 5  Universal C ABI Subsystem & Progress Callbacks    [PARTIAL — guard coverage] │
 │ Phase 6  Whisper GPU Cleanup, Arch Sync, Model Specs       [PARTIAL — no loaders]     │
 ├──────────────────────────────────────────────────────────────────────────────────────┤
-│ Phase 7  SAFETY NET · GROUND TRUTH · ACTIVATION                            ◄ NEXT    │
-│ Phase 8  CONTRACT CONVERGENCE (the Reciprocity Rule, executed)                       │
-│ Phase 9  FRONTEND & TOKENIZER UNIFICATION (spec-driven)                              │
-│ Phase 10 OVERLAP RESOLUTION (6 duplicated families, evidence-decided)                │
-│ Phase 11 ARCH MIGRATION — 12 ASR families become reachable products                  │
-│ Phase 12 UNIFIED libspeech ABI + COMPATIBILITY SHIMS                                 │
-│ Phase 13 BINDINGS RETARGET (4 existing bindings → one generated IR)                  │
-│ Phase 14 GOLDEN REGRESSION CERTIFICATION & RELEASE 1.0                               │
+│ Phase 7  SAFETY NET · GROUND TRUTH · ACTIVATION                          [COMPLETED] │
+│ Phase 8  CONTRACT CONVERGENCE (the Reciprocity Rule, executed)           [COMPLETED] │
+│ Phase 9  FRONTEND & TOKENIZER UNIFICATION (spec-driven)                  [COMPLETED] │
+│ Phase 10 OVERLAP RESOLUTION — verdicts               [VERDICTS ONLY · merges pending] │
+│ Phase 11 (W1a, W1b, W2a) — moonshine · moonshine_streaming · whisper   [3 of 18 DONE] │
+├──────────────────────────────────────────────────────────────────────────────────────┤
+│ Phase 10.5 EXECUTE THE VERDICTS — 5 feature-merges, 5 deletions, ledger  ◄ NEXT      │
+│ Phase 11a  ASR RUNTIME LAYER — build once; re-base the 3 ports; first dedup deletes  │
+│ Phase 12   speech.h THIN OVER THE ENGINE — audiocpp.h frozen → shim   (pulled forward)│
+│ Phase 11b  REMAINING 9 FAMILIES as thin packages, each deleting its arch dir         │
+│ Phase 11c  DELETE src/runtime/ IN FULL — dispatcher, adapter, private subsystems     │
+│ Phase 13   BINDINGS RETARGET (6 existing bindings → one generated IR)                │
+│ Phase 14   CERTIFICATION & RELEASE 1.0                                               │
+│ Track M    METHODOLOGY PARITY for audio.cpp's own families — a quota in EVERY phase  │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
   Dependency graph (a phase may not start before its predecessors' exit gates pass):
 
-     7 ──┬── 8 ──┬── 9 ──┬── 10 ──┬── 11 ── 12 ── 13 ── 14
-         │       │       │        │
-         └───────┴───────┴────────┴──► every phase's deletions gated by 7's assets
+     10.5 ──► 11a ──► 12 ──► 11b ──► 11c ──► 13 ──► 14
+                                └── Track M runs alongside every arrow ──┘
+
+  Why this order (v6.0): 10.5 is the cheapest real consolidation and proves the ledger;
+  11a stops the per-family duplication multiplier before nine more families pay it;
+  12 comes before 11b so every remaining port lands under its final ABI exactly once;
+  11c is possible only once 11a+12 have given every dispatcher responsibility an
+  engine home.
 ```
 
 **Phase mapping from v4.0** — nothing is dropped, only re-sequenced and split:
@@ -1110,9 +1183,47 @@ Migrate file-by-file to `transcribe::safe_backend_free` / `safe_buffer_free` / `
 
 ---
 
-### Phase 11 — Arch Migration: 12 ASR Families Become Products
+### Phase 10.5 — Execute the Phase-10 Verdicts *(v6.0, next)*
 
-> **Status (2026-08-24)**: `[~] IN PROGRESS`. Wave W1a (`moonshine` offline → `src/models/moonshine/`) is **complete and gated**: `moonshine_engine_smoke_test` green with engine-path corpus WER 1.449% (1/69 edits) — identical to the arch baseline; 96/96 suite green; spec sources defect fixed. Arch copy retained per §4.4 coexistence. W1b (`moonshine_streaming`) is next; see `MULTI_AGENT_FUSION_PLAN_AND_TRACKER.md` §4 for handoff and `walkthrough.md` for the W1b design map.
+**Goal.** Turn the bake-off's five engine-wins into the first real consolidation: merge each loser's distinguishing features into the winner (R3's precondition), then delete the five arch directories with ledger rows. ≈17 kLOC removed; the D1 shadowing hazard gone.
+
+**Entry.** Phase 7 assets (goldens for all five families) in place — they are.
+
+| Family | Feature to merge into the engine winner first | Gate before deletion |
+|---|---|---|
+| `qwen3_asr` | speculative drafts (`spec_k_drafts`, `supports_spec_decode`) — as the shared AR driver's option if 11a has landed, else a package-local port; `qwen3_asr_bpe_parity` | `tests/golden/qwen3_asr/` (2) through the engine; `qwen3_asr_batch_truncation` |
+| `voxtral_realtime` | cache-aware streaming windows | `tests/golden/voxtral_realtime/` (1); streamed-vs-offline divergence 0 |
+| `sortformer_diar` | streaming presets + the typed `sortformer.h` extension | `tests/golden/sortformer/` (1); DER unchanged |
+| `sense_asr` | (SAN-M direct-dw already unified in Phase 10) | `tests/golden/sensevoice/` (1) |
+| `fun_asr_nano` | adopt the arch WER corpus as the engine gate | new `fun_asr_nano_wer_test` at the arch baseline |
+
+Deletions: `src/runtime/arch/{qwen3_asr, voxtral_realtime, sortformer, sensevoice, funasr_nano}/`, each its own commit, Appendix B rows B11–B15 filled in. `asr_e2e_wer_test` / `asr_stream_text_wer_test` are unaffected (their subjects are the moonshine pair).
+
+**Exit.** Five ledger rows with revert commits; `family_registry_unit` reports no shadowed GGUF arch; suite green.
+
+---
+
+### Phase 11a — The ASR Runtime Layer, and Re-basing the First Three Ports *(v6.0)*
+
+**Goal.** Build §5.6 once and prove it on the families already migrated, so that no later port re-creates a runner.
+
+**Tasks.**
+
+**11a.1 — `EncDecKVCache`** (§5.6). Land beside the existing structs behind a switch; W1a/W1b/W2a adopt it; their three private structs are deleted.
+**11a.2 — Decode drivers.** `ar_greedy` first (it retires the three engine loops and is what Whisper, Moonshine, Canary, Cohere, Voxtral need), with suppress masks, timestamp rules, temperature-fallback ladder + `DecodeTelemetry`, and `spec_k_drafts`. Then `transducer_greedy` (unifying the engine's three `tdt_decoder_*` variants with parakeet's batched joint window) and `ctc_greedy`.
+**11a.3 — `AsrResult` + `AsrLimits`.** Cross-indexed rows and committed counts projected onto `TaskResult`/`StreamEvent`; `CapabilitySet.max_audio_ms`; `TaskResult.truncated`; `CapacityError → INPUT_TOO_LONG` at the ABI. **Fixes W2a's silent truncation** (L11).
+**11a.4 — Long-form driver** over `audio/chunking`; whisper's HF-5.x seek continuation lands here, not in the family. `transcribe-vad*` deleted (§5.7).
+**11a.5 — Fold the Whisper encoder onto `WhisperEmbeddingModule`** (§5.9) and the `.bin` parser into a `TensorSource` (§5.8).
+**11a.6 — `GraphExecutor` scheduler path** (§4.2 "Backend execution"): optional `primary + CPU` scheduler for families that need op fallback; single-backend remains the default.
+**11a.7 — Track M quota:** two audio.cpp-native ASR families (`nemotron_asr`, `citrinet_asr`) gain golden manifests + tolerance files + `validate.py` support for the engine path.
+
+**Exit gates.** `moonshine_engine_smoke_test`, `moonshine_streaming_engine_smoke_test`, `whisper_engine_smoke_test` unchanged at their arch baselines (1/69 · 3/69 divergence 0 · 3/69) **on the shared layer**; `grep -rn 'struct [A-Za-z]*KvCache' include/engine/models` → 0; a > 30 s clip through Whisper returns `truncated = true` and the ABI status says so; `vad_plan_unit` green against `plan_vad_audio_chunks`.
+
+---
+
+### Phase 11b — Arch Migration: the Remaining 9 Families as Thin Packages
+
+> **Status (2026-08-26, v6.0)**: W1a, W1b and W2a are **done and gated at exact arch parity** (`moonshine` 1/69 · `moonshine_streaming` 3/69 with divergence 0 · `whisper` 3/69). They are re-based onto the ASR layer in Phase 11a before this phase resumes. Remaining: `canary`, `canary_qwen`, `cohere`, `gigaam`, `granite`, `granite_nar`, `medasr`, `voxtral` (offline), `moss` (ASR + diarization), plus `whisper` W2b scope (timestamps, language detection, batched decode) which is now mostly ASR-layer work.
 
 **Goal.** Make Whisper, Moonshine, Moonshine-Streaming, Canary, Canary-Qwen, Cohere, GigaAM, Granite, Granite-NAR, MedASR (and the Phase-10 survivors) first-class engine families — reachable from the CLI, server, WebUI and the shipped C ABI, installable from the model manager.
 
@@ -1135,21 +1246,19 @@ Migrate file-by-file to `transcribe::safe_backend_free` / `safe_buffer_free` / `
 
 Follow `docs/porting/` stages 4→8 (the earlier stages are already done — these families are ported, just not integrated):
 
-1. Create `src/models/<family>/` with the project's split: `assets.cpp`, `weights.cpp`, `runtime.cpp`, `encoder.cpp`, `decoder.cpp`, `session.cpp`.
+1. Create `src/models/<family>/` as a **thin package** *(v6.0)*: `graphs.cpp` (encoder/decoder topology only, on framework modules where one exists), `assets.cpp` (hparams + tokenizer via `TokenizerHub` + `TensorSource`), `session.cpp` (a thin session over the ASR layer's KV cache, decode driver, `AsrResult` and `AsrLimits`). **No private KV cache, no private decode loop, no private loader, no private mel.** A package that needs one of those has found a gap in the ASR layer — fix the layer.
 2. Implement `IVoiceModelLoader` + `ILoadedVoiceModel` + a session deriving from `OfflineSessionBase` / `StreamingSessionBase`.
 3. Register in `CMakeLists.txt` via `audiocpp_add_model(<family> SOURCES … LOADERS … ALIASES …)`; add to the `asr` and `full` composites.
 4. Author or complete `model_specs/<family>.json` **schema v2** — including the `"frontend"` block from §5.1 and a `"parity"` block naming the golden manifest and tolerance file.
 5. Register the family in `family_registry.h` with its GGUF arch name(s) as aliases.
 6. Move `tests/golden/<family>/` and `tests/tolerances/<family>*.json` from arch-scoped to engine-scoped registration; add `<family>_golden_smoke` and, where a real model is pinned, `<family>_real_smoke`.
 7. Verify reach: `audiocpp_cli --task asr --family <family> --model <path>` works; the server exposes it; the WebUI lists it; `audiocpp_load_model(..., "<family>", ...)` succeeds.
-8. Delete `src/runtime/arch/<family>/` — **its own commit**, with a ledger row.
+8. Delete `src/runtime/arch/<family>/` — **in the same wave** *(v6.0)*, its own commit, with a ledger row. Coexistence (§4.4 steps 5–7) is measured within the wave, not carried for a release cycle: the ABI gates now run through the engine path (Phase 12), so the arch copy has nothing left to prove once the engine copy matches it.
+9. Retarget the family's e2e gates: `asr_e2e_*_test` binaries drive `speech.h`, whose implementation is the engine — the arch copy is no longer their subject.
 
-#### Decommission the bridge (only after every family has migrated)
+#### Decommission the bridge — superseded by Phase 11c *(v6.0)*
 
-- Delete `src/runtime/transcribe-arch-adapter.{h,cpp}` (1,093 lines).
-- Reduce `src/runtime/transcribe-arch.{h,cpp}` to the dispatch contract used by the compatibility shim; the `Arch` struct survives as the shim's vtable, not as a parallel model layer.
-- Retire the `SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES` option; `SPEECHCPP_ENABLE_UNIFIED_ABI` becomes unconditional in Phase 12.
-- `src/runtime/` keeps only what the C ABI genuinely needs: `transcribe.cpp` (dispatcher), `transcribe-backend`, `transcribe-loader`, `transcribe-model`, `transcribe-session`, `transcribe-vad*`, `transcribe-meta`, `transcribe-env`, `transcribe-debug`, `transcribe-log`, `transcribe-path`, `transcribe-flash-policy`, `transcribe-batch-util`, `transcribe-bin-loader`, `third_party/miniz`.
+v5 kept the transcribe dispatcher, loader, model/session bases, VAD, bin-loader and batch-util under `src/runtime/` "as what the C ABI genuinely needs." **That is reversed.** Once every family is a thin package on the ASR layer and `speech_capi.cpp` sits directly on the engine base classes (Phase 12), none of those files has a responsibility the engine does not already own. See Phase 11c.
 
 #### Exit gates
 
@@ -1164,15 +1273,44 @@ Follow `docs/porting/` stages 4→8 (the earlier stages are already done — the
 | G5 | Per-family RTF and peak VRAM within 10% of the arch baseline recorded in Phase 7 |
 | ledger | One Appendix B row per deleted arch directory + the adapter |
 
-**Risk.** *Whisper is 7,231 LOC with a legacy `.bin` path, 12 variants and the most intricate decoding loop in the tree.* Mitigation: W2 is a wave of its own; the `.bin` loader and its three unit tests (`whisper_bin_parser_unit`, `whisper_bin_suppress_unit`, `whisper_bin_tokenize_parity`) migrate as a unit; the arch copy stays buildable for one full release cycle after the engine copy lands.
+**Risk.** *Whisper is 7,231 LOC with a legacy `.bin` path, 12 variants and the most intricate decoding loop in the tree.* v6.0 status: the offline core (W2a) landed at exact arch parity; the `.bin` path becomes a `TensorSource` (§5.8) and the decode loop becomes the shared `ar_greedy` driver (§5.6) in Phase 11a — which is what makes the remaining Whisper scope (W2b) small.
 
 ---
 
-### Phase 12 — Unified `libspeech` ABI & Compatibility Shims
+### Phase 11c — Delete `src/runtime/` in Full *(v6.0)*
 
-**Goal.** One shared library exporting the whole speech-intelligence surface, with zero breakage for existing `audiocpp` and `transcribe` consumers.
+**Goal.** The end state v5 stopped short of: no second runtime. 95 kLOC deleted, every line with a ledger row.
 
-**Entry.** Phase 11 green — a unified ABI over two parallel model layers would just be a third façade.
+**Entry.** Phase 11b complete (no arch dir left) **and** Phase 12 complete (`speech_capi.cpp` over the engine, all ABI gates green through it).
+
+**What goes, and where its responsibility now lives.**
+
+| Deleted | LOC (approx.) | Now owned by |
+|---|---:|---|
+| `transcribe.cpp` (dispatcher) | 3,300 | `StreamingSessionBase` (lifecycle, revision, commit policy, pre-clear validate), `RunControl`, `IOfflineVoiceTaskSession::run_batch` default, `speech_capi.cpp` (status mapping, result snapshot rules) |
+| `transcribe-arch{,-adapter}.{h,cpp}` | 1,300 | `ModelRegistry` + `family_registry` |
+| `transcribe-model.{h,cpp}`, `transcribe-session.h` | 900 | `ILoadedVoiceModel`, `RuntimeSessionBase`, `AsrResult`, `AsrLimits` |
+| `transcribe-loader`, `transcribe-load-common`, `transcribe-bin-loader`, `transcribe-weights-util`, `transcribe-meta` | 3,400 | `TensorSource` (+ whisper `.bin` source), `BackendWeightStore`, `model_spec` |
+| `transcribe-backend.{h,cpp}`, `transcribe-flash-policy` | 400 | `ExecutionContext` + the `GraphExecutor` scheduler path; `safe_*` wrappers live in `core/backend.h` |
+| `transcribe-mel`, `transcribe-kaldi-fbank` | 1,450 | `audio/mel_extractor`, `audio/kaldi_fbank` (Phase 9) |
+| `transcribe-tokenizer`, `transcribe-unicode{,-data}` | 3,000 | `text/tokenizer_hub`, `text/unicode_normalization` (Phase 9) |
+| `transcribe-vad{,-integrate}` | 500 | `audio/chunking` (§5.7) |
+| `transcribe-batch-util` | 600 | the ASR layer's batched decode drivers |
+| `causal_lm/`, `conformer/`, `granite_conformer/`, `sanm/` | 3,500 | framework modules (Phase 10) |
+| `transcribe-debug`, `transcribe-env`, `transcribe-log`, `transcribe-path` | 900 | `debug/trace`, `debug/profiler`, engine env/log conventions; the `TRANSCRIBE_DUMP_DIR` dump points move to engine tracing so `validate.py` keeps working |
+| `arch/` (whatever remains after 11b) | — | thin packages |
+
+`SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES` and `SPEECHCPP_ENABLE_UNIFIED_ABI` are retired; `lint_teardown` runs over all of `src/` (A12); the `tests/transcribe/` translation units that tested dispatcher behaviour are re-pointed at the base classes (they are contract tests, and the contract survives).
+
+**Exit gates.** `ls src/runtime` → does not exist; A2 (all ported TUs green, re-pointed); A3; `lint_teardown` over `src/` → 0; every Appendix B row has a revert commit.
+
+---
+
+### Phase 12 — Unified `libspeech` ABI & Compatibility Shims *(pulled forward in v6.0)*
+
+**Goal.** One shared library exporting the whole speech-intelligence surface, with zero breakage for existing `audiocpp` and `transcribe` consumers — **implemented thinly over the engine base classes**, not over the transcribe dispatcher.
+
+**Entry (v6.0).** Phase 11a green. v5 gated this on Phase 11 ("a unified ABI over two parallel model layers would just be a third façade"); the third façade already exists (`capi/audiocpp.h`, default ON, §2.4), so the cheaper order is to freeze it now and build `speech.h` before the nine remaining ports — each then lands under its final ABI once. Rule from today: **no new entry points in `audiocpp.h`.**
 
 #### Tasks
 
@@ -1237,6 +1375,15 @@ Follow `docs/porting/` stages 4→8 (the earlier stages are already done — the
 
 `speech.cpp` is a **live fork**: `upstream/audio.cpp` is an active remote, four upstream merges have already landed, and the tree is currently 57 ahead / 0 behind. v4 did not mention this once, yet almost every task it proposed edits or deletes files that upstream continues to develop.
 
+### 9.0 Two parents, one child *(v6.0, L13)*
+
+`speech.cpp` is equally a child of `audio.cpp` and of `transcribe.cpp`. Only `audio.cpp` has a git `upstream` remote here (it is the fork base), so only it yields a merge-base and a "N behind" count — **a tooling limitation, not a hierarchy**. transcribe.cpp drift is tracked by hand through the sibling checkout.
+
+- `scripts/sync-deps.sh` is the first command of every phase: audio.cpp via the `upstream` remote, transcribe.cpp via the sibling, ggml against **both** upstream HEAD and transcribe.cpp's pin (our ggml floor is never below the parent's).
+- An audio.cpp sync ends in a recorded merge (real, or `-s ours` after a by-content audit) — never a content copy; `git rev-list --left-right --count HEAD...upstream/main` must end in `0`.
+- A transcribe.cpp commit gets the same by-content audit and the same disposition ledger as an audio.cpp commit. "Merge source" is not a lesser status.
+- See tracker Operating Rules 6 and 7 and `AGENTS.md` § Dual Parentage.
+
 ### 9.1 The ownership map
 
 | Region | Owner | Merge policy |
@@ -1291,6 +1438,10 @@ Every criterion names its gate and how it is measured. A criterion with no runna
 | A18 | Duplication | 1 frontend implementation, 1 tokenizer hub, 1 SAN-M, 1 conformer, 1 causal-LM, 1 codec hub | G1 | `frontend_contract_test` + a duplication lint over the mel-scale fingerprint |
 | A19 | Build time | Clean CUDA ≤ 4.0 min (auto-arch + ccache); incremental ≤ 10 s | G5 | CI timing, tracked per commit |
 | A20 | Upstream health | `upstream-merge-dryrun` conflict count not rising from fork-side renames | G0 | nightly CI job |
+| A21 *(v6.0)* | Input limits | Every ASR family reports `max_audio_ms`; no family truncates silently — a > limit clip yields `truncated = true` / `OUTPUT_TRUNCATED` or `INPUT_TOO_LONG`, never a clean-looking partial | G1 | `asr_limits_contract_test` (new) over every registered ASR family |
+| A22 *(v6.0)* | Product registration | Every `src/models/<f>` with a loader factory is in `audiocpp_add_model` and in a composite; every family reachable from CLI `--list-loaders` | G1 | `family_registry_unit` extended; `cli_family_smoke` |
+| A23 *(v6.0)* | Concurrency | N sessions on one model run concurrently with results byte-identical to serial; documented in `speech.h` | G1/G4 | `concurrent_sessions_test` (new); `shared_weight_vram_test` |
+| A24 *(v6.0)* | ASR layer dedup | 1 encoder-decoder KV cache, 1 AR greedy driver, 1 transducer driver, 1 CTC driver, 1 VAD planner, 1 whisper encoder, 0 private loaders in `src/models/` | G1 | grep-based lint over `include/engine/models` + `src/models` (Appendix C) |
 
 ---
 
@@ -1312,6 +1463,9 @@ Risks R19–R28 in `TO_DO_UNIFY_AND_IMPROVEMENT_PLAN_V6.md` §5.1 remain in forc
 | **F10** | Licence hygiene: Apache-2.0 (audio.cpp) absorbing MIT (transcribe.cpp) | Low | High | V6 R4 stands: keep Apache-2.0; preserve MIT headers and third-party notices on every merged file; `THIRD-PARTY-LICENSES.md` ported from `transcribe.cpp`; legal sign-off before 1.0 | 14 |
 | **F11** | ggml patch drift — the 7 patches are the invariant, the tree is generated | Low | Critical | Never hand-edit `external/ggml/`; re-derive via `scripts/sync-ggml.sh`; a marker grep is **not** a sufficient audit — verify by regenerating and diffing | all |
 | **F12** | Scope creep: "improve everything" turns each phase into an open-ended refactor | Medium | Medium | Every phase has explicit exit gates; work with no gate is not in the phase | all |
+| **F13** *(v6.0)* | Porting families before the ASR layer exists multiplies duplication (measured: 3 ports → 3 KV caches, 3 decode loops, 1 re-implemented encoder, 1 private loader) | **High** (it happened) | High | Phase 11a before any further port; A24 lint; per-family procedure step 1 forbids private KV/decode/loader/mel | 11a |
+| **F14** *(v6.0)* | The default-built `audiocpp.h` façade accretes consumers before `speech.h` exists, making the shim harder | Medium | High | Freeze `audiocpp.h` now (no new entry points); Phase 12 pulled forward; `abi_compat_test` | 12 |
+| **F15** *(v6.0)* | Deleting `src/runtime/` removes the `TRANSCRIBE_DUMP_DIR` dump points `validate.py` depends on | Medium | High | 11c moves dump points to engine tracing before deletion; `validate.py cpp` gains an engine-path driver in 11a.7 | 11a, 11c |
 
 ---
 
@@ -1405,7 +1559,14 @@ See the table under §8. Summary: no v4 phase was dropped; two new phases (7, 8)
 | B10 | `src/runtime/arch/parakeet/` | 9,439 | `src/models/parakeet_tdt/` | 13 parakeet goldens | Phase 10.1 | |
 | B11–B15 | `src/runtime/arch/{qwen3_asr, voxtral_realtime, funasr_nano, sensevoice, sortformer}/` | 16,896 | engine counterparts, feature-merged | per-family goldens | Phase 10 | |
 | B16–B27 | `src/runtime/arch/{whisper, moonshine, moonshine_streaming, voxtral, canary, canary_qwen, cohere, gigaam, granite, granite_nar, medasr, moss}/` | 48,220 | `src/models/<family>/` (new directories) | per-family goldens + WER | Phase 11 | |
-| B28 | `src/runtime/transcribe-arch-adapter.{cpp,h}` | 1,093 | *(nothing — the bridge is no longer needed)* | full suite green with no adapter | Phase 11 | |
+| B28 | `src/runtime/transcribe-arch-adapter.{cpp,h}` | 1,093 | *(nothing — the bridge is no longer needed)* | full suite green with no adapter | Phase 11c | |
+| B29 *(v6.0)* | `src/runtime/transcribe-vad{,-integrate}.{cpp,h}` | ~500 | `audio/chunking` (`plan_vad_audio_chunks`, `append_chunk_speech_metadata`) | `vad_plan_unit`, `vad_merge_unit` re-pointed; `asr_e2e_*` with VAD on | Phase 11a | |
+| B30 *(v6.0)* | `MoonshineKvCache`, `MoonshineStreamingKvCache`, `WhisperKvCache` in `include/engine/models/*/graphs_internal.h` | ~200 | `framework/asr/enc_dec_kv_cache` | the three `*_engine_smoke_test` gates at arch baseline | Phase 11a | |
+| B31 *(v6.0)* | `models/whisper/assets.cpp` private `.bin` parser; `models/whisper/graphs.cpp` encoder | ~600 | `assets/whisper_bin_tensor_source`; `WhisperEmbeddingModule` | `whisper_engine_smoke_test`, `whisper_bin_*` units | Phase 11a | |
+| B32 *(v6.0)* | `capi/src/audiocpp_capi.cpp` as a standalone implementation | 2,629 | `speech_capi.cpp`; `audiocpp.h` becomes inline forwarders | `abi_compat_test`, the 4 capi tests unchanged | Phase 12 | |
+| B33 *(v6.0)* | everything else under `src/runtime/` (dispatcher, loader, model/session bases, backend, mel, tokenizer, unicode, batch-util, bin-loader, meta/env/debug/log/path, `causal_lm/`, `conformer/`, `granite_conformer/`, `sanm/`, `third_party/`) | ~20,000 | per the Phase 11c table | A2, A3, A12 | Phase 11c | |
+
+v6.0 subtotal: the whole of `src/runtime/` (≈ 95 kLOC measured) plus the engine-side duplicates the first three ports introduced. **Every row above still shows an empty revert-commit cell as of 2026-08-26: zero deletions have been executed.** Phase 10.5 fills the first five.
 
 Arch-tree subtotal: 9,439 + 16,896 + 48,220 = **74,555 LOC** — exactly `cat src/runtime/arch/*/*.cpp src/runtime/arch/*/*.h | wc -l`, i.e. the whole tree, with no family unaccounted for.
 
@@ -1539,3 +1700,20 @@ The measure of success is not that the two codebases became one. It is that the 
 ---
 
 *Document version 5.0 · audited against `c776b81` · 2026-08-23. Every quantitative claim in §2 is reproducible with Appendix C.*
+
+## Appendix F — V6 Decisions Superseded *(v6.0)*
+
+`TO_DO_UNIFY_AND_IMPROVEMENT_PLAN_V6.md` §0.3 predates the engine-spine architecture that v5 adopted and the tree implemented (Phases 8–11). These decisions were never formally reconciled. They are superseded as follows; V6 §0.0 records the same in R14.
+
+| V6 decision | Said | Superseded by |
+|---|---|---|
+| **D2** | `Arch` (function-pointer table) is the unified dispatch; `ArchAdapter` wraps the engine vtable | The engine session contract (`IVoiceTaskSession` + `StreamingSessionBase`) is the dispatch; `ArchAdapter` is transitional and deleted in 11c |
+| **D3** | transcribe `Loader` handles ABI-path model loading | `ModelRegistry` + `TensorSource` for every path (§5.8) |
+| **D4** | lightweight `transcribe_session` for the ABI path, `RuntimeSessionBase` for C++ | one session model — `RuntimeSessionBase`; the ABI is thin over it (Phase 12) |
+| **D14** | transcribe `MelFrontend` / `KaldiFbankFrontend` as the unified STT frontend | engine `MelExtractor` / `kaldi_fbank` (Phase 9, done) |
+| **D15** | transcribe `causal_lm` as the shared STT backbone | framework transformer modules + `causal_lm_ops` (Phase 10, done) |
+| **D18** | generalised ABI via `transcribe_task_*` entry points | `speech_*` in `speech.h` (§6) |
+| **D19** | `transcribe-arch.cpp` registry accumulates adapters | `family_registry` + `ModelRegistry` (§5.5) |
+| **D23** | C ABI symbols stay `transcribe_*` | `speech_*`; `transcribe_*` and `audiocpp_*` survive as compat shims (§6.4), so existing bindings' `transcribe.abihash` checks keep passing through the shim until Phase 13 retargets them |
+
+Still in force from V6: D1, D5–D13, D16 (pin now `36da5713`), D17, D20–D22, D24, D25; R1–R13.
