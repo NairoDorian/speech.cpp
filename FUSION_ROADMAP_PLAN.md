@@ -1183,7 +1183,7 @@ Migrate file-by-file to `transcribe::safe_backend_free` / `safe_buffer_free` / `
 
 ---
 
-### Phase 10.5 — Execute the Phase-10 Verdicts *(v6.0, in progress — 1 of 5 done)*
+### Phase 10.5 — Execute the Phase-10 Verdicts *(v6.0, in progress — 2 of 5 done)*
 
 **Goal.** Turn the bake-off's five engine-wins into the first real consolidation: merge each loser's distinguishing features into the winner (R3's precondition), then delete the five arch directories with ledger rows. ≈17 kLOC removed; the D1 shadowing hazard gone.
 
@@ -1192,8 +1192,8 @@ Migrate file-by-file to `transcribe::safe_backend_free` / `safe_buffer_free` / `
 | Family | Feature to merge into the engine winner first | Gate before deletion |
 |---|---|---|
 | `qwen3_asr` **DONE 9cc5457** | speculative drafts merged as a package-local verify graph over a new shared primitive (multi-token static-cache tail in `QwenDecoderLayerModule` + multi-row `FastKVSetRows`; the 1-gram drafter lives in `causal_lm_ops`, ready for 11a's driver); `qwen3_asr_bpe_parity` ported to the engine tokenizer; also carried over: BCP-47 language hints, cancellation. Found and fixed on the way: batched decode was broken for every Qwen-decoder family (RoPE positions), and the C ABI could not open any audio.cpp GGUF | `qwen3_asr_engine_smoke_test` (2/69 edits, spec k=4 divergence 0), `qwen3_asr_bpe_parity_test` (37 + 30 HF-exact), `asr_e2e_qwen3_asr_wer_test` through the C ABI. The two `tests/golden/qwen3_asr/` manifests need the HF reference dump that speech.cpp does not yet run (Track M) |
-| `voxtral_realtime` | cache-aware streaming windows | `tests/golden/voxtral_realtime/` (1); streamed-vs-offline divergence 0 |
-| `sortformer_diar` | streaming presets + the typed `sortformer.h` extension | `tests/golden/sortformer/` (1); DER unchanged |
+| `voxtral_realtime` **DONE fdaa9a5** | the bake-off row said "cache-aware streaming windows", but the engine already had the sliding-window encoder and decoder caches; what it lacked was the arch's **typed stream extension** — `num_delay_tokens` (hardwired in four places, including a literal `0.480` in the prompt) and `min_decode_interval_ms` — plus cancellation. All three merged; the ArchAdapter now accepts the extension itself, so `transcribe/voxtral_realtime.h` keeps working after the arch is gone | `voxtral_realtime_engine_smoke_test` (WER 2.89855%, 2/69; streamed-vs-offline divergence 0), `voxtral_realtime_delay_test`, `voxtral_realtime_ext_abi_test` through the C ABI. `tests/golden/voxtral_realtime/` still needs the HF reference dump (Track M) |
+| `sortformer_diar` **NEXT — the big one** | the presets are not a knob but a **scheduler**: the arch runs diarization in chunks with an AOSC speaker cache + FIFO (475 LOC of host logic in `arch/sortformer/stream.cpp` plus a two-graph split), driven by a RUN-slot extension whose four operating points set chunk length, right context, FIFO and cache geometry. The engine package is offline-only with one whole-window graph, so this merge is a port, not a wiring change. Both packages are downloadable (the default v2 comes from `nvidia/diar_streaming_sortformer_4spk-v2` at a pinned revision — checked, it exists) | `tests/golden/sortformer/` (1); DER unchanged; preset round-trip through the typed ext |
 | `sense_asr` | (SAN-M direct-dw already unified in Phase 10) | `tests/golden/sensevoice/` (1) |
 | `fun_asr_nano` | adopt the arch WER corpus as the engine gate | new `fun_asr_nano_wer_test` at the arch baseline |
 
@@ -1558,7 +1558,8 @@ See the table under §8. Summary: no v4 phase was dropped; two new phases (7, 8)
 | B9 | `src/community_models/parakeet_tdt/` | 2,382 | `src/models/parakeet_tdt/` (ported from arch) | 13 parakeet goldens | Phase 10.1 | |
 | B10 | `src/runtime/arch/parakeet/` | 9,439 | `src/models/parakeet_tdt/` | 13 parakeet goldens | Phase 10.1 | |
 | B11 | `src/runtime/arch/qwen3_asr/` (+ 6 never-registered `tests/transcribe/qwen3_asr_*.cpp`, 1,650 LOC) | 4,329 | `src/models/qwen3_asr/` with the arch's features merged (89758cf) | `qwen3_asr_engine_smoke_test`, `qwen3_asr_bpe_parity_test`, `asr_e2e_qwen3_asr_wer_test` | Phase 10.5 (2026-08-26) | 9cc5457 |
-| B12–B15 | `src/runtime/arch/{voxtral_realtime, funasr_nano, sensevoice, sortformer}/` | 12,567 | engine counterparts, feature-merged | per-family goldens | Phase 10.5 | |
+| B12 | `src/runtime/arch/voxtral_realtime/` (+ the never-registered `tests/transcribe/voxtral_realtime_real_smoke.cpp`) | 4,996 | `src/models/voxtral_realtime/` with the arch's features merged (61ab725); the family's public ext initializer moves to `src/runtime/transcribe-family-ext.cpp` | `voxtral_realtime_engine_smoke_test`, `voxtral_realtime_delay_test`, `voxtral_realtime_ext_abi_test` | Phase 10.5 (2026-08-26) | fdaa9a5 |
+| B13–B15 | `src/runtime/arch/{funasr_nano, sensevoice, sortformer}/` | 7,571 | engine counterparts, feature-merged | per-family goldens | Phase 10.5 | |
 | B16–B27 | `src/runtime/arch/{whisper, moonshine, moonshine_streaming, voxtral, canary, canary_qwen, cohere, gigaam, granite, granite_nar, medasr, moss}/` | 48,220 | `src/models/<family>/` (new directories) | per-family goldens + WER | Phase 11 | |
 | B28 | `src/runtime/transcribe-arch-adapter.{cpp,h}` | 1,093 | *(nothing — the bridge is no longer needed)* | full suite green with no adapter | Phase 11c | |
 | B29 *(v6.0)* | `src/runtime/transcribe-vad{,-integrate}.{cpp,h}` | ~500 | `audio/chunking` (`plan_vad_audio_chunks`, `append_chunk_speech_metadata`) | `vad_plan_unit`, `vad_merge_unit` re-pointed; `asr_e2e_*` with VAD on | Phase 11a | |
