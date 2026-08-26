@@ -21,7 +21,8 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 ## Overall progress (toward "Unified_Audio transcribes on CPU")
 | Area | Status | % |
 |---|---|---|
-| Dependency: ggml pin `36da5713` (v0.22.0) + patches 0001–0007, matched to parent transcribe.cpp | Done 2026-08-26 — **CPU 101/101 + CUDA 57/57 green**, re-sync reproduces exactly (0 paths) | 100% |
+| Dependency: ggml pin `36da5713` (v0.22.0) + patches 0001–0007, matched to parent transcribe.cpp | Done 2026-08-26 — **CPU 102/102 + CUDA 57/57 green**, re-sync reproduces exactly (0 paths) | 100% |
+| Gates: Whisper arch baseline locked (`asr_e2e_whisper_wer_test`, pinned `ggml-tiny.en.bin`) | Done 2026-08-26 — **corpus WER 4.34783% (3/69), RTF 0.047**; the bar the W2 engine port must match | 100% |
 | Doctrine: dual parentage (transcribe.cpp is a co-parent) + `scripts/sync-deps.sh` routine | Done 2026-08-26 (AGENTS.md, tracker Rule 7) | 100% |
 | Merge: Upstream audio.cpp main synchronization (`c79e588`) | Done — 0 behind, merge-base reconciled, all 6 dispositioned | 100% |
 | Memory: Phase 1 Allocator Hardening (16MB cap, WavLM gallocr, Qwen3 runaway, DFN2) | Done (certified in engine) | 100% |
@@ -37,11 +38,11 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | **Phase 10: Attention & Conformer Module Fusion** | **Done & Verified (`sanm`, `shaw_attn`, `causal_lm_ops`, Bake-Off certified)** | **100%** |
 | **Phase 11 W1a: Native Engine Moonshine (offline)** | **Done & Verified (`moonshine_engine_smoke_test`: engine-path WER 1.449% == arch 1/69 edits; batch + abort contracts)** | **100%** |
 | **Phase 11 W1b: Native Engine Moonshine-Streaming** | **Done & Verified (`moonshine_streaming_engine_smoke_test`: streamed 4.348% == offline 4.348% == arch baseline 3/69, divergence 0; lifecycle + abort contracts)** | **100%** |
-| Specs: Phase 6 Whisper & Moonshine Model Spec Catalogs | Moonshine spec corrected + backed by native loader; Whisper still catalog-only (Phase 11 W2) | ~60% |
+| Specs: Phase 6 Whisper & Moonshine Model Spec Catalogs | Moonshine spec corrected + backed by native loader. **Whisper: `whisper.json` is catalog-only in the strong sense — its 16 packages point at `Whisper-*-GGUF` paths that do NOT exist in `audio-cpp/audio.cpp-gguf` (no Whisper dir at all), so none are downloadable.** Family now gated via the legacy `.bin` instead (see W2 prerequisite). | ~70% |
 | ABI offline + streaming surface | Verified, real CTest gates | 100% |
 | End-to-end ASR **offline text** (WER gate) | Done — 1.45% corpus WER (arch path); engine path now also 1/69 edits | 100% |
 | **End-to-end ASR streaming text** | **Done — streamed 4.35% == offline 4.35%, divergence 0** | **100%** |
-| Test suite status | **101/101 total (97 passed, 4 clean skips on unpinned weights) 100% green** | **100%** |
+| Test suite status | **102/102 total (98 passed, 4 clean skips on unpinned weights) 100% green** | **100%** |
 | **Completed increment** | **Upstream reconciliation `c79e588` (0 behind), ggml 0.22.0 (CPU+CUDA certified), Phase 11 W1a & W1b** | **DONE** |
 | **Next increment** | **Phase 11 Wave W2: Whisper Universal Family** (W1 retirement step first, if taking it) | Ready |
 
