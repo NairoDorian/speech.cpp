@@ -1,17 +1,17 @@
 # Progress — Unified_Audio.cpp (speech.cpp ggml fork) merge & improve
 
-Status snapshot: **Upstream audio.cpp main (d25ffac, 28 commits total) merged cleanly into speech.cpp. Phase 1 Allocator Hardening applied. Phase 2 Toolchain Modernization & Build Provenance landed. Phase 3 Native Long-Form VAD Chunk Planning & Public C ABI integrated. Phase 4 Process-Wide SharedWeightRegistry, Sortformer v2 Diarization package, Batched Offline ASR Decoders (Qwen3-ASR, Voxtral Realtime, Citrinet, VibeVoice, Higgs Audio), and universal audiocpp C ABI subsystem + progress callbacks fully implemented and verified. All 100 CPU core tests passing 100% green. Master architectural blueprint established in [FUSION_ROADMAP_PLAN.md](FUSION_ROADMAP_PLAN.md).** Date: 2026-08-25
+Status snapshot: **Upstream audio.cpp main fully reconciled at `c79e588` — 63 ahead, 0 behind (the recurring "6 behind" was a lagging merge-base, now fixed). Phase 1 Allocator Hardening applied. Phase 2 Toolchain Modernization & Build Provenance landed. Phase 3 Native Long-Form VAD Chunk Planning & Public C ABI integrated. Phase 4 Process-Wide SharedWeightRegistry, Sortformer v2 Diarization package, Batched Offline ASR Decoders (Qwen3-ASR, Voxtral Realtime, Citrinet, VibeVoice, Higgs Audio), and universal audiocpp C ABI subsystem + progress callbacks fully implemented and verified. All 100 CPU core tests passing 100% green. Master architectural blueprint established in [FUSION_ROADMAP_PLAN.md](FUSION_ROADMAP_PLAN.md).** Date: 2026-08-26
 
 ## Repo layout (important, non-obvious)
 `Unified_Audio.cpp/` is a **plain container directory with no git repo of its
-own**. It holds exactly three things, each an independent repository:
+own**. It holds five independent repositories (three primary, two hardened reference trees):
 
 | Folder | Role |
 |---|---|
 | `speech.cpp/` | the active development repo (the ggml/audio.cpp fork). **All merge work, and this log, live here.** Remote: `NairoDorian/speech.cpp`, upstream `0xShug0/audio.cpp`. |
-| `audio.cpp/` | upstream reference — read from, not developed in (pulled to `d25ffac`) |
-| `transcribe.cpp/` | merge source — read from, not developed in (pulled to `0df989a`). |
-| `audio_cunba/` & `transcribe_cunba/` | hardened reference trees containing allocator fixes, VAD chunk planning, shared weights, batched decoders, C ABI, and build acceleration. |
+| `audio.cpp/` | upstream reference — read from, not developed in (pulled to `c79e588`, 2026-08-26) |
+| `transcribe.cpp/` | merge source — read from, not developed in (pulled to `2102bca`, 2026-08-26 — carries a ggml bump to upstream master `36da5713` / v0.22.0). |
+| `audio_cunba/` (pulled to `8cf5136`) & `transcribe_cunba/` (pulled to `2345350`) | hardened reference trees containing allocator fixes, VAD chunk planning, shared weights, batched decoders, C ABI, and build acceleration. |
 
 Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 `sp_bridge` (CPU, full model set, unified ABI + arches, tests), `sp_cuda`
@@ -22,7 +22,7 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | Area | Status | % |
 |---|---|---|
 | Merge: ggml convergence (pin 8c63e709 + patches 0001–0006), CPU+CUDA certified | Done (prior sessions) | 100% |
-| Merge: Upstream audio.cpp main synchronization (`d25ffac`) | Done (clean merge, PR #299 & #301 resolved) | 100% |
+| Merge: Upstream audio.cpp main synchronization (`c79e588`) | Done — 0 behind, merge-base reconciled, all 6 dispositioned | 100% |
 | Memory: Phase 1 Allocator Hardening (16MB cap, WavLM gallocr, Qwen3 runaway, DFN2) | Done (certified in engine) | 100% |
 | Toolchain: Phase 2 Modernization & Build Provenance (ccache, transcribe-build-info, version.rc) | Done (certified in build scripts & DLL) | 100% |
 | Long-form: Phase 3 Native VAD Chunk Planning & Re-stitching (`vad_plan`, `vad_merge`) | Done (native Silero + Energy VAD, C ABI) | 100% |
@@ -41,12 +41,48 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | End-to-end ASR **offline text** (WER gate) | Done — 1.45% corpus WER (arch path); engine path now also 1/69 edits | 100% |
 | **End-to-end ASR streaming text** | **Done — streamed 4.35% == offline 4.35%, divergence 0** | **100%** |
 | Test suite status | **100/100 total (96 passed, 4 clean skips on unpinned weights) 100% green** | **100%** |
-| **Completed increment** | **Upstream audio.cpp main synchronization (`d25ffac`) & Phase 11 W1a** | **DONE** |
+| **Completed increment** | **Upstream reconciliation to `c79e588` (0 behind) & Phase 11 W1a** | **DONE** |
 | **Next increment** | **Phase 11 Wave W1b: Native Engine Moonshine-Streaming on `StreamingSessionBase`** | Ready |
 
 ## DONE this session (plan R12 records all of it)
 
-### 0. Phase 11 Wave W1a — Native Engine Moonshine (offline), closed
+### 0. Upstream audio.cpp reconciliation — `c79e588`, now 0 behind (2026-08-26)
+
+The repo had been reporting **"6 commits behind `0xShug0/audio.cpp:main`"**
+every session. Two of the six were phantoms: the prior sync (`9b34fd2`)
+**content-copied** upstream rather than merging, so the merge-base never left
+`62735ea` and git kept re-listing commits already applied verbatim. Audited all
+six **by content, not by subject**:
+
+| upstream | disposition |
+|---|---|
+| `288a271` `--list-devices` (#299) | already present — `print_backend_devices` at `backend.h:33` / `backend.cpp:213`, both call sites, plus our `speech_*_list_devices` tests |
+| `d25ffac` out-of-span chunk metadata (#301) | already present — `chunking.cpp:652` + `test_chunk_speech_metadata_merge_drops_outside_spans` |
+| `4ec485d` supertonic voice preset (#302) | **cherry-picked** `90659b1` |
+| `d03b957` IndexTTS2 HIP F16 KV/conv (#305) | **cherry-picked** `3682698` |
+| `c6805de` README 0.7 banner | **N/A** — patches an audio.cpp README banner; our README is a speech.cpp rewrite with no such banner, and the content is upstream project news |
+| `c79e588` tag-driven release CI (#286) | **adapted** `a775463` — artifacts renamed `audio-<tag>-…` → `speech-<tag>-…` |
+
+Closed with a `-s ours` reconciliation merge carrying the full disposition
+ledger: base advanced to `c79e588`, tree untouched, and
+`git rev-list --left-right --count HEAD...upstream/main` now reads **`63  0`**.
+**Future upstream syncs must merge, not content-copy** — otherwise the phantom
+count returns.
+
+Reference trees pulled the same day: `audio.cpp` → `c79e588`, `transcribe.cpp`
+→ `2102bca` (**ggml bumped to upstream master `36da5713` / v0.22.0** — relevant
+to our pin at `8c63e709` + `patches/ggml/0001…0006`; see the ggml-patch
+invariant before acting on it), `audio_cunba` → `8cf5136`, `transcribe_cunba` →
+`2345350`. `speech.cpp` itself was never pulled — only `git fetch upstream`.
+
+Verification: `build-cpu-core` rebuilt (`engine_model_supertonic` and
+`engine_model_index_tts2` compile clean); **CTest 100/100** (96 passed, 4
+documented skips), unchanged from baseline. Caveat recorded honestly: at
+`MODEL_SET=core` both packages are OBJECT libraries with **no consumer**, so
+neither fix is runtime-exercised by this suite, and the IndexTTS2 change is
+HIP-only (needs an AMD GPU to observe).
+
+### 1. Phase 11 Wave W1a — Native Engine Moonshine (offline), closed
 First family migration of the arch layer onto the engine framework
 (FUSION_ROADMAP_PLAN §8, §4.4 steps 5–7). New package `src/models/moonshine/`
 (`graphs/assets/runtime/session` + internal headers in
@@ -68,7 +104,7 @@ measured **1/69 edits == arch baseline**), ordered `run_batch`,
 `request_abort()` unwinds `run()`. Arch copy untouched and still green.
 Suite: 96/96 green.
 
-### 1. Streaming ASR text validation — NEXT #1, closed
+### 2. Streaming ASR text validation — NEXT #1, closed
 `tests/asr_stream_text_wer_test.cpp` + CTest gate `asr_stream_text_wer_test`:
 streams the four LibriSpeech fixtures into **moonshine-streaming-tiny Q8_0**
 (48 MB, MIT, `handy-computer/moonshine-streaming-tiny-gguf` — the exact model
@@ -86,7 +122,7 @@ became a pinned-model table (both gate models; `--only streaming` selects);
 shared scoring lives in `tests/asr_test_text.h`. Report updated:
 `docs/reports/asr_e2e_wer_gate.md`.
 
-### 2. The three "environment/asset" failures — NEXT #2, all fixed, none was assets
+### 3. The three "environment/asset" failures — NEXT #2, all fixed, none was assets
 - `model_spec_system_test` + `fun_asr_nano_assets_test`: model-spec
   resolution walks UP from the cwd, so they only ever passed from build
   trees inside the repo. Fixed with `WORKING_DIRECTORY` registrations.
@@ -107,19 +143,19 @@ shared scoring lives in `tests/asr_test_text.h`. Report updated:
      `~ModelInstaller` (first D7-teardown application to app-layer code).
      Test now passes in 2.7 s.
 
-### 3. `asr_standalone_gguf_test` — NEXT #3, closed by correction
+### 4. `asr_standalone_gguf_test` — NEXT #3, closed by correction
 Filed for three sessions as "needs citrinet+hviske GGUFs". It does not: the
 fixtures are synthetic (dummy safetensors → GGUF), and the failure was the
 same cwd spec-resolution defect. `WORKING_DIRECTORY` registration fixed it;
 the old download-and-pin recommendation is withdrawn. (A real citrinet/hviske
 WER gate would be new, optional work — the plan's §5 Phase-5 corpus item.)
 
-### 4. `scaled_dot_product_attention_test` skips without CUDA
+### 5. `scaled_dot_product_attention_test` skips without CUDA
 It exists to pin the CUDA SDPA lowerings (R10) and hard-required a CUDA
 device, failing CPU-only builds. Now probes `list_backend_devices()` and
 skips (exit 2, `SKIP_RETURN_CODE 2`); stays a hard gate on CUDA builds.
 
-### 5. Performance pass on transcribe.cpp runtime families
+### 6. Performance pass on transcribe.cpp runtime families
 Closed the last depthwise-1D-conv im2col sites in the runtime and a couple
 of decode/frontend hotspots, all with env-override kill switches and
 numerical parity:

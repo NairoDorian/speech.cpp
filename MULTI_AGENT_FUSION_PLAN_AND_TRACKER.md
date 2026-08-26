@@ -8,7 +8,7 @@
 
 ## 1. Operating Rules for AI Agents
 
-Every agent working on this repository must strictly adhere to these 5 protocol rules:
+Every agent working on this repository must strictly adhere to these 6 protocol rules:
 
 1. **One Step / Phase at a Time**:
    - Follow the step-by-step roadmap methodically. Never skip phases or combine unverified refactors.
@@ -30,6 +30,21 @@ Every agent working on this repository must strictly adhere to these 5 protocol 
    - Build command: `.\build_env.bat cmake --build build-cpu-core --config Release -j 8`
    - Test command: `.\build_env.bat ctest --test-dir build-cpu-core --output-on-failure -C Release`
    - Use `TRANSCRIBE_BUILD` compile definition for internal targets to prevent Windows `__declspec(dllimport)` link errors.
+6. **Upstream Sync Protocol — merge, never content-copy**:
+   - Syncing `0xShug0/audio.cpp:main` **must** end in a recorded merge (a real
+     merge, or `git merge -s ours upstream/main` when every commit has been
+     dispositioned by hand). Copying content without a merge leaves the
+     merge-base behind, and `git` then re-reports commits that are already
+     applied — this produced a phantom "6 commits behind" that survived two
+     sessions (2 of the 6 were already in the tree verbatim).
+   - Audit each upstream commit **by content, not by subject line**: grep the
+     target symbols in this tree and dry-run with `git apply --check` before
+     deciding. Fork divergence makes some upstream commits genuinely N/A —
+     record those in the merge ledger so they are not re-triaged next session.
+   - Check the sync is real with
+     `git rev-list --left-right --count HEAD...upstream/main` (right operand
+     must read `0`). `git fetch upstream` is always safe; never `git pull` this
+     repo from upstream.
 
 ---
 
@@ -227,8 +242,16 @@ Every agent working on this repository must strictly adhere to these 5 protocol 
 
 ## 4. Current State & Handoff Summary for AI Agents
 
-- **Current Timestamp**: 2026-08-25 (Upstream audio.cpp main synchronization & Phase 11 W1a close)
+- **Current Timestamp**: 2026-08-26 (Upstream reconciliation to `c79e588` — **0 behind** — on top of the 2026-08-25 Phase 11 W1a close)
 - **Last Completed Increments**:
+  - **Upstream Reconciliation (`0xShug0/audio.cpp:main@c79e588`) — 63 ahead, 0 behind**:
+    - Root-caused the recurring "6 commits behind": the prior sync (`9b34fd2`) content-copied instead of merging, so the merge-base stayed at `62735ea` and git re-reported already-applied commits. **2 of the 6 were phantoms** (`288a271` `--list-devices`, `d25ffac` chunk metadata — both verified present in the tree by symbol, not by subject line).
+    - Cherry-picked `4ec485d` supertonic voice preset (→ `90659b1`) and `d03b957` IndexTTS2 HIP F16 KV/conv default (→ `3682698`); both applied clean with upstream authorship preserved.
+    - Adapted `c79e588` tag-driven release CI (→ `a775463`): `.github/workflows/release.yml` + `docs/RELEASING.md`, artifacts rebranded `audio-<tag>-…` → `speech-<tag>-…`.
+    - Declared `c6805de` (audio.cpp README 0.7 banner) **N/A** — fork README has no such banner; recorded in the merge ledger so it is not re-triaged.
+    - Closed with `git merge -s ours upstream/main` carrying the full 6-commit disposition ledger. `git rev-list --left-right --count HEAD...upstream/main` now reads **`63  0`**. See Operating Rule 6.
+    - Reference trees pulled: `audio.cpp`→`c79e588`, `transcribe.cpp`→`2102bca` (**ggml bumped to upstream master `36da5713` / v0.22.0**), `audio_cunba`→`8cf5136`, `transcribe_cunba`→`2345350`. `speech.cpp` was fetched only, never pulled.
+    - Total CTest targets: **100/100 100% green** (96 passed, 4 clean model-dependent skips) — unchanged from baseline.
   - **Upstream Synchronization (`0xShug0/audio.cpp:main@d25ffac`) & `speech.cpp` Naming Aliases**:
     - Extracted device enumeration into `engine::core::print_backend_devices`.
     - Added `--list-devices` support to `audiocpp_server` and CLI.
