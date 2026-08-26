@@ -1,5 +1,11 @@
 # GGML Reference Map
 
+> Paths of the form `src/arch/<family>/...` are transcribe.cpp's tree (parent
+> repo, read at `2102bca`), which speech.cpp carries under
+> `src/runtime/arch/<family>/` until Phase 10.5 / 11 retires each family into
+> `src/models/<family>/`. Retired families (qwen3_asr since 2026-08-26) stay
+> readable in the parent; the line references below were not re-pointed.
+
 A curated index of *where to look* when you need to implement or debug
 a ggml pattern during Stage 4 C++ bring-up of a new family.
 

@@ -1,5 +1,16 @@
 # Qwen3-ASR
 
+> **speech.cpp status (Phase 10.5, 2026-08-26):** the transcribe.cpp arch this
+> document describes (`src/runtime/arch/qwen3_asr/`, 4,329 LOC) has been
+> retired; `src/models/qwen3_asr/` is the single implementation and carries the
+> arch's distinguishing features (1-gram-lookup speculative decode via
+> `spec_k_drafts`, HF BPE parity, BCP-47 language hints, cancellation). The
+> arch tree remains readable in the parent repo (transcribe.cpp @ `2102bca`,
+> `src/arch/qwen3_asr/`); the methodology below - dump points, tolerances,
+> the 8-stage port - is unchanged and is what Track M carries onto the engine.
+> Gates: `qwen3_asr_engine_smoke_test`, `qwen3_asr_bpe_parity_test`,
+> `asr_e2e_qwen3_asr_wer_test`.
+
 Status: accuracy (CPU / Metal / Vulkan all pass 13/13 dumps; e2e
 transcription matches reference).
 

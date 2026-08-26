@@ -63,9 +63,11 @@ void test_adapter_find_arch_coverage() {
 }
 
 void test_overlapping_families_distinct_dispatch() {
-    // For overlapping families (qwen3_asr, voxtral_realtime, moss),
-    // adapter_find_arch must return the adapter entry point while
-    // find_arch returns the transcribe.cpp builtin or adapter based on search order.
+    // For the families that overlapped at the start of the fusion
+    // (qwen3_asr, voxtral_realtime, moss), adapter_find_arch must return the
+    // adapter entry point; find_arch returns the transcribe.cpp builtin while
+    // one still exists (voxtral_realtime, moss) and the adapter once Phase
+    // 10.5 has retired it (qwen3_asr, 2026-08-26).
     const char * const kOverlapping[] = {"qwen3_asr", "voxtral_realtime", "moss"};
     for (const char * family : kOverlapping) {
         const transcribe::Arch * adapter_arch = transcribe::adapter_find_arch(family);
