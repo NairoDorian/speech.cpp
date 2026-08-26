@@ -1896,15 +1896,12 @@ void ggml_compute_forward_repeat_back(
 }
 
 // ggml_compute_forward_concat
-
 static void ggml_compute_forward_concat_any(
     const ggml_compute_params * params,
     ggml_tensor * dst) {
 
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
-
-    const size_t len = ggml_type_size(src0->type);
 
     const int ith = params->ith;
     const int nth = params->nth;
@@ -1914,21 +1911,33 @@ static void ggml_compute_forward_concat_any(
     const int32_t dim = ggml_get_op_params_i32(dst, 0);
 
     GGML_ASSERT(dim >= 0 && dim < 4);
+    GGML_ASSERT(ggml_is_contiguous_rows(src0));
+    GGML_ASSERT(ggml_is_contiguous_rows(src1));
 
     // MINITTS_CONCAT_FASTPATH (audio.cpp fork delta): when concatenating along
     // dim 1 with fully contiguous tensors, copy each (ne0 x ne1) plane as two
-    // bulk memcpys instead of element-wise indexing. Upstream still walks every
-    // element scalar-wise ("TODO: smarter multi-theading" below); the framework
-    // concatenates per-head attention outputs in a loop, so this is a hot path.
-    if (dim == 1 && ggml_is_contiguous(src0) && ggml_is_contiguous(src1) && ggml_is_contiguous(dst)) {
-        GGML_ASSERT(ne00 == ne10);
+    // bulk memcpys. Upstream 0.22.0 rewrote this function to be row-wise memcpy
+    // (0.20.2 walked every element scalar-wise, which is what this delta
+    // originally restored), so the remaining win is memcpy COUNT: ne01 + ne11
+    // calls per plane collapse to 2. The framework concatenates per-head
+    // attention outputs in a loop (the ExplicitCpuPerHead lowering in
+    // src/framework/modules/attention/scaled_dot_product_attention.cpp), so this
+    // is still a hot path.
+    //
+    // Byte counts go through ggml_row_size (block-aware) rather than a bare
+    // ggml_type_size product, so the shortcut is also correct for quantized
+    // types -- matching the blck_size discipline upstream adopted in 0.22.0.
+    if (dim == 1 && src0->type == dst->type && src1->type == dst->type &&
+        ggml_is_contiguous(src0) && ggml_is_contiguous(src1) && ggml_is_contiguous(dst)) {
+        GGML_ASSERT(ne00 == ne10 && ne00 == ne0);
+        GGML_ASSERT(ne01 + ne11 == ne1);
         GGML_ASSERT(ne02 == ne12 && ne03 == ne13);
         const int64_t planes = ne02 * ne03;
         const int64_t plane_begin = planes * ith / nth;
         const int64_t plane_end = planes * (ith + 1) / nth;
-        const size_t src0_bytes = (size_t) ne00 * ne01 * len;
-        const size_t src1_bytes = (size_t) ne10 * ne11 * len;
-        const size_t dst_plane_bytes = (size_t) ne0 * ne1 * len;
+        const size_t src0_bytes = ggml_row_size(src0->type, ne00) * ne01;
+        const size_t src1_bytes = ggml_row_size(src1->type, ne10) * ne11;
+        const size_t dst_plane_bytes = ggml_row_size(dst->type, ne0) * ne1;
 
         for (int64_t plane = plane_begin; plane < plane_end; ++plane) {
             char * dst_plane = (char *) dst->data + (size_t) plane * dst_plane_bytes;
@@ -1941,29 +1950,34 @@ static void ggml_compute_forward_concat_any(
     }
 
     int64_t o[4] = {0, 0, 0, 0};
+
     if (dim == 0) {
+        GGML_ASSERT(src0->ne[0] % ggml_blck_size(src0->type) == 0);
+        GGML_ASSERT(src1->ne[0] % ggml_blck_size(src1->type) == 0);
+
         o[dim] = src0->ne[dim]/ggml_blck_size(src0->type);
     } else {
         o[dim] = src0->ne[dim];
     }
 
-    const char * x;
+    // Region 1: copy rows from src0
+    for (int i3 = 0; i3 < ne03; i3++) {
+        for (int i2 = ith; i2 < ne02; i2 += nth) {
+            for (int i1 = 0; i1 < ne01; i1++) {
+                const char * x = (const char *) src0->data + i1*nb01 + i2*nb02 + i3*nb03;
+                      char * y = (      char *) dst->data  + i1*nb1  + i2*nb2  + i3*nb3;
+                memcpy(y, x, ggml_row_size(src0->type, ne00));
+            }
+        }
+    }
 
-    // TODO: smarter multi-theading
-    for (int i3 = 0; i3 < ne3; i3++) {
-        for (int i2 = ith; i2 < ne2; i2 += nth) {
-            for (int i1 = 0; i1 < ne1; i1++) {
-                for (int i0 = 0; i0 < ne0/ggml_blck_size(dst->type); i0++) {
-                    if (i0 < ne00/ggml_blck_size(src0->type) && i1 < ne01 && i2 < ne02 && i3 < ne03) {
-                        x = (const char *)src0->data + (i0       )*nb00 + (i1       )*nb01 + (i2       )*nb02 + (i3       )*nb03;
-                    } else {
-                        x = (const char *)src1->data + (i0 - o[0])*nb10 + (i1 - o[1])*nb11 + (i2 - o[2])*nb12 + (i3 - o[3])*nb13;
-                    }
-
-                    char * y = (char *)dst->data + i0*nb0 + i1*nb1 + i2*nb2 + i3*nb3;
-
-                    memcpy(y, x, len);
-                }
+    // Region 2: copy rows from src1, offset into dst by o[]
+    for (int i3 = 0; i3 < ne13; i3++) {
+        for (int i2 = ith; i2 < ne12; i2 += nth) {
+            for (int i1 = 0; i1 < ne11; i1++) {
+                const char * x = (const char *) src1->data + i1*nb11         + i2*nb12         + i3*nb13;
+                      char * y = (      char *)  dst->data + (i1 + o[1])*nb1 + (i2 + o[2])*nb2 + (i3 + o[3])*nb3 + o[0]*nb0;
+                memcpy(y, x, ggml_row_size(src1->type, ne10));
             }
         }
     }
@@ -2077,7 +2091,9 @@ static void ggml_compute_forward_concat_f32(
 
     // MINITTS_CONCAT_FASTPATH (audio.cpp fork delta): concatenating along dim 0
     // with fully contiguous tensors copies each logical row as two bulk memcpys
-    // instead of scalar element dispatch.
+    // instead of scalar element dispatch. Unlike concat_any, upstream still
+    // walks this one element-wise ("TODO: smarter multi-theading" below), so the
+    // full win is intact.
     if (dim == 0 && ggml_is_contiguous(src0) && ggml_is_contiguous(src1) && ggml_is_contiguous(dst)) {
         GGML_ASSERT(ne01 == ne11 && ne02 == ne12 && ne03 == ne13);
         const int64_t rows = ne1 * ne2 * ne3;
@@ -2149,14 +2165,6 @@ void ggml_compute_forward_concat(
     ggml_tensor * dst) {
 
     const ggml_tensor * src0 = dst->src[0];
-    const ggml_tensor * src1 = dst->src[1];
-
-    if (ggml_is_quantized(src0->type)) {
-        GGML_ASSERT(ggml_is_contiguous_rows(src0));
-        GGML_ASSERT(ggml_is_contiguous_rows(src1));
-        GGML_ASSERT(src0->ne[0] % ggml_blck_size(src0->type) == 0);
-        GGML_ASSERT(src1->ne[0] % ggml_blck_size(src1->type) == 0);
-    }
 
     switch (src0->type) {
         case GGML_TYPE_F16:
@@ -6073,6 +6081,8 @@ static void ggml_compute_forward_rope_flt(
     memcpy(&beta_slow,   (int32_t *) dst->op_params + 10, sizeof(float));
     memcpy(&sections,    (int32_t *) dst->op_params + 11, sizeof(int)*4);
 
+    const int n_offs = ((int32_t *) dst->op_params)[15];
+
     GGML_TENSOR_UNARY_OP_LOCALS
 
     //printf("ne0: %d, ne1: %d, ne2: %d, ne3: %d\n", ne0, ne1, ne2, ne3);
@@ -6088,6 +6098,10 @@ static void ggml_compute_forward_rope_flt(
 
     GGML_ASSERT(n_dims <= ne0);
     GGML_ASSERT(n_dims % 2 == 0);
+
+    GGML_ASSERT(n_offs >= 0);
+    GGML_ASSERT(n_offs % 2 == 0);
+    GGML_ASSERT(n_offs + n_dims <= ne0);
 
     // rows per thread
     const int dr = (nr + nth - 1)/nth;
@@ -6114,6 +6128,7 @@ static void ggml_compute_forward_rope_flt(
 
     if (is_vision) {
         GGML_ASSERT(n_dims == ne0/2);
+        GGML_ASSERT(n_offs == 0);
     }
 
     const float * freq_factors = NULL;
@@ -6162,12 +6177,12 @@ static void ggml_compute_forward_rope_flt(
 
                 switch (mode) {
                     case GGML_ROPE_TYPE_NORMAL:
-                        rotate_pairs<T>(n_dims, 1, cache, src, dst_data, 1);
+                        rotate_pairs<T>(n_dims, 1, cache, src + n_offs, dst_data + n_offs, 1);
                         break;
                     case GGML_ROPE_TYPE_NEOX:
                     case GGML_ROPE_TYPE_MROPE:
                     case GGML_ROPE_TYPE_IMROPE:
-                        rotate_pairs<T>(n_dims, n_dims/2, cache, src, dst_data);
+                        rotate_pairs<T>(n_dims, n_dims/2, cache, src + n_offs, dst_data + n_offs);
                         break;
                     case GGML_ROPE_TYPE_VISION:
                         rotate_pairs<T>(ne0, n_dims, cache, src, dst_data);
@@ -6178,7 +6193,11 @@ static void ggml_compute_forward_rope_flt(
 
                 if (!is_vision) {
                     // fill the remain channels with data from src tensor
-                    for (int64_t i0 = n_dims; i0 < ne0; i0 += 2) {
+                    for (int64_t i0 = 0; i0 < ne0; i0 += 2) {
+                        if (i0 == n_offs) {
+                            i0 += n_dims - 2; // skip the rotated channels
+                            continue;
+                        }
                         const T * const src = (T *)((char *) src0->data + i3*nb03 + i2*nb02 + i1*nb01 + i0*nb00);
                         T * dst_data  = (T *)((char *)  dst->data + i3*nb3  + i2*nb2  + i1*nb1  + i0*nb0);
 

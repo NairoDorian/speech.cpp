@@ -1,5 +1,5 @@
 repo: https://github.com/ggml-org/ggml.git
-sha:  8c63e70982c95ceb862e3a1073a2c1beef75d60a
+sha:  36da57138425487184aa1da2eee2cde155909c6f
 patches:
   patches/ggml/0001-fix-threadpool-oversubscription.patch
   patches/ggml/0002-converge-audio-cpp-fork-apis.patch
@@ -14,14 +14,44 @@ This directory is generated from the upstream ggml tree at the SHA above, minus
 edit it by hand. Run scripts/sync-ggml.sh <ref> from the repo root to reproduce
 or upgrade it; the script rewrites this file.
 
+PIN HISTORY:
+  8c63e709 (ggml 0.20.2) -> 36da5713 (ggml 0.22.0), 2026-08-26.
+Bumped to match parent transcribe.cpp, which moved to 36da5713 in its commit
+2102bca. speech.cpp is equally a child of audio.cpp and transcribe.cpp, so a
+dependency floor moving in EITHER parent moves ours (AGENTS.md "Dual
+Parentage"; tracker Operating Rule 7). Our pin must stay at or above
+transcribe.cpp's ggml/UPSTREAM sha -- scripts/sync-deps.sh checks this.
+
+What the 0.22.0 bump cost, patch by patch (all seven still apply):
+  0001-0004, 0006  applied unchanged.
+  0005  REBASED. Upstream rewrote ggml_compute_forward_concat_any into a
+        row-wise memcpy loop -- i.e. it CONVERGED on most of this fork delta,
+        which had existed to replace 0.20.2's scalar element walk. The `len`
+        local the patch's byte math used is gone; byte counts now go through
+        ggml_row_size (block-aware), which also removes a latent over-count
+        for quantized types in our own delta. concat_f32 is untouched upstream
+        and keeps its full win. The remaining concat_any win is memcpy COUNT
+        (ne01+ne11 row copies per plane collapse to 2) -- benchmark before
+        carrying it across the next bump.
+  0007  REGENERATED. The previous file was hand-written and had never been
+        round-trip verified: one hunk declared a 21-line new side for a
+        35-line body, and the file lacked a trailing newline, so `git apply`
+        rejected it as corrupt. Its content was present in the vendored tree
+        anyway -- i.e. the delta was one sync away from silent loss. It is the
+        only patch whose targets (include/ggml-cuda.h, src/ggml-cuda/
+        common.cuh) carry CRLF blobs upstream, which is why it never got a
+        clean sync run; a pure-LF patch does apply through the script's
+        tr -d '\r' normalization.
+
 CONVERGENCE STATUS (V6 plan R1 / sub-task 0.L):
 The audio.cpp fork tree (HEAD 52080cd, labelled 0.12.0) was replaced by this
-upstream pin (8c63e709, ggml 0.20.2) + the threadpool patch, mirroring
-transcribe.cpp's ggml (its "upgrade ggml to 0.20.2" commit 923d4a0). Any
-audio.cpp fork-only deltas must be re-added as tracked patches under
-patches/ggml/. The convergence build (point engine_core at this tree, run the
-audio.cpp test suite CPU + one GPU backend) certifies the framework against the
-new API; fix API drift there, never by hand-editing this tree.
+upstream pin (originally 8c63e709 / ggml 0.20.2; see PIN HISTORY above) + the
+threadpool patch, mirroring transcribe.cpp's ggml (its "upgrade ggml to
+0.20.2" commit 923d4a0). Any audio.cpp fork-only deltas must be re-added as
+tracked patches under patches/ggml/. The convergence build (point engine_core
+at this tree, run the audio.cpp test suite CPU + one GPU backend) certifies
+the framework against the new API; fix API drift there, never by hand-editing
+this tree.
 
 FORK-ONLY APIS NOW CONVERGED (patch 0002, applied in-place + tracked):
   ggml_graph_set_n_nodes   ggml_conv_1d_fast_1d_im2col

@@ -1,40 +1,70 @@
 Restore the audio.cpp fork's contiguous concat fast paths on the CPU backend
 (the fork tags these sites MINITTS_CONCAT_FASTPATH).
 
-Upstream still walks every element scalar-wise, indexing all four dimensions per
-element ("TODO: smarter multi-theading"). When src0, src1 and dst are all
-contiguous, concatenating along dim 1 is two bulk memcpys per (ne0 x ne1) plane
-and along dim 0 is two per row. The framework concatenates per-head attention
-outputs in a loop (the ExplicitCpuPerHead lowering in
+REBASED for ggml 0.22.0 (36da5713). Two things changed upstream and this patch
+had to be reworked rather than merely re-offset:
+
+  1. ggml_compute_forward_concat_any was REWRITTEN. In 0.20.2 it walked every
+     element scalar-wise ("TODO: smarter multi-theading"), which is what this
+     delta originally restored. 0.22.0 now does row-wise memcpy itself, adds
+     GGML_ASSERT(ggml_is_contiguous_rows(...)), and became block-size aware.
+     Upstream has therefore CONVERGED on most of this fork delta. What remains
+     is the memcpy COUNT for the fully-contiguous dim-1 case: ne01 + ne11 row
+     copies per plane collapse to 2 plane copies. That is still worth keeping
+     for the per-head attention concat loop, but the margin is far smaller than
+     it was against 0.20.2 -- a benchmark should decide whether to retire this
+     half of the patch at the next bump.
+  2. The `len` local (ggml_type_size(src0->type)) that this patch's byte math
+     used no longer exists in concat_any. Byte counts now go through
+     ggml_row_size, which is block-aware; the old bare ggml_type_size product
+     would have over-counted for quantized types, so the rebase also removes a
+     latent (in practice unreached) defect in our own delta. Type equality
+     between src0/src1/dst is now asserted explicitly.
+
+ggml_compute_forward_concat_f32 is UNCHANGED upstream -- it still dispatches
+scalar element-wise -- so its dim-0 row and dim-1 plane fast paths carry their
+full original win and are reproduced verbatim.
+
+The framework concatenates per-head attention outputs in a loop (the
+ExplicitCpuPerHead lowering in
 src/framework/modules/attention/scaled_dot_product_attention.cpp), so this is a
 hot path, and losing it in the 0.20.2 convergence was a silent perf regression
 rather than a correctness one.
 
-Behaviour is unchanged: the fast paths are gated on full contiguity and fall
-through to the upstream loop otherwise.
+Behaviour is unchanged: every fast path is gated on full contiguity (and, for
+concat_any, matching types) and falls through to the upstream loop otherwise.
 
 diff --git a/src/ggml-cpu/ops.cpp b/src/ggml-cpu/ops.cpp
-index f84ab1e..a8eca4f 100644
 --- a/src/ggml-cpu/ops.cpp
 +++ b/src/ggml-cpu/ops.cpp
-@@ -1915,6 +1915,31 @@ static void ggml_compute_forward_concat_any(
- 
-     GGML_ASSERT(dim >= 0 && dim < 4);
+@@ -1914,6 +1914,41 @@
+     GGML_ASSERT(ggml_is_contiguous_rows(src0));
+     GGML_ASSERT(ggml_is_contiguous_rows(src1));
  
 +    // MINITTS_CONCAT_FASTPATH (audio.cpp fork delta): when concatenating along
 +    // dim 1 with fully contiguous tensors, copy each (ne0 x ne1) plane as two
-+    // bulk memcpys instead of element-wise indexing. Upstream still walks every
-+    // element scalar-wise ("TODO: smarter multi-theading" below); the framework
-+    // concatenates per-head attention outputs in a loop, so this is a hot path.
-+    if (dim == 1 && ggml_is_contiguous(src0) && ggml_is_contiguous(src1) && ggml_is_contiguous(dst)) {
-+        GGML_ASSERT(ne00 == ne10);
++    // bulk memcpys. Upstream 0.22.0 rewrote this function to be row-wise memcpy
++    // (0.20.2 walked every element scalar-wise, which is what this delta
++    // originally restored), so the remaining win is memcpy COUNT: ne01 + ne11
++    // calls per plane collapse to 2. The framework concatenates per-head
++    // attention outputs in a loop (the ExplicitCpuPerHead lowering in
++    // src/framework/modules/attention/scaled_dot_product_attention.cpp), so this
++    // is still a hot path.
++    //
++    // Byte counts go through ggml_row_size (block-aware) rather than a bare
++    // ggml_type_size product, so the shortcut is also correct for quantized
++    // types -- matching the blck_size discipline upstream adopted in 0.22.0.
++    if (dim == 1 && src0->type == dst->type && src1->type == dst->type &&
++        ggml_is_contiguous(src0) && ggml_is_contiguous(src1) && ggml_is_contiguous(dst)) {
++        GGML_ASSERT(ne00 == ne10 && ne00 == ne0);
++        GGML_ASSERT(ne01 + ne11 == ne1);
 +        GGML_ASSERT(ne02 == ne12 && ne03 == ne13);
 +        const int64_t planes = ne02 * ne03;
 +        const int64_t plane_begin = planes * ith / nth;
 +        const int64_t plane_end = planes * (ith + 1) / nth;
-+        const size_t src0_bytes = (size_t) ne00 * ne01 * len;
-+        const size_t src1_bytes = (size_t) ne10 * ne11 * len;
-+        const size_t dst_plane_bytes = (size_t) ne0 * ne1 * len;
++        const size_t src0_bytes = ggml_row_size(src0->type, ne00) * ne01;
++        const size_t src1_bytes = ggml_row_size(src1->type, ne10) * ne11;
++        const size_t dst_plane_bytes = ggml_row_size(dst->type, ne0) * ne1;
 +
 +        for (int64_t plane = plane_begin; plane < plane_end; ++plane) {
 +            char * dst_plane = (char *) dst->data + (size_t) plane * dst_plane_bytes;
@@ -47,9 +77,9 @@ index f84ab1e..a8eca4f 100644
 +    }
 +
      int64_t o[4] = {0, 0, 0, 0};
+ 
      if (dim == 0) {
-         o[dim] = src0->ne[dim]/ggml_blck_size(src0->type);
-@@ -2048,6 +2073,52 @@ static void ggml_compute_forward_concat_f32(
+@@ -2052,6 +2087,54 @@
  
      GGML_ASSERT(dim >= 0 && dim < 4);
  
@@ -57,7 +87,9 @@ index f84ab1e..a8eca4f 100644
 +
 +    // MINITTS_CONCAT_FASTPATH (audio.cpp fork delta): concatenating along dim 0
 +    // with fully contiguous tensors copies each logical row as two bulk memcpys
-+    // instead of scalar element dispatch.
++    // instead of scalar element dispatch. Unlike concat_any, upstream still
++    // walks this one element-wise ("TODO: smarter multi-theading" below), so the
++    // full win is intact.
 +    if (dim == 0 && ggml_is_contiguous(src0) && ggml_is_contiguous(src1) && ggml_is_contiguous(dst)) {
 +        GGML_ASSERT(ne01 == ne11 && ne02 == ne12 && ne03 == ne13);
 +        const int64_t rows = ne1 * ne2 * ne3;
