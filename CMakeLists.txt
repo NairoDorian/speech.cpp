@@ -3085,6 +3085,28 @@ if (ENGINE_BUILD_TESTS)
     )
     set_tests_properties(moonshine_streaming_engine_smoke_test PROPERTIES SKIP_RETURN_CODE 2)
 
+    # Phase 11 W2a: engine-path gate for the native Whisper package. Gated on
+    # the pinned legacy whisper.cpp ggml-tiny.en.bin (model_specs/whisper.json
+    # is catalog-only - its packages are not downloadable), and held to PARITY
+    # with the arch baseline that asr_e2e_whisper_wer_test locks, not merely
+    # the 10% structural bound.
+    add_engine_unittest(whisper_engine_smoke_test tests/unittests/test_whisper_engine.cpp)
+    target_sources(whisper_engine_smoke_test PRIVATE
+        src/models/whisper/graphs.cpp
+        src/models/whisper/assets.cpp
+        src/models/whisper/runtime.cpp
+        src/models/whisper/session.cpp
+    )
+    target_include_directories(whisper_engine_smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    add_test(
+        NAME whisper_engine_smoke_test
+        COMMAND whisper_engine_smoke_test
+            ${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-tiny.en.bin
+            ${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    set_tests_properties(whisper_engine_smoke_test PROPERTIES SKIP_RETURN_CODE 2)
+
 
     add_engine_unittest(fun_asr_nano_frontend_probe tests/fun_asr_nano/fun_asr_nano_frontend_probe.cpp)
 
