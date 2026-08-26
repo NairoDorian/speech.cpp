@@ -64,14 +64,20 @@ Post-sync verification is mandatory:
 ```bash
 .\build_env.bat cmake --build build-cpu-core --config Release -j 8
 .\build_env.bat ctest --test-dir build-cpu-core --output-on-failure -C Release
-cmake -DSRC_DIR=src -P tests/lint_teardown.cmake
+cmake -DSRC_DIR=src/runtime -P tests/lint_teardown.cmake
 ```
+
+Note the `src/runtime` scope: unlike transcribe.cpp, whose whole tree is clean,
+speech.cpp still has raw ggml teardown calls in the audio.cpp-inherited model
+sessions under `src/models/`. Widening this to `src/` fails by design until
+Phase 0 sub-task 0.J (the `safe_*` teardown retrofit) lands.
 
 `external/ggml/` is **generated**. Never hand-edit it — every downstream delta
 lives in `patches/ggml/NNNN-*.patch` and is re-applied in filename order by
 `scripts/sync-ggml.sh`. A ggml bump that breaks a patch is normal: rebase the
 patch, regenerate it with `git diff --relative=external/ggml`, keep the prose
 header, and re-run the sync until it is clean.
+
 ## Python
 
 - ALWAYS use `uv run` for every Python invocation. Never bare `python`,

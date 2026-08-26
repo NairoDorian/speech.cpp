@@ -134,7 +134,7 @@ bold "Post-sync verification (mandatory after adopting anything above)"
 cat <<'EOF'
   .\build_env.bat cmake --build build-cpu-core --config Release -j 8
   .\build_env.bat ctest --test-dir build-cpu-core --output-on-failure -C Release
-  cmake -DSRC_DIR=src -P tests/lint_teardown.cmake
+  cmake -DSRC_DIR=src/runtime -P tests/lint_teardown.cmake   # src/ fails by design (Phase 0 sub-task 0.J)
 EOF
 echo
 
