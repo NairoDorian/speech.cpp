@@ -180,8 +180,14 @@ Two findings worth carrying forward:
   W1a found in `moonshine.json`** — its gguf source required `config.json` /
   `tokenizer.json` sidecars the pinned packages do not carry
   (`audiocpp_gguf --inspect` → `embedded_sidecars=false`), so it could never
-  resolve. Fixed to tensors-only. **Check the remaining catalog specs for this
-  pattern** before their families are migrated.
+  resolve. Fixed to tensors-only. **Scope note (corrected after a catalog
+  sweep):** a `files:` block on a gguf source is the *norm and is correct* —
+  `audiocpp_gguf` embeds sidecars by default and fails conversion if it cannot
+  find them, and 54+ specs legitimately declare one. This is not a
+  catalog-wide defect; it hits only families pinned to **third-party GGUFs
+  this pipeline did not produce**, which is exactly the moonshine pair
+  (`handy-computer/moonshine-*-gguf`). Check per family with `--inspect`
+  before porting; do not rewrite `files` blocks on the pattern alone.
 - `StreamingSessionBase` guarantees **append-only** committed text, *not* that
   `committed_text()` stays a live prefix of `full_text()`. A from-BOS re-decode
   may revise an already-committed region; the base then keeps the old commit
@@ -346,13 +352,17 @@ three shared failures gone; WER gates not registered there — ABI/arches OFF).
    variants, legacy `.bin` loader, suppress tables, temperature-fallback ladder
    + DecodeTelemetry; unified MelExtractor + TokenizerHub; validate the 16
    packages in `model_specs/whisper.json`.
-   - **Audit `whisper.json`'s sources block first.** Two families in a row
-     (`moonshine.json` in W1a, `moonshine_streaming.json` in W1b) shipped a
-     gguf source requiring `config.json`/`tokenizer.json` sidecars the pinned
-     GGUFs do not carry, so the source could never resolve. Check every
-     remaining catalog spec for the same pattern with
-     `audiocpp_gguf --inspect <gguf>` (`embedded_sidecars=false` means the
-     `files` block must go).
+   - **Check `whisper.json`'s gguf source against the actual pinned GGUF
+     before porting** — but scope it correctly. A `files:` block on a gguf
+     source is the **norm and is correct**: `audiocpp_gguf` embeds sidecars by
+     default and fails conversion if it cannot find them, so 54+ catalog specs
+     legitimately declare one. The defect only hits families pinned to
+     **third-party GGUFs this pipeline did not produce** — that is what bit
+     `moonshine.json` (W1a) and `moonshine_streaming.json` (W1b), both of
+     which pull from `handy-computer/moonshine-*-gguf`. Decide per family with
+     `audiocpp_gguf --inspect <gguf>`: `embedded_sidecars=false` means drop the
+     `files` block; `true` means leave the spec alone. Do **not** rewrite
+     `files` blocks across the catalog on the pattern alone.
 3. **Zero-Dependency Language Bindings (`dynload`)**:
    - Finalize single-artifact shared build (`SPEECH_SHARED_EMBED=ON`) and zero-dependency dynload bindings (Rust, Python ctypes, TypeScript koffi, Swift).
 4. **HuggingFace 5.x Long-form Seek Continuation**:
