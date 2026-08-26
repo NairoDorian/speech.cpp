@@ -3210,6 +3210,21 @@ if (ENGINE_BUILD_TESTS)
     )
     set_tests_properties(voxtral_realtime_engine_smoke_test PROPERTIES SKIP_RETURN_CODE 2)
 
+    # Phase 10.5, family 3: sortformer_diar. This family had no registered gate
+    # at all - only a warm bench, which is built off by default - so the first
+    # step of the verdict is a measurement of what the engine package does.
+    add_engine_unittest(sortformer_diar_engine_smoke_test tests/unittests/test_sortformer_diar_engine.cpp)
+    audiocpp_test_link_model_objects(sortformer_diar_engine_smoke_test sortformer_diar)
+    target_include_directories(sortformer_diar_engine_smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    add_test(
+        NAME sortformer_diar_engine_smoke_test
+        COMMAND sortformer_diar_engine_smoke_test
+            ${CMAKE_CURRENT_SOURCE_DIR}/models/sortformer-diar-4spk-v1-q8_0.gguf
+            ${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    set_tests_properties(sortformer_diar_engine_smoke_test PROPERTIES SKIP_RETURN_CODE 2)
+
 
     add_engine_unittest(fun_asr_nano_frontend_probe tests/fun_asr_nano/fun_asr_nano_frontend_probe.cpp)
 

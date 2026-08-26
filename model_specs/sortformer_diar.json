@@ -16,7 +16,8 @@
   ],
   "capabilities": {
     "diar": [
-      "speaker_turns"
+      "speaker_turns",
+      "cancellation"
     ]
   },
   "dependencies": [],

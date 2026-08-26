@@ -262,6 +262,7 @@ runtime::TaskResult SortformerDiarSession::run_offline_diarization(
     const SortformerPostprocessConfig & config) {
     SortformerRunTimings timings;
     const auto wall_started = std::chrono::steady_clock::now();
+    emit_progress("sortformer_diar", 0, 3);
 
     SortformerFeatureBatch features;
     timings.frontend_ms = measure_ms([&]() {
@@ -272,6 +273,7 @@ runtime::TaskResult SortformerDiarSession::run_offline_diarization(
             &timings);
     });
 
+    emit_progress("sortformer_diar", 1, 3);
     const int64_t kernel = assets_->model_config.fc_encoder.subsampling_conv_kernel_size;
     const int64_t stride = assets_->model_config.fc_encoder.subsampling_conv_stride;
     const int64_t padding = (kernel - 1) / 2;
@@ -339,6 +341,7 @@ runtime::TaskResult SortformerDiarSession::run_offline_diarization(
         });
     });
 
+    emit_progress("sortformer_diar", 2, 3);
     runtime::TaskResult result;
     const int64_t frame_step_samples =
         assets_->feature_config.hop_length * assets_->model_config.fc_encoder.subsampling_factor;

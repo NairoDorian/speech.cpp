@@ -259,6 +259,11 @@ runtime::CapabilitySet capabilities_from_spec(const json::Value & spec) {
         has_capability(*capabilities, "style_control") || has_capability(*capabilities, "emotion_control");
     out.supports_timestamps =
         has_capability(*capabilities, "word_timestamps") || has_capability(*capabilities, "segments");
+    // Phase 10.5: spec-backed families declare cancellation the same way they
+    // declare everything else. Absent means false, so no existing spec changes
+    // meaning - a family only advertises it once its session actually polls
+    // RunControl (which is what makes request_abort() unwind run()).
+    out.supports_cancellation = has_capability(*capabilities, "cancellation");
     return out;
 }
 
