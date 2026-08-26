@@ -1070,6 +1070,10 @@ std::string adapter_sniff_framework_family(const char * path) {
     try {
         ModelLoadRequest request;
         request.model_path = transcribe::path_from_utf8(path);
+        // For an audio.cpp GGUF the registry resolves the family from the
+        // file's own `audiocpp.model_spec.family` KV; for a safetensors
+        // directory it probes can_load(). Either way inspect() is the single
+        // answer, and a family this build does not carry throws (caught below).
         const auto inspection = default_registry().inspect(request);
         const std::string & family = inspection.metadata.family;
         // Only report families the adapter table actually dispatches; a

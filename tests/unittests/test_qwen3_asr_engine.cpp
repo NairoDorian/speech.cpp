@@ -31,6 +31,7 @@
 #include "engine/framework/runtime/model.h"
 #include "engine/framework/runtime/registry.h"
 #include "engine/models/qwen3_asr/loader.h"
+#include "engine/models/silero_vad/session.h"
 
 #include <algorithm>
 #include <chrono>
@@ -143,11 +144,27 @@ int main(int argc, char **argv) {
     }
 
     ModelRegistry registry;
+    // Silero is registered FIRST on purpose: its can_load() accepts any GGUF
+    // whose resource bundle resolves, so before the registry learned to read a
+    // GGUF's own audiocpp.model_spec.family, this ordering handed a Qwen3-ASR
+    // file to the VAD loader - a load that succeeded and then failed at run
+    // time with "missing tensor: stft_conv.weight".
+    registry.register_loader(engine::models::silero_vad::make_silero_vad_loader());
     registry.register_loader(
         engine::models::qwen3_asr::make_qwen3_asr_loader());
     if (!registry.supports_family("qwen3_asr")) {
       std::cerr << "FAIL: registry does not resolve qwen3_asr\n";
       return 1;
+    }
+    {
+      ModelLoadRequest sniff;
+      sniff.model_path = model_path;  // no family_hint: pure auto-detection
+      const auto detected = registry.inspect(sniff).metadata.family;
+      if (detected != "qwen3_asr") {
+        std::cerr << "FAIL: auto-detection resolved the GGUF as '" << detected
+                  << "', not qwen3_asr\n";
+        return 1;
+      }
     }
 
     ModelLoadRequest request;

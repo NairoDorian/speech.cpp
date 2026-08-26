@@ -1,5 +1,6 @@
 #include "engine/framework/runtime/registry.h"
 
+#include "engine/framework/assets/tensor_source.h"
 #include "engine/framework/debug/trace.h"
 #include "engine/framework/model_spec/package.h"
 #include "engine/framework/io/config.h"
@@ -11,7 +12,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
+#include <optional>
 #include <stdexcept>
+#include <string>
 
 namespace engine::runtime {
 
@@ -34,6 +38,30 @@ std::vector<std::string> split_csv(std::string value) {
         start = end + 1;
     }
     return items;
+}
+
+// An audio.cpp GGUF names its own family in the `audiocpp.model_spec.family`
+// KV (its `general.architecture` is the container tag "audiocpp", identical
+// for every family). That name is authoritative and must beat can_load()
+// probing: several loaders answer "yes" to any GGUF whose resource bundle
+// resolves - Silero VAD among them - so without this, auto-detection returned
+// whichever loader happened to be registered first. The symptom was a
+// successful load followed by "missing tensor: stft_conv.weight" at run time,
+// i.e. a Qwen3-ASR GGUF decoded as Silero VAD.
+std::optional<std::string> embedded_gguf_family(const std::filesystem::path & path) {
+    if (!engine::io::is_existing_file(path)) {
+        return std::nullopt;
+    }
+    try {
+        if (const auto spec = engine::assets::read_gguf_embedded_model_spec(path)) {
+            if (!spec->family.empty()) {
+                return spec->family;
+            }
+        }
+    } catch (const std::exception &) {
+        // Not a GGUF, or no readable metadata: fall back to can_load probing.
+    }
+    return std::nullopt;
 }
 
 void log_model_load_trace(const ModelInspection & inspection, const ILoadedVoiceModel & model) {
@@ -163,17 +191,39 @@ void ModelRegistry::validate_request(const ModelLoadRequest & request) const {
 }
 
 const IVoiceModelLoader * ModelRegistry::find_loader(const ModelLoadRequest & request) const {
-    for (const auto & loader : loaders_) {
-        if (request.family_hint.has_value()) {
-            if (loader->family() == *request.family_hint) {
-                return loader.get();
-            }
-            const auto aliases = loader->family_aliases();
-            if (std::find(aliases.begin(), aliases.end(), *request.family_hint) != aliases.end()) {
-                return loader.get();
-            }
-            continue;
+    const auto matches_family = [](const IVoiceModelLoader & loader, const std::string & name) {
+        if (loader.family() == name) {
+            return true;
         }
+        const auto aliases = loader.family_aliases();
+        return std::find(aliases.begin(), aliases.end(), name) != aliases.end();
+    };
+
+    if (request.family_hint.has_value()) {
+        for (const auto & loader : loaders_) {
+            if (matches_family(*loader, *request.family_hint)) {
+                return loader.get();
+            }
+        }
+        return nullptr;
+    }
+
+    // The file may name its own family; trust that over can_load() probing.
+    if (const auto embedded = embedded_gguf_family(request.model_path)) {
+        for (const auto & loader : loaders_) {
+            if (matches_family(*loader, *embedded)) {
+                return loader.get();
+            }
+        }
+        // A GGUF that names a family this build does not carry is not a
+        // candidate for some other loader's can_load() - say so instead of
+        // silently decoding it as the wrong family.
+        throw std::runtime_error(
+            "model " + request.model_path.string() + " declares family '" + *embedded +
+            "', which is not registered in this build");
+    }
+
+    for (const auto & loader : loaders_) {
         if (loader->can_load(request)) {
             return loader.get();
         }
