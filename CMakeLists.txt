@@ -1403,6 +1403,18 @@ audiocpp_add_model(moonshine
         engine::models::moonshine::make_moonshine_loader
 )
 
+audiocpp_add_model(moonshine_streaming
+    SOURCES
+        src/models/moonshine_streaming/graphs.cpp
+        src/models/moonshine_streaming/assets.cpp
+        src/models/moonshine_streaming/runtime.cpp
+        src/models/moonshine_streaming/session.cpp
+    INCLUDES
+        engine/models/moonshine_streaming/session.h
+    LOADERS
+        engine::models::moonshine_streaming::make_moonshine_streaming_loader
+)
+
 audiocpp_add_model(vevo2
     SOURCES
         src/models/vevo2/ar.cpp
@@ -1539,6 +1551,7 @@ set(AUDIOCPP_ASR_MODEL_TARGETS
     nemotron_asr
     citrinet_asr
     moonshine
+    moonshine_streaming
     qwen3_asr
     parakeet_tdt
     higgs_audio_stt
@@ -3032,6 +3045,27 @@ if (ENGINE_BUILD_TESTS)
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
     set_tests_properties(moonshine_engine_smoke_test PROPERTIES SKIP_RETURN_CODE 2)
+
+    # Phase 11 W1b: engine-path gate for the native Moonshine-Streaming
+    # package. Same linking/cwd contract as the W1a gate above: package
+    # sources linked directly, working directory pinned to the source root so
+    # model-spec resolution finds the production catalog.
+    add_engine_unittest(moonshine_streaming_engine_smoke_test tests/unittests/test_moonshine_streaming_engine.cpp)
+    target_sources(moonshine_streaming_engine_smoke_test PRIVATE
+        src/models/moonshine_streaming/graphs.cpp
+        src/models/moonshine_streaming/assets.cpp
+        src/models/moonshine_streaming/runtime.cpp
+        src/models/moonshine_streaming/session.cpp
+    )
+    target_include_directories(moonshine_streaming_engine_smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    add_test(
+        NAME moonshine_streaming_engine_smoke_test
+        COMMAND moonshine_streaming_engine_smoke_test
+            ${CMAKE_CURRENT_SOURCE_DIR}/models/moonshine-streaming-tiny-Q8_0.gguf
+            ${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    set_tests_properties(moonshine_streaming_engine_smoke_test PROPERTIES SKIP_RETURN_CODE 2)
 
 
     add_engine_unittest(fun_asr_nano_frontend_probe tests/fun_asr_nano/fun_asr_nano_frontend_probe.cpp)
