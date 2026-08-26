@@ -1878,6 +1878,24 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
                          "${CMAKE_CURRENT_SOURCE_DIR}/models/moonshine-streaming-tiny-Q8_0.gguf"
                          "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
             set_tests_properties(asr_stream_text_wer_test PROPERTIES SKIP_RETURN_CODE 2)
+
+            # Whisper family gate (Phase 11 W2 prerequisite): third pinned
+            # model, and the only one that is a legacy ggml .bin rather than a
+            # GGUF -- model_specs/whisper.json is catalog-only, its 16 packages
+            # point at Whisper-*-GGUF paths that do not exist in
+            # audio-cpp/audio.cpp-gguf, so there is no downloadable GGUF for
+            # this family. ggerganov/whisper.cpp's ggml-tiny.en.bin loads
+            # through src/runtime/arch/whisper/bin_load.cpp instead, which also
+            # exercises the legacy loader W2 has to carry over.
+            #
+            # This locks the arch-path baseline (corpus WER 4.34783%, 3/69)
+            # that the native engine Whisper package must match, the same way
+            # the moonshine gates locked theirs before W1a/W1b.
+            add_test(NAME asr_e2e_whisper_wer_test
+                     COMMAND asr_e2e_wer_test
+                         "${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-tiny.en.bin"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
+            set_tests_properties(asr_e2e_whisper_wer_test PROPERTIES SKIP_RETURN_CODE 2)
         endif()
 
         # -------------------------------------------------------------------

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Fetch the pinned ASR models used by the end-to-end text gates.
 
-Two models, one per gate, both MIT, both ported and WER-validated by
-transcribe.cpp, both the smallest validated GGUF whose arch is compiled into
-the unified runtime:
+Three models, one per gate, all the smallest validated weights whose arch is
+compiled into the unified runtime:
 
 - moonshine-tiny Q8_0 (34 MB) -> asr_e2e_wer_test, the offline corpus-WER
   gate. UsefulSensors/moonshine-tiny; 4.60% WER on full LibriSpeech
@@ -14,6 +13,21 @@ the unified runtime:
   (transcribe.cpp's published parity run). Arch:
   src/runtime/arch/moonshine_streaming. HF repo revision 85ddff6,
   pinned 2026-08-20.
+- whisper tiny.en (74 MB, legacy ggml .bin) -> asr_e2e_whisper_wer_test, the
+  Whisper family gate. ggerganov/whisper.cpp ggml-tiny.en.bin - the canonical
+  whisper.cpp distribution, MIT. Pinned 2026-08-26 because
+  model_specs/whisper.json is catalog-only: its 16 packages point at
+  Whisper-*-GGUF paths that do NOT exist in audio-cpp/audio.cpp-gguf, so there
+  is no downloadable GGUF for the family. The legacy .bin loader
+  (src/runtime/arch/whisper/bin_load.cpp) reads this format directly, which is
+  why the gate uses it. Arch: src/runtime/arch/whisper.
+
+The LibriSpeech fixtures the gates score against are NOT fetched here: the four
+wav/txt pairs plus manifest.jsonl are vendored under
+assets/asr_validation/librispeech/ and tracked in git. A pin for a
+librispeech-test-clean-500w.tar.gz used to sit in this table; its HF dataset is
+now gated (HTTP 401) and nothing referenced it, so a no-argument run of this
+script failed for everyone. Removed 2026-08-26.
 
 Each download is pinned by sha256 (the HF repo's LFS oid); a mismatched or
 truncated download is deleted and reported, never installed. Destination is
@@ -69,13 +83,13 @@ PINNED_MODELS = (
         size=50_462_816,
     ),
     PinnedModel(
-        filename="librispeech-test-clean-500w.tar.gz",
+        filename="ggml-tiny.en.bin",
         url=(
-            "https://huggingface.co/datasets/handy-computer/librispeech-test-clean-subset/resolve/main/"
-            "librispeech-test-clean-500w.tar.gz"
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
+            "ggml-tiny.en.bin"
         ),
-        sha256="c8f1e582e0d37e2a9b6c039755490a6e297a7a13d7e5d956f91f7c32cb5e9821",
-        size=3_145_728,
+        sha256="921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f",
+        size=77_704_715,
     ),
 )
 
