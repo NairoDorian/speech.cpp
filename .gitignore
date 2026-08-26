@@ -50,3 +50,9 @@ __pycache__/
 /webui/native/.svelte-kit/
 /webui/native/dist/*
 !/webui/native/dist/index.html
+
+# --- release verification scratch (see docs/RELEASING.md) ---
+# Upstream audio.cpp c79e588 ignores audio-vtest-*; our release artifacts are
+# speech-branded, so ignore both prefixes.
+audio-vtest-*
+speech-vtest-*
