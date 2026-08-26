@@ -9,6 +9,69 @@ Read `CONTRIBUTING.md` for contribution policy, review gates, and coding style. 
 - **Update Documentation**: Update `CHANGELOG.md`, `progress.md`, and `MULTI_AGENT_FUSION_PLAN_AND_TRACKER.md` at each phase boundary.
 - **Pause Rule**: Pause and request user review before beginning the next phase.
 
+
+## Dual Parentage — transcribe.cpp is a co-parent, not a donor
+
+**`speech.cpp` is equally a child of `audio.cpp` and of `transcribe.cpp`.**
+We forked `audio.cpp` for convenience — it gave us the bigger tree to start
+from — but that is a *mechanical* accident of how the repo was created, not a
+statement about authority. **An improvement landing in `NairoDorian/transcribe.cpp`
+is exactly as authoritative as one landing in `0xShug0/audio.cpp`, and must be
+tracked, triaged and adopted with the same seriousness.**
+
+Consequences that are easy to get wrong:
+
+- Do **not** describe `transcribe.cpp` as a "merge source", "donor" or
+  "read-only reference" and then treat its commits as optional. It is upstream.
+  Both parents get the same audit-by-content and the same disposition ledger.
+- A dependency bump on **either** parent (ggml, a vendored third-party tree, a
+  toolchain pin) is a first-class upstream change for us. When
+  `transcribe.cpp` moved ggml to `36da5713` (v0.22.0), that was **our** ggml
+  floor moving — not a curiosity to note and defer.
+- When the two parents disagree, that is a real design decision to be recorded
+  (FUSION_ROADMAP_PLAN / V6 plan), not a tie broken by "audio.cpp is the fork
+  base".
+- `git` only knows about the `upstream` remote (`0xShug0/audio.cpp`), because
+  that is the fork base. The absence of a transcribe.cpp merge-base is a
+  **tooling limitation, not a hierarchy** — track it by hand.
+
+## Dependency Sync Routine (run before any release, and regularly)
+
+`speech.cpp` must not go into a release state on stale dependencies. Refresh
+**all three** sources, in this order, then verify:
+
+```bash
+scripts/sync-deps.sh              # report drift on all three (read-only)
+scripts/sync-deps.sh --fetch      # + fetch/ff the sibling reference repos
+```
+
+1. **audio.cpp** (parent, `upstream` remote) — `git fetch upstream`, then
+   audit `HEAD..upstream/main` by content and close with a recorded merge.
+   Never `git pull` this repo. See Operating Rule 6 in the tracker.
+2. **transcribe.cpp** (parent, no git remote here — the sibling checkout
+   `../transcribe.cpp` tracks `NairoDorian/transcribe.cpp`) — pull the sibling,
+   then triage its new commits against this tree by hand.
+3. **ggml** (vendored at `external/ggml/`, pinned in `external/ggml/UPSTREAM`) —
+   ```bash
+   scripts/sync-ggml.sh master --dry-run   # preview + patch-stack check
+   scripts/sync-ggml.sh <full-40-char-sha>
+   ```
+   A **short SHA is not a fetchable ref** — pass the full 40 characters, or a
+   branch/tag. Keep our pin at or above transcribe.cpp's `ggml/UPSTREAM` sha.
+
+Post-sync verification is mandatory:
+
+```bash
+.\build_env.bat cmake --build build-cpu-core --config Release -j 8
+.\build_env.bat ctest --test-dir build-cpu-core --output-on-failure -C Release
+cmake -DSRC_DIR=src -P tests/lint_teardown.cmake
+```
+
+`external/ggml/` is **generated**. Never hand-edit it — every downstream delta
+lives in `patches/ggml/NNNN-*.patch` and is re-applied in filename order by
+`scripts/sync-ggml.sh`. A ggml bump that breaks a patch is normal: rebase the
+patch, regenerate it with `git diff --relative=external/ggml`, keep the prose
+header, and re-run the sync until it is clean.
 ## Python
 
 - ALWAYS use `uv run` for every Python invocation. Never bare `python`,

@@ -1,14 +1,14 @@
 # Multi-Agent Fusion Plan & Progress Tracker
 
-> **The Master Key:** *The two projects (`audio.cpp` and `transcribe.cpp`) learn from each other in parallel — each is the other's teacher and student — and merging them improves them both at the same time.*
+> **The Master Key:** *The two projects (`audio.cpp` and `transcribe.cpp`) learn from each other in parallel — each is the other's teacher and student — and merging them improves them both at the same time.* `speech.cpp` is the child of **both**; the audio.cpp fork base is a convenience of how the repo was created, not a statement of precedence.
 >
-> **Target Repository:** `speech.cpp` is the **only** active development repository. `audio.cpp` and `transcribe.cpp` in `../Unified_Audio.cpp/` are read-only reference trees.
+> **Target Repository:** `speech.cpp` is the **only** active development repository. `audio.cpp` and `transcribe.cpp` in `../Unified_Audio.cpp/` are read-only *in the sense that we never commit there* — they are **both parents**, and both are equally authoritative sources of change. See Operating Rule 7.
 
 ---
 
 ## 1. Operating Rules for AI Agents
 
-Every agent working on this repository must strictly adhere to these 6 protocol rules:
+Every agent working on this repository must strictly adhere to these 7 protocol rules:
 
 1. **One Step / Phase at a Time**:
    - Follow the step-by-step roadmap methodically. Never skip phases or combine unverified refactors.
@@ -45,6 +45,31 @@ Every agent working on this repository must strictly adhere to these 6 protocol 
      `git rev-list --left-right --count HEAD...upstream/main` (right operand
      must read `0`). `git fetch upstream` is always safe; never `git pull` this
      repo from upstream.
+
+7. **Dual Parentage & the Dependency Sync Routine**:
+   - **`speech.cpp` is equally a child of `audio.cpp` and of `transcribe.cpp`.**
+     We forked `audio.cpp` because it was the larger tree to start from — a
+     mechanical convenience, **not** a precedence claim. An improvement in
+     `NairoDorian/transcribe.cpp` is **exactly as authoritative** as one in
+     `0xShug0/audio.cpp` and gets the same audit-by-content and the same
+     disposition ledger. Never treat transcribe.cpp commits as optional
+     because it is labelled a "merge source".
+   - Only `audio.cpp` has a git `upstream` remote here (it is the fork base),
+     so only it produces a merge-base. **That is a tooling limitation, not a
+     hierarchy** — transcribe.cpp drift must be tracked by hand.
+   - **A dependency bump on either parent is a first-class upstream change for
+     us.** transcribe.cpp moving ggml to `36da5713` (v0.22.0) moved *our* ggml
+     floor; it was not a curiosity to note and defer.
+   - **Before any release state, and regularly otherwise**, refresh all three
+     sources and verify — see `AGENTS.md` § "Dependency Sync Routine" and
+     `scripts/sync-deps.sh`:
+     1. `audio.cpp` via `git fetch upstream` + audited merge (Rule 6);
+     2. `transcribe.cpp` via the sibling checkout, triaged by hand;
+     3. `ggml` via `scripts/sync-ggml.sh` (keep our pin **at or above**
+        transcribe.cpp's `ggml/UPSTREAM` sha).
+   - `external/ggml/` is generated: never hand-edit, always land deltas as
+     `patches/ggml/NNNN-*.patch`. A bump that breaks a patch is normal — rebase
+     the patch, do not drop it.
 
 ---
 
