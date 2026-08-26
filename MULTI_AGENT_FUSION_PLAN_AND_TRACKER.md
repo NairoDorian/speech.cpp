@@ -88,7 +88,7 @@ Every agent working on this repository must strictly adhere to these 7 protocol 
 | **Phase 8** | **Contract convergence & exception boundary** | **`[x] DONE`** | **`StreamingSessionBase`, `RunControl`, ABI guards (92 targets)** |
 | **Phase 9** | **Unified Mel & Tokenizer subsystems** | **`[x] DONE`** | **`MelExtractor`, `TokenizerHub`, parity tests (95 targets)** |
 | **Phase 10** | **Attention & Conformer module fusion** | **`[x] DONE`** | **Unified `sanm`, `shaw_attn`, `causal_lm_ops`, bake-off certified** |
-| **Phase 11** | Architectural family migration (Waves W1–W6) | `[~] IN PROGRESS — W1a DONE` | 18 families migrated to unified engine |
+| **Phase 11** | Architectural family migration (Waves W1–W6) | `[~] IN PROGRESS — W1a + W1b DONE` | 18 families migrated to unified engine |
 | **Phase 12** | Unified `speech.h` C ABI & language bindings | `[ ] PENDING` | Single unified DLL, Python/C#/Node bindings |
 | **Phase 13** | End-to-end multi-stage pipeline composition | `[ ] PENDING` | VAD + Diarization + ASR + Alignment graphs |
 | **Phase 14** | Cleanup, benchmarking, licensing & 1.0 release | `[ ] PENDING` | Deletion ledger cleared, zero deprecations |
@@ -190,7 +190,7 @@ Every agent working on this repository must strictly adhere to these 7 protocol 
 
 **Wave order** (aligned to FUSION_ROADMAP_PLAN §8 "Migration order — cheapest-risk first, highest-value first"; supersedes the earlier draft ordering in this tracker):
 
-- [ ] **Wave W1 — Moonshine pair (raw-PCM, covered by both live WER gates)**:
+- [x] **Wave W1 — Moonshine pair (raw-PCM, covered by both live WER gates)**:
   - [x] **W1a — `moonshine` (offline) → native engine package. DONE 2026-08-24.**
     - Created `src/models/moonshine/` (`graphs.cpp`, `assets.cpp`, `runtime.cpp`, `session.cpp`) with internal headers under `include/engine/models/moonshine/`.
     - Numerics-identical port of encoder / cross-KV / KV-cached decoder graphs + greedy loop from `src/runtime/arch/moonshine/`.
@@ -199,7 +199,14 @@ Every agent working on this repository must strictly adhere to these 7 protocol 
     - Fixed latent Phase-6 spec defect: pinned moonshine GGUFs carry no embedded config/tokenizer sidecars; `model_specs/moonshine.json` sources block corrected to tensors-only.
     - Gate: new CTest target **`moonshine_engine_smoke_test`** — registry load by canonical id, 4 LibriSpeech fixtures offline, corpus WER ≤ 10% structural bound (**measured 1.449% = 1/69 edits, identical to arch baseline**), ordered `run_batch`, `request_abort()` unwinds `run()`. Arch copy still builds and stays green (§4.4 coexistence).
     - Suite after W1a: **96/96 green** on `build-cpu-core`.
-  - [ ] **W1b — `moonshine_streaming` → native engine package on `StreamingSessionBase`.** Design map recorded in `walkthrough.md` (incremental sliding-window encoder geometry L/R totals + frontend pad, adapter pos_emb absolute-frame add + optional proj, committed host cross-K/V buffers uploaded per decode, LCP-based commit ↔ base `STABLE_PREFIX` policy mapping, throttled partial decodes, finalize tail top-up).
+  - [x] **W1b — `moonshine_streaming` → native engine package on `StreamingSessionBase`. DONE 2026-08-26.**
+    - Created `src/models/moonshine_streaming/` (`graphs.cpp`, `assets.cpp`, `runtime.cpp`, `session.cpp`) with internal headers under `include/engine/models/moonshine_streaming/`; registered via `audiocpp_add_model` + the ASR composite.
+    - Numerics-identical port from `src/runtime/arch/moonshine_streaming/`: time-domain frontend (CMVN → `asinh(exp(log_k)·x)` → linear+SiLU → two causal stride-2 convs), encoder blocks with per-layer sliding-window masks and **no RoPE**, adapter with **absolute-frame** `pos_emb` get_rows (+ optional proj), **untied `lm_head`**, vanilla decoder LNs. The three conformer helpers the arch borrowed are reimplemented locally — the package has **no `src/runtime/` dependency**.
+    - Session derives from `engine::runtime::StreamingSessionBase`; lifecycle, revision counting and the committed/tentative split are base-owned. Per the design map's preferred option we drive `update_text(full)` per partial and let the base's **`STABLE_PREFIX`** policy (agreement_n=3) choose the commit boundary rather than re-deriving an LCP per family.
+    - Incremental pipeline per feed: encode window with L/R context → adapter the emit slice at absolute frame offsets → project cross-K/V → append to host committed buffers → trim unreachable PCM → throttled from-BOS AR re-decode (`moonshine_streaming.min_decode_interval_ms`, default 240 ms). Offline `run()` reuses the same graphs.
+    - Fixed the same latent Phase-6 spec defect W1a found: `model_specs/moonshine_streaming.json`'s gguf source required sidecars the pinned GGUFs do not carry (`embedded_sidecars=false`) and could never resolve; now tensors-only.
+    - Gate **`moonshine_streaming_engine_smoke_test`** (CTest #90): registry load by id + alias, family advertises ASR offline **and** streaming, per fixture offline + streamed on **one** session in odd non-frame-aligned chunks (~100–400 ms, throttle 0), asserting monotonic revision, append-only committed text, Active/Finished/Idle lifecycle, `reset()`, and abort unwinding. **Measured: streamed 4.34783% == offline 4.34783% (3/69), divergence 0 — exactly the arch `asr_stream_text_wer_test` baseline.**
+    - Suite after W1b: **101/101 green** on `build-cpu-core`. Arch copy untouched and still building (§4.4 coexistence).
   - [ ] W1 retirement step (after both green + user review): delete `src/runtime/arch/{moonshine,moonshine_streaming}/` as their own commits with Appendix B rows B16a/B16b.
 - [ ] **Wave W2 — Whisper Universal Family** (`whisper`: tiny…large-v3-turbo, .en variants, legacy `.bin` loader, suppress tables, temperature-fallback ladder + DecodeTelemetry; unified MelExtractor + TokenizerHub; `model_specs/whisper.json` 16 packages validated).
 - [ ] **Wave W3 — Acoustic & Single-Variant Models** (`gigaam`, `medasr`, `cohere`; gigaam retires the third private mel implementation).
@@ -267,14 +274,19 @@ Every agent working on this repository must strictly adhere to these 7 protocol 
 
 ## 4. Current State & Handoff Summary for AI Agents
 
-- **Current Timestamp**: 2026-08-26 (Upstream reconciliation to `c79e588` — **0 behind**; dual-parentage doctrine recorded; ggml bumped to `36da5713` / v0.22.0 — on top of the 2026-08-25 Phase 11 W1a close)
+- **Current Timestamp**: 2026-08-26 (Upstream reconciliation to `c79e588` — **0 behind**; dual-parentage doctrine recorded; ggml bumped to `36da5713` / v0.22.0 and certified CPU **and** CUDA; **Phase 11 Wave W1b closed** — Wave W1 complete)
 - **Last Completed Increments**:
   - **Dual Parentage recorded + ggml bumped to `36da5713` (v0.22.0)**:
     - **`speech.cpp` is equally a child of `audio.cpp` and of `transcribe.cpp`** — forking audio.cpp was a convenience, not precedence. Recorded in `AGENTS.md` § "Dual Parentage" and **Operating Rule 7**; the Master Key and Target Repository lines above were corrected. The doctrine had eroded because only audio.cpp has an `upstream` remote (so only it yields a "N behind" number), and the concrete cost was treating transcribe.cpp's ggml bump as a curiosity rather than as our own dependency floor moving.
     - **`scripts/sync-deps.sh`** — read-only drift report over all three sources (audio.cpp remote, transcribe.cpp sibling, ggml vs upstream HEAD **and** vs parent transcribe.cpp's pin). `--fetch` fast-forwards siblings. Never pulls/merges/re-vendors speech.cpp. **Run before any release state.**
     - **ggml `8c63e709` (0.20.2) → `36da5713` (0.22.0)**, all 7 patches applying. **0005 rebased** (upstream rewrote `concat_any` into row-wise memcpy — it converged on most of that fork delta; byte math moved to block-aware `ggml_row_size`, fixing a latent quantized over-count in our own patch). **0007 regenerated** — the old file was hand-written, never round-trip verified, and `git apply`-corrupt (21-line declared hunk over a 35-line body, no trailing newline); its content was in the tree, so **the delta was one sync from silent loss**.
     - API drift purely additive; **no engine source changes required**. Build 444 targets clean; **CTest 100/100** unchanged from baseline; `lint_teardown` green at `src/runtime`; re-sync reports **`0 path(s) changed`** — reproducibility certified.
-    - **Not covered**: CUDA/HIP/Metal/Vulkan are not built in `cpu-core` — patch 0007's CUDA entry points and the 0.22.0 CUDA kernel churn need an `sp_cuda` run.
+    - **CUDA certified (2026-08-26)**: the `sp_cuda` build (sm_89, CUDA 13.3) compiles clean against `36da5713` including patch 0007's CUDA entry points, and its **57/57 CTest suite passes** — among them `scaled_dot_product_attention_test`, which only executes on a real CUDA device. HIP/Metal/Vulkan remain unbuilt here.
+  - **Phase 11 Wave W1b — Native Engine Moonshine-Streaming** — `100% DONE` (Wave W1 now complete)
+    - Package `src/models/moonshine_streaming/` + internal headers; registered in `audiocpp_add_model` and the ASR composite; session on `StreamingSessionBase` with base-owned lifecycle and `STABLE_PREFIX` commit.
+    - Gate `moonshine_streaming_engine_smoke_test`: **streamed 4.34783% == offline 4.34783% (3/69), divergence 0** — exactly the arch `asr_stream_text_wer_test` baseline.
+    - Fixed the same latent Phase-6 sidecar defect in `model_specs/moonshine_streaming.json` that W1a found in `moonshine.json`.
+    - Total CTest targets: **101/101 100% green**.
   - **Upstream Reconciliation (`0xShug0/audio.cpp:main@c79e588`) — 63 ahead, 0 behind**:
     - Root-caused the recurring "6 commits behind": the prior sync (`9b34fd2`) content-copied instead of merging, so the merge-base stayed at `62735ea` and git re-reported already-applied commits. **2 of the 6 were phantoms** (`288a271` `--list-devices`, `d25ffac` chunk metadata — both verified present in the tree by symbol, not by subject line).
     - Cherry-picked `4ec485d` supertonic voice preset (→ `90659b1`) and `d03b957` IndexTTS2 HIP F16 KV/conv default (→ `3682698`); both applied clean with upstream authorship preserved.
@@ -293,9 +305,9 @@ Every agent working on this repository must strictly adhere to these 7 protocol 
     - Package `src/models/moonshine/` + internal headers in `include/engine/models/moonshine/`.
     - Gate `moonshine_engine_smoke_test`: engine-path corpus WER **1.449% (1/69 edits) == arch baseline**.
 - **IMMEDIATE NEXT TASK FOR AGENT**:
-  - **Execute Phase 11 Wave W1b (`moonshine_streaming` → native engine package on `StreamingSessionBase`)**:
-    - Follow the design map recorded in `walkthrough.md` §"W1b design map" (streaming geometry helpers, incremental encode→adapter→cross-KV-commit pipeline, LCP commit ↔ STABLE_PREFIX policy, throttled partial decodes, finalize tail top-up, reset semantics).
-    - Port graph builders from `src/runtime/arch/moonshine_streaming/{encoder,decoder}.cpp`; session derives from `engine::runtime::StreamingSessionBase`.
-    - Register `audiocpp_add_model(moonshine_streaming ...)`, correct `model_specs/moonshine_streaming.json`, add a streaming engine-path gate (feed odd-sized chunks through `IStreamingVoiceTaskSession`, gate streamed-vs-offline divergence == 0 against the offline engine package from W1a).
-    - Then run full verification, update all tracking docs, and pause for user review before Wave W2.
-
+  - **Wave W1 is complete** (W1a + W1b both green, both reproducing arch numerics). Two ways forward — take them in this order:
+  - **(a) Wave W1 retirement step** (gated, needs user review): delete `src/runtime/arch/{moonshine,moonshine_streaming}/` as their own commits with Appendix B rows B16a/B16b. The ledger evidence is in hand: `moonshine_engine_smoke_test` (1/69 edits == arch) and `moonshine_streaming_engine_smoke_test` (3/69 offline == 3/69 streamed == arch, divergence 0).
+  - **(b) Execute Phase 11 Wave W2 (Whisper Universal Family)**: tiny…large-v3-turbo + `.en` variants, legacy `.bin` loader, suppress tables, temperature-fallback ladder + DecodeTelemetry, unified MelExtractor + TokenizerHub, 16 packages in `model_specs/whisper.json`.
+    - **Audit `whisper.json`'s sources block BEFORE porting.** Two families in a row shipped a gguf source requiring `config.json`/`tokenizer.json` sidecars that the pinned GGUFs do not carry, so the source could never resolve — `moonshine.json` (found in W1a) and `moonshine_streaming.json` (found in W1b). Verify with `audiocpp_gguf --inspect <gguf>`: `embedded_sidecars=false` means the `files` block must be dropped from the gguf source. Treat this as a catalog-wide defect class, not two coincidences.
+    - Note for any streaming family: `StreamingSessionBase` guarantees **append-only** committed text, NOT that `committed_text()` remains a live prefix of `full_text()` — a from-BOS re-decode may revise an already-committed region and the base keeps the old commit. Assert the append-only contract in gates.
+    - Then run full verification, update all tracking docs, and pause for user review.

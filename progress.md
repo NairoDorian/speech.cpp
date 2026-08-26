@@ -1,6 +1,6 @@
 # Progress — Unified_Audio.cpp (speech.cpp ggml fork) merge & improve
 
-Status snapshot: **Upstream audio.cpp main fully reconciled at `c79e588` — 63 ahead, 0 behind (the recurring "6 behind" was a lagging merge-base, now fixed). Phase 1 Allocator Hardening applied. Phase 2 Toolchain Modernization & Build Provenance landed. Phase 3 Native Long-Form VAD Chunk Planning & Public C ABI integrated. Phase 4 Process-Wide SharedWeightRegistry, Sortformer v2 Diarization package, Batched Offline ASR Decoders (Qwen3-ASR, Voxtral Realtime, Citrinet, VibeVoice, Higgs Audio), and universal audiocpp C ABI subsystem + progress callbacks fully implemented and verified. **ggml bumped to `36da5713` (v0.22.0)** to match parent transcribe.cpp, with the 7-patch stack rebased and reproducibility certified. All 100 CPU core tests passing 100% green on the new ggml. Master architectural blueprint established in [FUSION_ROADMAP_PLAN.md](FUSION_ROADMAP_PLAN.md).** Date: 2026-08-26
+Status snapshot: **Upstream audio.cpp main fully reconciled at `c79e588` — 63 ahead, 0 behind (the recurring "6 behind" was a lagging merge-base, now fixed). Phase 1 Allocator Hardening applied. Phase 2 Toolchain Modernization & Build Provenance landed. Phase 3 Native Long-Form VAD Chunk Planning & Public C ABI integrated. Phase 4 Process-Wide SharedWeightRegistry, Sortformer v2 Diarization package, Batched Offline ASR Decoders (Qwen3-ASR, Voxtral Realtime, Citrinet, VibeVoice, Higgs Audio), and universal audiocpp C ABI subsystem + progress callbacks fully implemented and verified. **ggml bumped to `36da5713` (v0.22.0)** to match parent transcribe.cpp, with the 7-patch stack rebased and reproducibility certified. **Phase 11 W1b closed: native engine Moonshine-Streaming reproduces the arch baseline exactly (streamed 4.348% == offline 4.348%, divergence 0).** All 101 CPU core tests passing 100% green on the new ggml; CUDA suite 57/57 green. Master architectural blueprint established in [FUSION_ROADMAP_PLAN.md](FUSION_ROADMAP_PLAN.md).** Date: 2026-08-26
 
 ## Repo layout (important, non-obvious)
 `Unified_Audio.cpp/` is a **plain container directory with no git repo of its
@@ -21,7 +21,7 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 ## Overall progress (toward "Unified_Audio transcribes on CPU")
 | Area | Status | % |
 |---|---|---|
-| Dependency: ggml pin `36da5713` (v0.22.0) + patches 0001–0007, matched to parent transcribe.cpp | Done 2026-08-26 — suite unchanged, re-sync reproduces exactly (0 paths) | 100% |
+| Dependency: ggml pin `36da5713` (v0.22.0) + patches 0001–0007, matched to parent transcribe.cpp | Done 2026-08-26 — **CPU 101/101 + CUDA 57/57 green**, re-sync reproduces exactly (0 paths) | 100% |
 | Doctrine: dual parentage (transcribe.cpp is a co-parent) + `scripts/sync-deps.sh` routine | Done 2026-08-26 (AGENTS.md, tracker Rule 7) | 100% |
 | Merge: Upstream audio.cpp main synchronization (`c79e588`) | Done — 0 behind, merge-base reconciled, all 6 dispositioned | 100% |
 | Memory: Phase 1 Allocator Hardening (16MB cap, WavLM gallocr, Qwen3 runaway, DFN2) | Done (certified in engine) | 100% |
@@ -36,14 +36,14 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | **Phase 9: Unified Mel & Tokenizer Subsystems** | **Done & Verified (`MelExtractor`, `TokenizerHub`, `FrontendSpec`, `IAudioCodec`, Parity Tests)** | **100%** |
 | **Phase 10: Attention & Conformer Module Fusion** | **Done & Verified (`sanm`, `shaw_attn`, `causal_lm_ops`, Bake-Off certified)** | **100%** |
 | **Phase 11 W1a: Native Engine Moonshine (offline)** | **Done & Verified (`moonshine_engine_smoke_test`: engine-path WER 1.449% == arch 1/69 edits; batch + abort contracts)** | **100%** |
-| Phase 11 W1b: Native Engine Moonshine-Streaming | Next increment — design map recorded in `walkthrough.md` | 0% |
+| **Phase 11 W1b: Native Engine Moonshine-Streaming** | **Done & Verified (`moonshine_streaming_engine_smoke_test`: streamed 4.348% == offline 4.348% == arch baseline 3/69, divergence 0; lifecycle + abort contracts)** | **100%** |
 | Specs: Phase 6 Whisper & Moonshine Model Spec Catalogs | Moonshine spec corrected + backed by native loader; Whisper still catalog-only (Phase 11 W2) | ~60% |
 | ABI offline + streaming surface | Verified, real CTest gates | 100% |
 | End-to-end ASR **offline text** (WER gate) | Done — 1.45% corpus WER (arch path); engine path now also 1/69 edits | 100% |
 | **End-to-end ASR streaming text** | **Done — streamed 4.35% == offline 4.35%, divergence 0** | **100%** |
-| Test suite status | **100/100 total (96 passed, 4 clean skips on unpinned weights) 100% green** | **100%** |
-| **Completed increment** | **Upstream reconciliation to `c79e588` (0 behind) & Phase 11 W1a** | **DONE** |
-| **Next increment** | **Phase 11 Wave W1b: Native Engine Moonshine-Streaming on `StreamingSessionBase`** | Ready |
+| Test suite status | **101/101 total (97 passed, 4 clean skips on unpinned weights) 100% green** | **100%** |
+| **Completed increment** | **Upstream reconciliation `c79e588` (0 behind), ggml 0.22.0 (CPU+CUDA certified), Phase 11 W1a & W1b** | **DONE** |
+| **Next increment** | **Phase 11 Wave W2: Whisper Universal Family** (W1 retirement step first, if taking it) | Ready |
 
 ## DONE this session (plan R12 records all of it)
 
@@ -137,7 +137,61 @@ reports **`0 path(s) changed`**: `sync + patches == committed tree`, exactly.
 **Not covered:** CUDA/HIP/Metal/Vulkan are not built in `cpu-core`, so patch
 0007's CUDA entry points and the 0.22.0 CUDA kernel churn are compile-
 unverified pending an `sp_cuda` run.
-### 2. Phase 11 Wave W1a — Native Engine Moonshine (offline), closed
+
+### 2. Phase 11 Wave W1b — Native Engine Moonshine-Streaming, closed (2026-08-26)
+
+Second family off the arch layer, onto the engine framework. New package
+`src/models/moonshine_streaming/` (`graphs/assets/runtime/session` + internal
+headers under `include/engine/models/moonshine_streaming/`), registered via
+`audiocpp_add_model` and in the ASR composite, so CLI / server / WebUI / C ABI
+resolve it by canonical id or the `moonshine-streaming` alias.
+
+Ported numerics-identically from `src/runtime/arch/moonshine_streaming/`: the
+time-domain frontend (CMVN → `asinh(exp(log_k)·x)` → linear+SiLU → two causal
+stride-2 convs), encoder blocks with **per-layer sliding-window masks and no
+RoPE**, the adapter (**absolute-frame** `pos_emb` get_rows + optional proj), the
+**untied `lm_head`**, vanilla decoder LNs. The three conformer helpers the arch
+borrowed are reimplemented locally — the package has **no `src/runtime/`
+dependency**.
+
+**Lifecycle is base-owned.** Session derives from `StreamingSessionBase`; we
+implement only `on_start_stream` / `on_process_audio_chunk` / `on_finalize` /
+`on_reset` + a pure `validate_chunk`. Per the design map's preferred option we
+drive `update_text(full)` per partial and let the base's **STABLE_PREFIX**
+policy (agreement_n=3) pick the commit boundary — one commit policy for every
+family, instead of a per-family LCP.
+
+**Result — the port reproduces the arch numerics exactly:**
+
+| | offline | streamed | divergence |
+|---|---|---|---|
+| engine package (W1b) | **4.34783% (3/69)** | **4.34783% (3/69)** | **0 words** |
+| arch `asr_stream_text_wer_test` baseline | 4.35% (3/69) | 4.35% (3/69) | 0 words |
+
+Gate `moonshine_streaming_engine_smoke_test` (CTest #90, 12.9 s): registry load
+by id + alias, family must advertise ASR offline **and** streaming, then each
+fixture is run offline and streamed **on the same session** in odd,
+non-frame-aligned chunks (1601/3203/6397/2477/4801 ≈ 100–400 ms) with the
+throttle at 0. Also asserts monotonic revision, append-only committed text,
+Active/Finished/Idle transitions, `reset()` clearing state, and abort unwinding.
+
+Two findings worth carrying forward:
+- **`model_specs/moonshine_streaming.json` had the same latent Phase-6 defect
+  W1a found in `moonshine.json`** — its gguf source required `config.json` /
+  `tokenizer.json` sidecars the pinned packages do not carry
+  (`audiocpp_gguf --inspect` → `embedded_sidecars=false`), so it could never
+  resolve. Fixed to tensors-only. **Check the remaining catalog specs for this
+  pattern** before their families are migrated.
+- `StreamingSessionBase` guarantees **append-only** committed text, *not* that
+  `committed_text()` stays a live prefix of `full_text()`. A from-BOS re-decode
+  may revise an already-committed region; the base then keeps the old commit
+  rather than rewriting it. My first gate asserted the stronger property and
+  failed — the contract, not the code, was wrong.
+
+Suite: **101/101 green**. Arch copy untouched and still building (§4.4
+coexistence); retiring both moonshine arch dirs stays the separate gated W1
+retirement step (Appendix B B16a/B16b).
+### 3. Phase 11 Wave W1a — Native Engine Moonshine (offline), closed
 First family migration of the arch layer onto the engine framework
 (FUSION_ROADMAP_PLAN §8, §4.4 steps 5–7). New package `src/models/moonshine/`
 (`graphs/assets/runtime/session` + internal headers in
@@ -159,7 +213,7 @@ measured **1/69 edits == arch baseline**), ordered `run_batch`,
 `request_abort()` unwinds `run()`. Arch copy untouched and still green.
 Suite: 96/96 green.
 
-### 3. Streaming ASR text validation — NEXT #1, closed
+### 4. Streaming ASR text validation — NEXT #1, closed
 `tests/asr_stream_text_wer_test.cpp` + CTest gate `asr_stream_text_wer_test`:
 streams the four LibriSpeech fixtures into **moonshine-streaming-tiny Q8_0**
 (48 MB, MIT, `handy-computer/moonshine-streaming-tiny-gguf` — the exact model
@@ -177,7 +231,7 @@ became a pinned-model table (both gate models; `--only streaming` selects);
 shared scoring lives in `tests/asr_test_text.h`. Report updated:
 `docs/reports/asr_e2e_wer_gate.md`.
 
-### 4. The three "environment/asset" failures — NEXT #2, all fixed, none was assets
+### 5. The three "environment/asset" failures — NEXT #2, all fixed, none was assets
 - `model_spec_system_test` + `fun_asr_nano_assets_test`: model-spec
   resolution walks UP from the cwd, so they only ever passed from build
   trees inside the repo. Fixed with `WORKING_DIRECTORY` registrations.
@@ -198,19 +252,19 @@ shared scoring lives in `tests/asr_test_text.h`. Report updated:
      `~ModelInstaller` (first D7-teardown application to app-layer code).
      Test now passes in 2.7 s.
 
-### 5. `asr_standalone_gguf_test` — NEXT #3, closed by correction
+### 6. `asr_standalone_gguf_test` — NEXT #3, closed by correction
 Filed for three sessions as "needs citrinet+hviske GGUFs". It does not: the
 fixtures are synthetic (dummy safetensors → GGUF), and the failure was the
 same cwd spec-resolution defect. `WORKING_DIRECTORY` registration fixed it;
 the old download-and-pin recommendation is withdrawn. (A real citrinet/hviske
 WER gate would be new, optional work — the plan's §5 Phase-5 corpus item.)
 
-### 6. `scaled_dot_product_attention_test` skips without CUDA
+### 7. `scaled_dot_product_attention_test` skips without CUDA
 It exists to pin the CUDA SDPA lowerings (R10) and hard-required a CUDA
 device, failing CPU-only builds. Now probes `list_backend_devices()` and
 skips (exit 2, `SKIP_RETURN_CODE 2`); stays a hard gate on CUDA builds.
 
-### 7. Performance pass on transcribe.cpp runtime families
+### 8. Performance pass on transcribe.cpp runtime families
 Closed the last depthwise-1D-conv im2col sites in the runtime and a couple
 of decode/frontend hotspots, all with env-override kill switches and
 numerical parity:
@@ -284,12 +338,27 @@ three shared failures gone; WER gates not registered there — ABI/arches OFF).
    - **Verified**: Full test suite passes 100% green (56/56 tests).
 
 ## NEXT (highest value first)
-1. **Zero-Dependency Language Bindings (`dynload`)**:
+1. **Phase 11 Wave W1 retirement step** (optional, gated): with W1a + W1b both
+   green, `src/runtime/arch/{moonshine,moonshine_streaming}/` can be deleted as
+   their own commits with Appendix B rows B16a/B16b. Both engine packages now
+   reproduce the arch numerics exactly, so the ledger evidence is in hand.
+2. **Phase 11 Wave W2 — Whisper Universal Family**: tiny…large-v3-turbo, `.en`
+   variants, legacy `.bin` loader, suppress tables, temperature-fallback ladder
+   + DecodeTelemetry; unified MelExtractor + TokenizerHub; validate the 16
+   packages in `model_specs/whisper.json`.
+   - **Audit `whisper.json`'s sources block first.** Two families in a row
+     (`moonshine.json` in W1a, `moonshine_streaming.json` in W1b) shipped a
+     gguf source requiring `config.json`/`tokenizer.json` sidecars the pinned
+     GGUFs do not carry, so the source could never resolve. Check every
+     remaining catalog spec for the same pattern with
+     `audiocpp_gguf --inspect <gguf>` (`embedded_sidecars=false` means the
+     `files` block must go).
+3. **Zero-Dependency Language Bindings (`dynload`)**:
    - Finalize single-artifact shared build (`SPEECH_SHARED_EMBED=ON`) and zero-dependency dynload bindings (Rust, Python ctypes, TypeScript koffi, Swift).
-2. **HuggingFace 5.x Long-form Seek Continuation**:
+4. **HuggingFace 5.x Long-form Seek Continuation**:
    - Verify long-form chunked streaming continuation across multi-minute audio files with synthetic silence and early `<|t|>` termination guards.
-3. **Parakeet TDT & Moonshine CLI / Server End-to-End Testing**:
-   - Validate CLI invocation with newly cataloged `--model whisper`, `--model moonshine`, and `--model parakeet_tdt`.
+5. **Parakeet TDT & Moonshine CLI / Server End-to-End Testing**:
+   - Validate CLI invocation with newly cataloged `--model whisper`, `--model moonshine`, `--model moonshine_streaming`, and `--model parakeet_tdt`.
 
 ## LEFT TO DO (small)
 - [ ] Formalize root `.gitmodules` so `git submodule update` works for the 3 embedded repos.
