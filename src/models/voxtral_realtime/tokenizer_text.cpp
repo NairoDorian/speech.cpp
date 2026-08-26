@@ -139,13 +139,21 @@ VoxtralRealtimeTokenizer::VoxtralRealtimeTokenizer(std::shared_ptr<const Voxtral
 
 VoxtralRealtimeTokenizer::~VoxtralRealtimeTokenizer() = default;
 
-VoxtralRealtimePrompt VoxtralRealtimeTokenizer::build_transcription_prompt(int64_t audio_samples, bool streaming) const {
+VoxtralRealtimePrompt VoxtralRealtimeTokenizer::build_transcription_prompt(
+    int64_t audio_samples,
+    bool streaming,
+    int64_t num_delay_tokens) const {
     (void) streaming;
     const auto & config = impl_->assets->config;
     const int64_t raw_audio_length_per_tok =
         static_cast<int64_t>(static_cast<double>(config.frontend.sample_rate) / 12.5);
-    const int64_t delay_samples = static_cast<int64_t>(0.480 * static_cast<double>(config.frontend.sample_rate));
-    const int64_t delay_tokens = audio_tokens_for_samples(config, delay_samples);
+    // Before Phase 10.5 this was a hardcoded 480 ms - the publisher default
+    // (6 tokens) written out in seconds. It is now whatever delay the caller
+    // asked for, and the arithmetic is exact in tokens rather than a
+    // round-trip through samples.
+    const int64_t delay_tokens = num_delay_tokens == kVoxtralRealtimeDelayUnset
+        ? config.default_num_delay_tokens
+        : validate_voxtral_realtime_delay(num_delay_tokens);
     const int64_t left_pad_tokens = 32;
     const int64_t prompt_pad_tokens = left_pad_tokens + delay_tokens;
     if (raw_audio_length_per_tok != config.audio_length_per_tok * config.frontend.hop_length) {

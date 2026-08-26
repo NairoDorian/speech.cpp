@@ -1810,6 +1810,14 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
     add_executable(asr_e2e_wer_test tests/asr_e2e_wer_test.cpp)
     target_link_libraries(asr_e2e_wer_test PRIVATE transcribe)
 
+    # Phase 10.5: the Voxtral-Realtime typed stream extension, now served by
+    # the ArchAdapter rather than the retired arch. Links only the C ABI.
+    add_executable(voxtral_realtime_ext_abi_test tests/voxtral_realtime_ext_abi_test.cpp)
+    target_link_libraries(voxtral_realtime_ext_abi_test PRIVATE transcribe)
+    # include/ so the test can spell the family header the way a public caller
+    # does: #include "transcribe/voxtral_realtime.h".
+    target_include_directories(voxtral_realtime_ext_abi_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
     # Streaming-text counterpart: streams the same fixtures through
     # begin/feed/finalize and scores the STREAMED text (plus the streaming
     # model's offline text and their divergence).
@@ -1920,6 +1928,16 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
                              "${CMAKE_CURRENT_SOURCE_DIR}/models/qwen3-asr-0.6b-q8_0.gguf"
                              "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
                 set_tests_properties(asr_e2e_qwen3_asr_wer_test PROPERTIES SKIP_RETURN_CODE 2)
+            endif()
+
+            # The extension surface resolves only where the product links the
+            # family, for the same reason: the GGUF reaches the engine through
+            # the framework registry, never a transcribe arch.
+            if ("voxtral_realtime" IN_LIST AUDIOCPP_LINKED_MODELS)
+                add_test(NAME voxtral_realtime_ext_abi_test
+                         COMMAND voxtral_realtime_ext_abi_test
+                             "${CMAKE_CURRENT_SOURCE_DIR}/models/voxtral-mini-4b-realtime-2602-q4_k.gguf")
+                set_tests_properties(voxtral_realtime_ext_abi_test PROPERTIES SKIP_RETURN_CODE 2)
             endif()
         endif()
 
@@ -3172,6 +3190,24 @@ if (ENGINE_BUILD_TESTS)
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
     set_tests_properties(qwen3_asr_engine_smoke_test PROPERTIES SKIP_RETURN_CODE 2)
+
+    # Phase 10.5, family 2: voxtral_realtime. The delay test is pure header
+    # logic (no model); the smoke gate needs the pinned q4_k package - the
+    # smallest catalogued one for this 4B family - and skips without it.
+    add_engine_unittest(voxtral_realtime_delay_test tests/unittests/test_voxtral_realtime_delay.cpp)
+    add_test(NAME voxtral_realtime_delay_test COMMAND voxtral_realtime_delay_test)
+
+    add_engine_unittest(voxtral_realtime_engine_smoke_test tests/unittests/test_voxtral_realtime_engine.cpp)
+    audiocpp_test_link_model_objects(voxtral_realtime_engine_smoke_test voxtral_realtime)
+    target_include_directories(voxtral_realtime_engine_smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    add_test(
+        NAME voxtral_realtime_engine_smoke_test
+        COMMAND voxtral_realtime_engine_smoke_test
+            ${CMAKE_CURRENT_SOURCE_DIR}/models/voxtral-mini-4b-realtime-2602-q4_k.gguf
+            ${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    set_tests_properties(voxtral_realtime_engine_smoke_test PROPERTIES SKIP_RETURN_CODE 2)
 
 
     add_engine_unittest(fun_asr_nano_frontend_probe tests/fun_asr_nano/fun_asr_nano_frontend_probe.cpp)

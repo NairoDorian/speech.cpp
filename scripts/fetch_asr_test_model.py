@@ -104,6 +104,19 @@ PINNED_MODELS = (
         sha256="6c44ec2fb4cee513892d7863c1fcc3ea6b699ffa4d899b0ef4ab19956d9544f7",
         size=1_151_272_416,
     ),
+    # Phase 10.5: Voxtral-Realtime. q4_k rather than the catalogue's default
+    # q8_0 (5.1 GB) or bf16 (8.9 GB): this is a 4B family and the gate scores
+    # transcription behaviour, not quantization. Same rule as the tiny models
+    # above - pin the smallest package that exercises the family honestly.
+    PinnedModel(
+        filename="voxtral-mini-4b-realtime-2602-q4_k.gguf",
+        url=(
+            "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/"
+            "Voxtral-Mini-4B-Realtime-2602-GGUF/voxtral-mini-4b-realtime-2602-q4_k.gguf"
+        ),
+        sha256="8cafef18ea3e4cad81da8ffc4e72b69d2eab2c159c2e68428e2e088accbfc7f8",
+        size=3_097_662_432,
+    ),
 )
 
 

@@ -35,6 +35,7 @@
 #include "transcribe-model.h"
 #include "transcribe-path.h"
 #include "transcribe-session.h"
+#include "transcribe/voxtral_realtime.h"
 
 #include "engine/framework/core/backend.h"
 #include "engine/framework/runtime/model.h"
@@ -61,7 +62,9 @@ using engine::runtime::IVoiceTaskSession;
 using engine::runtime::ModelLoadRequest;
 using engine::runtime::ModelRegistry;
 using engine::runtime::RunMode;
+using engine::runtime::AudioPreparationContract;
 using engine::runtime::SessionOptions;
+using engine::runtime::SessionPreparationRequest;
 using engine::runtime::StreamEvent;
 using engine::runtime::StreamingPolicy;
 using engine::runtime::TaskResult;
@@ -306,6 +309,67 @@ static void map_result_into(transcribe_session * ctx, const TaskResult & result)
                       (result.audio_output.has_value() && !result.audio_output->samples.empty());  // audio-only tasks (separation)
 }
 
+// Which typed extensions the adapter understands, per family and slot. The
+// framework itself has no ext mechanism - family knobs are TaskRequest options
+// - so every entry here is a translation, and a family with no entry keeps the
+// old answer (no ext surface at all).
+bool adapter_family_accepts_ext(const std::string & family, transcribe_ext_slot slot, uint32_t kind) {
+    if (family == "voxtral_realtime") {
+        return slot == TRANSCRIBE_EXT_SLOT_STREAM && kind == TRANSCRIBE_EXT_KIND_VOXTRAL_REALTIME_STREAM;
+    }
+    return false;
+}
+
+// Validate a stream extension without touching session state; called from
+// stream_validate, i.e. BEFORE the dispatcher clears the previous snapshot, so
+// a rejected knob cannot destroy a transcript. Mirrors the arch's rules:
+// num_delay_tokens -1 or 1..15 or 30; min_decode_interval_ms >= -1.
+transcribe_status adapter_check_stream_ext(const std::string & family,
+                                           const transcribe_stream_params * stream_params) {
+    const transcribe_ext * fam = (stream_params != nullptr) ? stream_params->family : nullptr;
+    if (fam == nullptr) {
+        return TRANSCRIBE_OK;
+    }
+    if (family == "voxtral_realtime") {
+        if (const transcribe_status st = transcribe_ext_check(
+                fam, TRANSCRIBE_EXT_KIND_VOXTRAL_REALTIME_STREAM,
+                sizeof(transcribe_voxtral_realtime_stream_ext));
+            st != TRANSCRIBE_OK) {
+            return st;
+        }
+        const auto * vx = reinterpret_cast<const transcribe_voxtral_realtime_stream_ext *>(fam);
+        const int32_t nt = vx->num_delay_tokens;
+        if (nt != -1 && !((nt >= 1 && nt <= 15) || nt == 30)) {
+            return TRANSCRIBE_ERR_INVALID_ARG;
+        }
+        if (vx->min_decode_interval_ms < -1) {
+            return TRANSCRIBE_ERR_INVALID_ARG;
+        }
+        return TRANSCRIBE_OK;
+    }
+    // An extension pointed at a family with no surface: the generic contract
+    // says probe first, so reject rather than silently ignore it.
+    return TRANSCRIBE_ERR_INVALID_ARG;
+}
+
+// Translate an already-validated stream extension into the request options the
+// framework session reads.
+void adapter_apply_stream_ext(TaskRequest & request,
+                              const std::string & family,
+                              const transcribe_stream_params * stream_params) {
+    const transcribe_ext * fam = (stream_params != nullptr) ? stream_params->family : nullptr;
+    if (fam == nullptr || family != "voxtral_realtime") {
+        return;
+    }
+    const auto * vx = reinterpret_cast<const transcribe_voxtral_realtime_stream_ext *>(fam);
+    if (vx->num_delay_tokens >= 0) {
+        request.options["num_delay_tokens"] = std::to_string(vx->num_delay_tokens);
+    }
+    if (vx->min_decode_interval_ms >= 0) {
+        request.options["min_decode_interval_ms"] = std::to_string(vx->min_decode_interval_ms);
+    }
+}
+
 // Forward run_params → TaskRequest.options using the transcribe ABI naming so a
 // future per-family option bridge can consume them; unknown keys are passed
 // through verbatim and ignored by families that do not recognize them.
@@ -421,6 +485,14 @@ public:
         }
         return streaming_ == nullptr ? nullptr
             : dynamic_cast<IStreamingVoiceTaskSession *>(streaming_.get());
+    }
+
+    // The framework family id this session belongs to; the ext translators
+    // key off it.
+    std::string framework_family() const {
+        return model_ != nullptr && model_->framework_model() != nullptr
+            ? model_->framework_model()->metadata().family
+            : std::string();
     }
 
     // Bridge transcribe_set_abort_callback onto the framework's progress
@@ -542,7 +614,8 @@ public:
         }
     }
 
-    transcribe_status begin_stream(const transcribe_run_params * run_params) {
+    transcribe_status begin_stream(const transcribe_run_params * run_params,
+                                   const transcribe_stream_params * stream_params) {
         auto * streaming = ensure_streaming();
         if (streaming == nullptr) {
             return TRANSCRIBE_ERR_NOT_IMPLEMENTED;
@@ -550,13 +623,24 @@ public:
         try {
             TaskRequest request;
             apply_run_params(request, run_params);
+            adapter_apply_stream_ext(request, framework_family(), stream_params);
             // prepare() BEFORE start_stream(): every framework session gates
             // its streaming entry points on require_prepared(), and the
             // default start_stream() delegates to reset() - which is itself
             // gated - so an unprepared begin throws on the very first call.
-            // The preparation request carries no audio: a stream has none yet,
-            // and families default the sample rate to 16 kHz in that case.
-            streaming->prepare(build_preparation_request(request));
+            //
+            // A stream has no audio yet, so build_preparation_request() would
+            // hand the session an EMPTY audio contract - and ASR families
+            // reject that ("prepare() requires an audio contract"), which made
+            // the C ABI streaming path unusable for every framework ASR family
+            // reached through this adapter. Supply the contract the C ABI
+            // itself guarantees instead: 16 kHz mono, length not yet known.
+            SessionPreparationRequest prep = build_preparation_request(request);
+            if (!prep.audio.has_value()) {
+                prep.audio = AudioPreparationContract{k_native_sample_rate, 1, 0};
+            }
+            streaming->prepare(prep);
+            install_abort_bridge(streaming);
             streaming->start_stream(request);
             chunker_.reset(preferred_chunk_samples(streaming));
             publish_cursors();
@@ -594,6 +678,8 @@ public:
                 return TRANSCRIBE_ERR_ABORTED;
             }
             return TRANSCRIBE_OK;
+        } catch (const engine::runtime::ProgressCanceled &) {
+            return TRANSCRIBE_ERR_ABORTED;
         } catch (const std::exception & e) {
             transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "adapter stream_feed failed: %s", e.what());
             return TRANSCRIBE_ERR_BACKEND;
@@ -625,6 +711,8 @@ public:
             stream_audio_committed_us = stream_audio_input_us;
             publish_update(update, changed || has_result);
             return TRANSCRIBE_OK;
+        } catch (const engine::runtime::ProgressCanceled &) {
+            return TRANSCRIBE_ERR_ABORTED;
         } catch (const std::exception & e) {
             transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "adapter stream_finalize failed: %s", e.what());
             return TRANSCRIBE_ERR_BACKEND;
@@ -935,6 +1023,16 @@ transcribe_status adapter_stream_validate_impl(const struct transcribe_session *
         stream_params->struct_size < sizeof(transcribe_stream_params)) {
         return TRANSCRIBE_ERR_BAD_STRUCT_SIZE;
     }
+    if (stream_params != nullptr && stream_params->family != nullptr) {
+        const auto * model = dynamic_cast<const AdapterModel *>(ctx->model);
+        const std::string family = (model != nullptr && model->framework_model() != nullptr)
+            ? model->framework_model()->metadata().family
+            : std::string();
+        if (const transcribe_status st = adapter_check_stream_ext(family, stream_params);
+            st != TRANSCRIBE_OK) {
+            return st;
+        }
+    }
     return TRANSCRIBE_OK;
 }
 
@@ -952,9 +1050,9 @@ transcribe_status adapter_run_validate_impl(const struct transcribe_session * ct
 
 transcribe_status adapter_stream_begin_impl(struct transcribe_session * ctx,
                                             const struct transcribe_run_params * run_params,
-                                            const struct transcribe_stream_params * /*stream_params*/) {
+                                            const struct transcribe_stream_params * stream_params) {
     auto * session = static_cast<AdapterSession *>(ctx);
-    return session->begin_stream(run_params);
+    return session->begin_stream(run_params, stream_params);
 }
 
 transcribe_status adapter_stream_feed_impl(struct transcribe_session * ctx, const float * pcm, int n_samples,
@@ -974,11 +1072,17 @@ void adapter_stream_reset_impl(struct transcribe_session * ctx) {
     session->reset_stream();
 }
 
-bool adapter_accepts_ext_kind_impl(const struct transcribe_model * /*model*/,
-                                   transcribe_ext_slot /*slot*/, uint32_t /*kind*/) {
-    // The framework surfaces family knobs through TaskRequest.options, not the
-    // C ABI extension mechanism; the adapter has no ext surface to probe.
-    return false;
+bool adapter_accepts_ext_kind_impl(const struct transcribe_model * model,
+                                   transcribe_ext_slot slot, uint32_t kind) {
+    // Most framework families surface their knobs as TaskRequest options and
+    // have no typed ext at all. The exceptions are families whose retired
+    // transcribe.cpp arch published one: the adapter translates those so the
+    // public surface survives the retirement (Phase 10.5).
+    const auto * adapter_model = dynamic_cast<const AdapterModel *>(model);
+    if (adapter_model == nullptr || adapter_model->framework_model() == nullptr) {
+        return false;
+    }
+    return adapter_family_accepts_ext(adapter_model->framework_model()->metadata().family, slot, kind);
 }
 
 // Per-family Arch instances. Each carries a static-lifetime name matching the

@@ -24,6 +24,7 @@ runtime::CapabilitySet capabilities(const VoxtralRealtimeAssets & assets) {
     };
     out.languages = assets.config.supported_languages;
     out.supports_timestamps = false;
+    out.supports_cancellation = true;  // RunControl polled per decode step
     return out;
 }
 

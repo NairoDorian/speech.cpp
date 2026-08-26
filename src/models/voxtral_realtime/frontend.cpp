@@ -19,11 +19,14 @@ int64_t raw_audio_length_per_token(const VoxtralRealtimeConfig & config) {
     return config.audio_length_per_tok * config.frontend.hop_length;
 }
 
-std::vector<float> padded_streaming_audio(const VoxtralRealtimeConfig & config, std::vector<float> audio) {
+std::vector<float> padded_streaming_audio(
+    const VoxtralRealtimeConfig & config,
+    std::vector<float> audio,
+    int64_t num_delay_tokens) {
     const int64_t unit = raw_audio_length_per_token(config);
     const int64_t left_pad = 32 * unit;
     const int64_t right_base = (unit - (static_cast<int64_t>(audio.size()) % unit)) % unit;
-    const int64_t right_extra = (config.default_num_delay_tokens + 1 + 10) * unit;
+    const int64_t right_extra = (num_delay_tokens + 1 + 10) * unit;
     std::vector<float> padded(static_cast<size_t>(left_pad + static_cast<int64_t>(audio.size()) + right_base + right_extra), 0.0F);
     std::copy(audio.begin(), audio.end(), padded.begin() + left_pad);
     return padded;
@@ -222,7 +225,10 @@ VoxtralRealtimeFrontend::VoxtralRealtimeFrontend(std::shared_ptr<const VoxtralRe
             true});
 }
 
-VoxtralRealtimeFeatures VoxtralRealtimeFrontend::extract(const runtime::AudioBuffer & audio, bool first_chunk) const {
+VoxtralRealtimeFeatures VoxtralRealtimeFrontend::extract(
+    const runtime::AudioBuffer & audio,
+    bool first_chunk,
+    int64_t num_delay_tokens) const {
     const auto total_start = Clock::now();
     const auto & config = assets_->config.frontend;
     const auto resample_start = Clock::now();
@@ -238,7 +244,7 @@ VoxtralRealtimeFeatures VoxtralRealtimeFrontend::extract(const runtime::AudioBuf
         "voxtral_realtime.frontend.resample_ms",
         engine::debug::elapsed_ms(resample_start));
     const auto pad_start = Clock::now();
-    mono = padded_streaming_audio(assets_->config, std::move(mono));
+    mono = padded_streaming_audio(assets_->config, std::move(mono), effective_num_delay_tokens(num_delay_tokens));
     engine::debug::timing_log_scalar(
         "voxtral_realtime.frontend.pad_ms",
         engine::debug::elapsed_ms(pad_start));
@@ -251,7 +257,8 @@ VoxtralRealtimeFeatures VoxtralRealtimeFrontend::extract_stream_chunk(
     const runtime::AudioBuffer & audio,
     bool first_chunk,
     VoxtralRealtimeFrontendStreamState & state,
-    int64_t steady_tokens) const {
+    int64_t steady_tokens,
+    int64_t num_delay_tokens) const {
     const auto & config = assets_->config.frontend;
     if (audio.sample_rate <= 0 || audio.channels <= 0) {
         throw std::runtime_error("VoxTral audio input requires positive sample_rate and channels");
@@ -262,10 +269,10 @@ VoxtralRealtimeFeatures VoxtralRealtimeFrontend::extract_stream_chunk(
         audio.channels,
         static_cast<int>(config.sample_rate));
     if (first_chunk) {
-        if (first_stream_chunk_samples() <= 0) {
+        if (first_stream_chunk_samples(num_delay_tokens) <= 0) {
             throw std::runtime_error("VoxTral streaming frontend requires positive first chunk samples");
         }
-        mono.resize(static_cast<size_t>(first_stream_chunk_samples()), 0.0F);
+        mono.resize(static_cast<size_t>(first_stream_chunk_samples(num_delay_tokens)), 0.0F);
         mono = padded_first_stream_audio(assets_->config, std::move(mono));
     } else {
         if (steady_stream_chunk_samples(steady_tokens) <= 0) {
@@ -277,9 +284,16 @@ VoxtralRealtimeFeatures VoxtralRealtimeFrontend::extract_stream_chunk(
     return extract_features_from_mono(config, mono, first_chunk, mel_filterbank_, &state, reuse_cached_prefix, false);
 }
 
-int64_t VoxtralRealtimeFrontend::first_stream_chunk_samples() const {
+int64_t VoxtralRealtimeFrontend::effective_num_delay_tokens(int64_t num_delay_tokens) const {
+    if (num_delay_tokens == kVoxtralRealtimeDelayUnset) {
+        return assets_->config.default_num_delay_tokens;
+    }
+    return validate_voxtral_realtime_delay(num_delay_tokens);
+}
+
+int64_t VoxtralRealtimeFrontend::first_stream_chunk_samples(int64_t num_delay_tokens) const {
     const auto & config = assets_->config;
-    return ((config.default_num_delay_tokens + 1) * config.audio_length_per_tok - 1) *
+    return ((effective_num_delay_tokens(num_delay_tokens) + 1) * config.audio_length_per_tok - 1) *
         config.frontend.hop_length + config.frontend.win_length / 2;
 }
 
@@ -291,9 +305,9 @@ int64_t VoxtralRealtimeFrontend::steady_stream_chunk_samples(int64_t steady_toke
     return steady_tokens * config.audio_length_per_tok * config.frontend.hop_length + config.frontend.win_length;
 }
 
-int64_t VoxtralRealtimeFrontend::first_stream_chunk_advance_samples() const {
+int64_t VoxtralRealtimeFrontend::first_stream_chunk_advance_samples(int64_t num_delay_tokens) const {
     const auto & config = assets_->config;
-    const int64_t frames = (config.default_num_delay_tokens + 1) * config.audio_length_per_tok;
+    const int64_t frames = (effective_num_delay_tokens(num_delay_tokens) + 1) * config.audio_length_per_tok;
     return frames * config.frontend.hop_length - config.frontend.n_fft / 2;
 }
 

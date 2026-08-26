@@ -117,6 +117,10 @@ VoxtralRealtimeSession::VoxtralRealtimeSession(
       stream_batch_tokens_(
           runtime::parse_i64_option(options.options, {"voxtral_realtime.stream_batch_tokens"})
               .value_or(kDefaultStreamBatchTokens)),
+      num_delay_tokens_(validate_voxtral_realtime_delay(
+          runtime::parse_i64_option(options.options, {"voxtral_realtime.num_delay_tokens"})
+              .value_or(kVoxtralRealtimeDelayUnset))),
+      stream_num_delay_tokens_(num_delay_tokens_),
       tokenizer_(assets_),
       frontend_(assets_),
       audio_encoder_(assets_, execution_context(), audio_encoder_graph_arena_bytes_, audio_encoder_weight_context_bytes_, audio_encoder_weight_storage_type_),
@@ -142,6 +146,8 @@ VoxtralRealtimeSession::VoxtralRealtimeSession(
             key != "voxtral_realtime.text_decoder_weight_type" &&
             key != "voxtral_realtime.stream_decode_cache_steps" &&
             key != "voxtral_realtime.stream_batch_tokens" &&
+            key != "voxtral_realtime.num_delay_tokens" &&
+            key != "voxtral_realtime.min_decode_interval_ms" &&
             key != "voxtral_realtime.weight_type") {
             throw std::runtime_error("unknown VoxTral realtime session option: " + key);
         }
@@ -180,22 +186,57 @@ VoxtralRealtimeRequest VoxtralRealtimeSession::make_request(
     out.audio = *request.audio_input;
     out.streaming = streaming;
     out.generation = parse_generation_options(request.options);
+    out.generation.run_control = &run_control();
+    // Per-request override of the session default; the C ABI's typed stream
+    // extension (transcribe_voxtral_realtime_stream_ext::num_delay_tokens)
+    // arrives here as this option.
+    out.num_delay_tokens = request_num_delay_tokens(request.options);
     return out;
+}
+
+// The delay in force for a request: its own option, else the session default,
+// else the model's. Validated wherever it is supplied.
+int64_t VoxtralRealtimeSession::request_num_delay_tokens(
+    const std::unordered_map<std::string, std::string> & options) const {
+    if (const auto value = runtime::parse_i64_option(options, {"num_delay_tokens", "voxtral_realtime.num_delay_tokens"})) {
+        return validate_voxtral_realtime_delay(*value);
+    }
+    return num_delay_tokens_;
+}
+
+// -1 (or absent) is the family default cadence: a partial per decoded chunk.
+// Values < -1 are caller bugs, as the C ABI documents.
+int64_t VoxtralRealtimeSession::request_min_partial_interval_ms(
+    const std::unordered_map<std::string, std::string> & options) const {
+    const auto value = runtime::parse_i64_option(
+        options, {"min_decode_interval_ms", "voxtral_realtime.min_decode_interval_ms"});
+    if (!value.has_value() || *value == -1) {
+        return 0;
+    }
+    if (*value < 0) {
+        throw std::runtime_error(
+            "VoxTral realtime min_decode_interval_ms must be -1 (family default) or >= 0; got " +
+            std::to_string(*value));
+    }
+    return *value;
 }
 
 runtime::TaskResult VoxtralRealtimeSession::run_single(
     const VoxtralRealtimeRequest & request,
     bool first_chunk) {
     const auto wall_start = Clock::now();
+    // Stage boundaries are cancellation points; the decoder polls per step.
+    emit_progress("voxtral_realtime", 0, 1);
     const auto frontend_start = Clock::now();
-    const auto features = frontend_.extract(request.audio, first_chunk);
+    const auto features = frontend_.extract(request.audio, first_chunk, request.num_delay_tokens);
     engine::debug::timing_log_scalar(
         "voxtral_realtime.session.frontend_ms",
         engine::debug::elapsed_ms(frontend_start));
     const auto prompt_start = Clock::now();
     auto prompt = tokenizer_.build_transcription_prompt(
         static_cast<int64_t>(request.audio.samples.size()) / std::max(1, request.audio.channels),
-        request.streaming);
+        request.streaming,
+        request.num_delay_tokens);
     engine::debug::timing_log_scalar(
         "voxtral_realtime.session.prompt_ms",
         engine::debug::elapsed_ms(prompt_start));
@@ -220,6 +261,7 @@ runtime::TaskResult VoxtralRealtimeSession::run_single(
         "voxtral_realtime.session.text_decoder_ms",
         engine::debug::elapsed_ms(decode_start));
     runtime::TaskResult result;
+    emit_progress("voxtral_realtime", 1, 1);
     const auto text_start = Clock::now();
     result.text_output = runtime::Transcript{tokenizer_.decode(generated.token_ids), ""};
     engine::debug::timing_log_scalar(
@@ -273,7 +315,7 @@ std::vector<runtime::TaskResult> VoxtralRealtimeSession::run_batch(
                             "VoxTral realtime run_batch() requires audio_input for every request");
                     }
                     asr_requests[b] = make_request(requests[b], false);
-                    features[b] = frontend_.extract(asr_requests[b].audio, true);
+                    features[b] = frontend_.extract(asr_requests[b].audio, true, asr_requests[b].num_delay_tokens);
                 }
             });
         }
@@ -286,10 +328,14 @@ std::vector<runtime::TaskResult> VoxtralRealtimeSession::run_batch(
     std::vector<VoxtralRealtimePrompt> prompts(n);
     std::vector<VoxtralRealtimeAudioEmbeddings> audio_embeddings(n);
     for (size_t b = 0; b < n; ++b) {
+        // The delay has to reach the prompt as well as the frontend: both the
+        // right-hand pad and the prompt's audio-token count are functions of
+        // it, and a mismatch would hand the decoder the wrong token budget.
         prompts[b] = tokenizer_.build_transcription_prompt(
             static_cast<int64_t>(asr_requests[b].audio.samples.size()) /
                 std::max(1, asr_requests[b].audio.channels),
-            false);
+            false,
+            asr_requests[b].num_delay_tokens);
         // Fresh encoder graph per utterance: reusing it can carry stale
         // compute-buffer state on some backends.
         audio_encoder_.reset_graph();
@@ -325,6 +371,8 @@ runtime::StreamingPolicy VoxtralRealtimeSession::streaming_policy() const {
     runtime::StreamingPolicy policy;
     policy.input = runtime::StreamingInputKind::AudioChunks;
     policy.output = runtime::StreamingOutputKind::FinalResult;
+    // Steady-chunk geometry does not depend on the delay; the FIRST chunk
+    // does, and start_stream resolves that before any audio is consumed.
     policy.preferred_audio_chunk_samples = frontend_.steady_stream_chunk_samples(stream_batch_tokens_);
     policy.preferred_audio_chunk_seconds =
         static_cast<double>(frontend_.steady_stream_chunk_samples(stream_batch_tokens_)) /
@@ -339,6 +387,11 @@ void VoxtralRealtimeSession::start_stream(const runtime::TaskRequest & request) 
     }
     reset();
     streaming_generation_ = parse_generation_options(request.options);
+    streaming_generation_.run_control = &run_control();
+    // Fixed for the whole stream: the first chunk's geometry, the prompt pad
+    // and every decode step are all functions of this one value.
+    stream_num_delay_tokens_ = request_num_delay_tokens(request.options);
+    stream_min_partial_interval_ms_ = request_min_partial_interval_ms(request.options);
     stream_wall_start_ = Clock::now();
     stream_started_ = true;
 }
@@ -352,11 +405,16 @@ void VoxtralRealtimeSession::reset() {
     streaming_result_ = runtime::TaskResult{};
     streaming_audio_ = runtime::AudioBuffer{};
     streaming_audio_offset_values_ = 0;
+    streaming_audio_real_values_ = 0;
     streaming_steps_processed_ = 0;
     stream_frontend_ms_ = 0.0;
     stream_encoder_ms_ = 0.0;
     stream_decoder_ms_ = 0.0;
     streaming_generation_ = VoxtralRealtimeGenerationOptions{};
+    stream_num_delay_tokens_ = num_delay_tokens_;
+    stream_min_partial_interval_ms_ = 0;
+    stream_audio_ms_ = 0;
+    stream_last_partial_audio_ms_ = 0;
     frontend_stream_state_ = VoxtralRealtimeFrontendStreamState{};
     audio_stream_state_ = audio_encoder_.make_stream_state();
     streaming_text_.clear();
@@ -387,8 +445,10 @@ runtime::StreamEvent VoxtralRealtimeSession::process_audio_chunk(const runtime::
     if (streaming_audio_offset_values_ == streaming_audio_.samples.size() && streaming_audio_offset_values_ > 0) {
         streaming_audio_.samples.clear();
         streaming_audio_offset_values_ = 0;
+        streaming_audio_real_values_ = 0;
     }
     runtime::append_audio_buffer(streaming_audio_, audio);
+    streaming_audio_real_values_ = streaming_audio_.samples.size();
     return process_available_stream_chunks();
 }
 
@@ -412,7 +472,28 @@ runtime::TaskResult VoxtralRealtimeSession::finalize() {
         throw std::runtime_error("VoxTral realtime finalize() requires streamed audio");
     }
     // Any partial this last pass produces has already gone to the sink.
-    (void) process_available_stream_chunks();
+    //
+    // Flushing a stream is not just "decode the last partial chunk". The model
+    // emits the token for audio position t only after it has seen through
+    // t + num_delay_tokens, and the offline path accounts for that by padding
+    // its input with (delay + 1 + 10) tokens of silence (see
+    // padded_streaming_audio). A stream that simply stops feeding never gives
+    // the decoder those steps, so the final words are never emitted - measured
+    // as a transcript one word short of the offline one, with no flag and no
+    // error. Append the same pad here and let the normal loop consume it: the
+    // silence is what really follows the end of a stream, and it is exactly
+    // what the delay is defined against. transcribe.cpp's arch got this right
+    // by re-running the whole offline forward at stream_finalize.
+    if (streaming_audio_.channels > 0 && streaming_audio_real_values_ > 0) {
+        const int64_t samples_per_token =
+            assets_->config.audio_length_per_tok * assets_->config.frontend.hop_length;
+        const int64_t pad_tokens = frontend_.effective_num_delay_tokens(stream_num_delay_tokens_) + 1 + 10;
+        const size_t pad_values =
+            static_cast<size_t>(pad_tokens * samples_per_token * streaming_audio_.channels);
+        streaming_audio_.samples.resize(streaming_audio_.samples.size() + pad_values, 0.0F);
+        streaming_audio_real_values_ = streaming_audio_.samples.size();
+    }
+    (void) process_available_stream_chunks(/*flush=*/true);
     streaming_result_ = runtime::TaskResult{};
     streaming_result_.text_output = runtime::Transcript{streaming_text_, ""};
     stream_started_ = false;
@@ -442,7 +523,7 @@ runtime::TaskResult VoxtralRealtimeSession::finalize() {
     return streaming_result_;
 }
 
-runtime::StreamEvent VoxtralRealtimeSession::process_available_stream_chunks() {
+runtime::StreamEvent VoxtralRealtimeSession::process_available_stream_chunks(bool flush) {
     runtime::StreamEvent last_event;
     last_event.is_final = false;
     if (streaming_audio_.sample_rate <= 0 || streaming_audio_.channels <= 0) {
@@ -460,7 +541,7 @@ runtime::StreamEvent VoxtralRealtimeSession::process_available_stream_chunks() {
     // audio for the whole session, so a pause in live audio never ends it.
     while (true) {
         const int64_t target_samples = first_stream_chunk_
-            ? frontend_.first_stream_chunk_samples()
+            ? frontend_.first_stream_chunk_samples(stream_num_delay_tokens_)
             : frontend_.steady_stream_chunk_samples(stream_batch_tokens_);
         const int64_t chunk_frames = source_frames_for_target_samples(
             target_samples,
@@ -468,7 +549,7 @@ runtime::StreamEvent VoxtralRealtimeSession::process_available_stream_chunks() {
             streaming_audio_.channels,
             static_cast<int>(assets_->config.frontend.sample_rate));
         const int64_t advance_target_samples = first_stream_chunk_
-            ? frontend_.first_stream_chunk_advance_samples()
+            ? frontend_.first_stream_chunk_advance_samples(stream_num_delay_tokens_)
             : frontend_.steady_stream_chunk_advance_samples(stream_batch_tokens_);
         const int64_t advance_frames = source_frames_for_target_samples(
             advance_target_samples,
@@ -479,7 +560,16 @@ runtime::StreamEvent VoxtralRealtimeSession::process_available_stream_chunks() {
             (streaming_audio_.samples.size() - streaming_audio_offset_values_) /
             static_cast<size_t>(streaming_audio_.channels));
         if (pending_frames < chunk_frames) {
-            break;
+            // Not enough for a chunk. While the caller may still feed, wait;
+            // at finalize, pad with silence so the remaining real audio is
+            // decoded rather than dropped. The pad is what the model would
+            // have seen anyway - a stream that ends is silence afterwards,
+            // and the delay tokens are defined against exactly that.
+            if (!flush || streaming_audio_offset_values_ >= streaming_audio_real_values_) {
+                break;
+            }
+            const size_t needed_values = static_cast<size_t>(chunk_frames * streaming_audio_.channels);
+            streaming_audio_.samples.resize(streaming_audio_offset_values_ + needed_values, 0.0F);
         }
         if (pending_frames <= 0) {
             break;
@@ -494,6 +584,10 @@ runtime::StreamEvent VoxtralRealtimeSession::process_available_stream_chunks() {
         chunk.samples.assign(begin, begin + static_cast<std::ptrdiff_t>(take_values));
         streaming_audio_offset_values_ += advance_values;
         const int64_t chunk_steps = first_stream_chunk_ ? 1 : stream_batch_tokens_;
+        // Audio time this chunk adds, in the model's own 12.5 Hz token grid.
+        stream_audio_ms_ += chunk_steps * assets_->config.audio_length_per_tok *
+            assets_->config.frontend.hop_length * 1000 /
+            std::max<int64_t>(1, assets_->config.frontend.sample_rate);
         last_event = process_one_stream_chunk(chunk);
         streaming_steps_processed_ += chunk_steps;
         ++processed_chunks;
@@ -505,7 +599,7 @@ runtime::StreamEvent VoxtralRealtimeSession::process_available_stream_chunks() {
             stream_event_sink_(last_event);
             last_event.partial_text.reset();
         }
-        if (pending_frames < chunk_frames) {
+        if (pending_frames < chunk_frames && !flush) {
             break;
         }
     }
@@ -513,11 +607,15 @@ runtime::StreamEvent VoxtralRealtimeSession::process_available_stream_chunks() {
         if (streaming_audio_offset_values_ == streaming_audio_.samples.size()) {
             streaming_audio_.samples.clear();
             streaming_audio_offset_values_ = 0;
+            streaming_audio_real_values_ = 0;
         } else if (streaming_audio_offset_values_ > 1ull * 1024ull * 1024ull &&
                    streaming_audio_offset_values_ * 2 > streaming_audio_.samples.size()) {
             streaming_audio_.samples.erase(
                 streaming_audio_.samples.begin(),
                 streaming_audio_.samples.begin() + static_cast<std::ptrdiff_t>(streaming_audio_offset_values_));
+            streaming_audio_real_values_ = streaming_audio_real_values_ > streaming_audio_offset_values_
+                ? streaming_audio_real_values_ - streaming_audio_offset_values_
+                : 0;
             streaming_audio_offset_values_ = 0;
         }
     }
@@ -532,14 +630,16 @@ runtime::StreamEvent VoxtralRealtimeSession::process_one_stream_chunk(const runt
         audio,
         first_stream_chunk_,
         frontend_stream_state_,
-        stream_batch_tokens_);
+        stream_batch_tokens_,
+        stream_num_delay_tokens_);
     stream_frontend_ms_ += engine::debug::elapsed_ms(frontend_start);
     const auto encoder_start = Clock::now();
     const auto audio_embeddings = audio_encoder_.encode_stream_chunk(features, audio_stream_state_);
     stream_encoder_ms_ += engine::debug::elapsed_ms(encoder_start);
     const auto decoder_start = Clock::now();
     if (first_stream_chunk_) {
-        auto prompt = tokenizer_.build_transcription_prompt(frontend_.first_stream_chunk_samples(), true);
+        auto prompt = tokenizer_.build_transcription_prompt(
+            frontend_.first_stream_chunk_samples(stream_num_delay_tokens_), true, stream_num_delay_tokens_);
         record_stream_token(text_decoder_.begin_stream(prompt, audio_embeddings, streaming_generation_));
         first_stream_chunk_ = false;
     } else if (!have_previous_stream_token_) {
@@ -552,13 +652,22 @@ runtime::StreamEvent VoxtralRealtimeSession::process_one_stream_chunk(const runt
                 previous_stream_token_,
                 audio_embeddings,
                 row,
-                assets_->config.default_num_delay_tokens,
+                frontend_.effective_num_delay_tokens(stream_num_delay_tokens_),
                 streaming_generation_));
         }
     }
     stream_decoder_ms_ += engine::debug::elapsed_ms(decoder_start);
-    // Once a chunk, not once a token: the chunk reports a single event however many it decoded.
-    take_stream_delta(event);
+    // Once a chunk, not once a token: the chunk reports a single event however many it decoded -
+    // and no more often than min_decode_interval_ms of audio time, when the caller asked for a
+    // slower partial cadence. Undelivered text is not lost: it accumulates in streaming_text_ and
+    // goes out with the next partial or with finalize()'s complete transcript.
+    if (stream_min_partial_interval_ms_ <= 0 ||
+        stream_audio_ms_ - stream_last_partial_audio_ms_ >= stream_min_partial_interval_ms_) {
+        take_stream_delta(event);
+        if (event.partial_text.has_value()) {
+            stream_last_partial_audio_ms_ = stream_audio_ms_;
+        }
+    }
     return event;
 }
 

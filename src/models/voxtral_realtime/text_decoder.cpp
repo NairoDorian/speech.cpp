@@ -186,6 +186,13 @@ int32_t argmax_index(const float * values, size_t count) {
     return static_cast<int32_t>(std::distance(values, std::max_element(values, values + count)));
 }
 
+// Decode-step cancellation point; a no-op without a RunControl.
+void poll_run_control(const VoxtralRealtimeGenerationOptions & options, int64_t completed, int64_t total) {
+    if (options.run_control != nullptr) {
+        options.run_control->emit_progress("voxtral_realtime.decode", completed, total);
+    }
+}
+
 struct LogitCandidate {
     int32_t token = 0;
     float score = 0.0F;
@@ -1065,6 +1072,7 @@ struct VoxtralRealtimeTextDecoderRuntime::Impl {
         VoxtralRealtimeGeneratedTokens out;
         double step_ms = 0.0;
         for (int64_t step = 0; step < options.max_new_tokens; ++step) {
+            poll_run_control(options, step, options.max_new_tokens);
             if (token == config.eos_token_id) {
                 break;
             }
@@ -1193,6 +1201,9 @@ struct VoxtralRealtimeTextDecoderRuntime::Impl {
             engine::debug::timing_log_scalar("voxtral_realtime.text_decoder.decode_cache_steps", cache_steps);
             return graph;
         };
+        // One 80 ms step: cheap enough that polling here bounds an abort to a
+        // single step of latency for a live stream.
+        poll_run_control(options, 0, 1);
         const auto current_step = decode_runtime.next_step();
         decode_runtime.grow_for_next_step(current_step.valid_steps + 1, decode_graph_factory);
         const int32_t token = decode_runtime.graph().run_step(
