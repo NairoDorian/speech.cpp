@@ -1590,6 +1590,26 @@ static transcribe_status transcribe_model_load_file_impl(const char *           
     // Per-family dispatch. The architecture string came from the GGUF KV so
     // the loader guarantees it is non-null and NUL-terminated.
     const transcribe::Arch * arch = transcribe::find_arch(loader.arch().c_str());
+    if (arch == nullptr && loader.arch() == "audiocpp") {
+        // An audio.cpp-converted GGUF: general.architecture is the container
+        // name "audiocpp" and the family lives in audiocpp.model_spec.family.
+        // No transcribe arch can ever claim it, so ask the framework registry
+        // - the same path a safetensors directory takes above. Before Phase
+        // 10.5 this returned UNSUPPORTED_ARCH for every audio.cpp package.
+        const std::string family = transcribe::adapter_sniff_framework_family(path);
+        if (family.empty()) {
+            return TRANSCRIBE_ERR_UNSUPPORTED_ARCH;
+        }
+        transcribe::Loader fw_loader;
+        if (const transcribe_status st = fw_loader.open_framework(path, family); st != TRANSCRIBE_OK) {
+            return st;
+        }
+        const transcribe::Arch * fw_arch = transcribe::adapter_find_arch(family.c_str());
+        if (fw_arch == nullptr || fw_arch->load == nullptr) {
+            return TRANSCRIBE_ERR_UNSUPPORTED_ARCH;
+        }
+        return fw_arch->load(fw_loader, params, out_model);
+    }
     if (arch == nullptr) {
         return TRANSCRIBE_ERR_UNSUPPORTED_ARCH;
     }

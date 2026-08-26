@@ -378,6 +378,7 @@ void print_inspection(const engine::runtime::ModelInspection & inspection) {
     std::cout << "supports_speaker_reference=" << (inspection.capabilities.supports_speaker_reference ? "true" : "false") << "\n";
     std::cout << "supports_style_condition=" << (inspection.capabilities.supports_style_condition ? "true" : "false") << "\n";
     std::cout << "supports_timestamps=" << (inspection.capabilities.supports_timestamps ? "true" : "false") << "\n";
+    std::cout << "supports_speculative_decode=" << (inspection.capabilities.supports_speculative_decode ? "true" : "false") << "\n";
     std::cout << "languages=";
     for (size_t i = 0; i < inspection.capabilities.languages.size(); ++i) {
         if (i != 0) {

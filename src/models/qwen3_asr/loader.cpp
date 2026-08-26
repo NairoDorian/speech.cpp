@@ -25,6 +25,8 @@ runtime::CapabilitySet capabilities(const Qwen3ASRAssets & assets) {
     };
     out.languages = assets.config.supported_languages;
     out.supports_timestamps = false;
+    out.supports_speculative_decode = true;
+    out.supports_cancellation = true;
     return out;
 }
 

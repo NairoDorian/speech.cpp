@@ -66,6 +66,7 @@ public:
         {runtime::VoiceTaskKind::Asr, {runtime::RunMode::Offline}}};
     result.languages = {"en"};
     result.supports_timestamps = false;
+    result.supports_cancellation = true;  // RunControl polled per decode step
     return result;
   }
 

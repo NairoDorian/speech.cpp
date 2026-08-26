@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/framework/runtime/run_control.h"
 #include "engine/framework/runtime/session.h"
 
 #include <cstdint>
@@ -9,9 +10,24 @@
 
 namespace engine::models::qwen3_asr {
 
+// Upper bound on 1-gram-lookup speculative drafts per verify pass (the
+// transcribe.cpp QWEN3_ASR_SPEC_K_MAX contract; practical range 1..8).
+constexpr int64_t kQwen3ASRSpecKMax = 8;
+
 struct Qwen3ASRGenerationOptions {
     int64_t max_new_tokens = 512;
     bool return_timestamps = false;
+    // 0 = plain one-token-per-step autoregression (the byte-equal reference
+    // path and the family default); 1..kQwen3ASRSpecKMax = draft that many
+    // tokens per verify pass on the offline single-utterance path. The
+    // batched path ignores it. Negative = family default.
+    int64_t spec_k_drafts = 0;
+    // Cooperative cancellation (Phase 10.5, the arch's
+    // TRANSCRIBE_FEATURE_CANCELLATION): when set, every decode loop polls it
+    // once per step - RunControl::emit_progress throws ProgressCanceled on a
+    // pending abort or a declining progress callback. The session installs
+    // its own RunControl here.
+    const runtime::RunControl * run_control = nullptr;
 };
 
 struct Qwen3ASRRequest {

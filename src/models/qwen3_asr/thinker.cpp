@@ -5,6 +5,7 @@
 #include "engine/framework/core/backend_weight_store.h"
 #include "engine/framework/debug/profiler.h"
 #include "engine/framework/modules/activation_modules.h"
+#include "engine/framework/modules/transformers/causal_lm_ops.h"
 #include "engine/framework/modules/transformers/qwen_causal_decoder.h"
 #include "engine/framework/modules/linear_module.h"
 #include "engine/framework/modules/lookup_modules.h"
@@ -242,6 +243,13 @@ int32_t argmax_index_ptr(const float * values, size_t count) {
 bool is_eos(const Qwen3ASRTextDecoderConfig & config, int32_t token) {
     return std::find(config.eos_token_ids.begin(), config.eos_token_ids.end(), static_cast<int64_t>(token)) !=
         config.eos_token_ids.end();
+}
+
+// Decode-step cancellation point; a no-op without a RunControl.
+void poll_run_control(const Qwen3ASRGenerationOptions & options, int64_t completed, int64_t total) {
+    if (options.run_control != nullptr) {
+        options.run_control->emit_progress("qwen3_asr.decode", completed, total);
+    }
 }
 
 class ThinkerWeightsRuntime {
@@ -741,6 +749,189 @@ private:
     ggml_backend_buffer_t buffer_ = nullptr;
 };
 
+// Multi-column verify graph for 1-gram-lookup speculative decode - the
+// mechanism transcribe.cpp's arch/qwen3_asr (and arch/voxtral_realtime) ran,
+// merged into the engine package in Phase 10.5. One sequence, T = k + 1
+// consecutive columns: column 0 is the mandatory next token, columns 1..k are
+// drafts. Column c writes its K/V at slot (valid_steps + c) and attends
+// [0, valid_steps + c]; the caller commits only the prefix of columns whose
+// input the previous column predicted, then advances the cache by that count.
+// A rejected draft leaves stale rows ABOVE the last committed slot; the next
+// verify starts at the new valid_steps and rewrites each of those rows before
+// any mask column can read it, so a stale row is never observed.
+//
+// NUMERICS: the acceptance rule is exact - no token is committed that plain
+// stepping would not have produced - but a (k+1)-column mul_mat can dispatch a
+// different kernel than the single-row GEMV, so k > 0 is not guaranteed
+// byte-equal to k == 0 on every backend. transcribe.cpp measured exactly one
+// flipped near-tie token in 255 on Qwen3-ASR-0.6B/CPU, identical for k = 1
+// and k = 4, which isolates the cause to the graph rather than the acceptance
+// rule. qwen3_asr_engine_smoke_test bounds the divergence.
+class VerifyGraph {
+public:
+    VerifyGraph(
+        std::shared_ptr<ThinkerWeightsRuntime> runtime,
+        int64_t cache_steps,
+        int64_t verify_steps,
+        size_t graph_arena_bytes)
+        : runtime_(std::move(runtime)),
+          cache_steps_(cache_steps),
+          verify_steps_(verify_steps) {
+        if (cache_steps_ <= 0) {
+            throw std::runtime_error("Qwen3 ASR thinker verify requires positive cache length");
+        }
+        if (verify_steps_ < 2 || verify_steps_ > cache_steps_) {
+            throw std::runtime_error("Qwen3 ASR thinker verify requires between 2 and cache_steps columns");
+        }
+        const auto build_start = Clock::now();
+        ggml_init_params params{graph_arena_bytes, nullptr, true};
+        ctx_.reset(ggml_init(params));
+        if (ctx_ == nullptr) {
+            throw std::runtime_error("failed to initialize Qwen3 ASR thinker verify graph context");
+        }
+        const auto & config = runtime_->assets().config.text_decoder;
+        const auto & weights = runtime_->weights();
+        core::ModuleBuildContext ctx{ctx_.get(), "qwen3_asr.thinker.verify", runtime_->backend_type()};
+        token_ids_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, verify_steps_);
+        auto token_ids = core::wrap_tensor(token_ids_, core::TensorShape::from_dims({verify_steps_}), GGML_TYPE_I32);
+        auto x = modules::EmbeddingModule({config.vocab_size, config.hidden_size})
+                     .build(ctx, token_ids, weights.token_embedding);
+        x = core::reshape_tensor(ctx, x, core::TensorShape::from_dims({1, verify_steps_, config.hidden_size}));
+        positions_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, verify_steps_);
+        auto positions = core::wrap_tensor(positions_, core::TensorShape::from_dims({verify_steps_}), GGML_TYPE_I32);
+        cache_slot_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, verify_steps_);
+        auto cache_slot = core::wrap_tensor(cache_slot_, core::TensorShape::from_dims({verify_steps_}), GGML_TYPE_I32);
+        attention_mask_ = ggml_new_tensor_4d(ctx_.get(), GGML_TYPE_F16, cache_steps_, verify_steps_, 1, 1);
+        auto attention_mask = core::wrap_tensor(
+            attention_mask_,
+            core::TensorShape::from_dims({1, 1, verify_steps_, cache_steps_}),
+            GGML_TYPE_F16);
+        graph_ = ggml_new_graph_custom(ctx_.get(), 65536, false);
+        auto decoder_out = modules::QwenCausalDecoderModule(
+                               make_qwen_decoder_config(config, modules::QwenCausalDecoderLogitsMode::AllSteps))
+                               .build_static_cache_tail(
+                                   ctx,
+                                   graph_,
+                                   x,
+                                   positions,
+                                   make_qwen_decoder_weights(weights),
+                                   cache_steps_,
+                                   attention_mask,
+                                   cache_slot);
+        step_cache_ = std::move(decoder_out.cache);
+        logits_ = decoder_out.logits.tensor;
+        ggml_set_output(logits_);
+        ggml_build_forward_expand(graph_, logits_);
+        buffer_ = ggml_backend_alloc_ctx_tensors(ctx_.get(), runtime_->backend());
+        if (buffer_ == nullptr) {
+            engine::core::trim_backend_pools(runtime_->backend());
+            buffer_ = ggml_backend_alloc_ctx_tensors(ctx_.get(), runtime_->backend());
+        }
+        if (buffer_ == nullptr) {
+            throw std::runtime_error("failed to allocate Qwen3 ASR thinker verify graph");
+        }
+        mask_values_.assign(
+            static_cast<size_t>(cache_steps_) * static_cast<size_t>(verify_steps_),
+            ggml_fp32_to_fp16(-INFINITY));
+        position_values_.assign(static_cast<size_t>(verify_steps_), 0);
+        slot_values_.assign(static_cast<size_t>(verify_steps_), 0);
+        debug::timing_log_scalar("qwen3_asr.thinker.verify.graph.build_ms", engine::debug::elapsed_ms(build_start, Clock::now()));
+        debug::trace_log_scalar("qwen3_asr.thinker.verify_cache_steps", cache_steps_);
+        debug::trace_log_scalar("qwen3_asr.thinker.verify_steps", verify_steps_);
+    }
+
+    ~VerifyGraph() {
+        engine::core::release_backend_graph_resources(runtime_->backend(), graph_, true);
+        if (buffer_ != nullptr) {
+            ggml_backend_buffer_free(buffer_);
+        }
+    }
+
+    bool can_run(const ThinkerWeightsRuntime & runtime, int64_t required_steps, int64_t verify_steps) const {
+        return runtime_.get() == &runtime && cache_steps_ >= required_steps && verify_steps_ == verify_steps;
+    }
+
+    void import_state(const runtime::TransformerKVState & state) {
+        step_cache_.import_state(state);
+    }
+
+    int64_t valid_steps() const noexcept {
+        return step_cache_.valid_steps();
+    }
+
+    // One verify pass over `tokens` (column 0 = the pending next token,
+    // columns 1.. = drafts). Returns every column's argmax prediction. Does
+    // not advance the cache: the caller decides how many columns were
+    // confirmed and calls advance().
+    std::vector<int32_t> run_verify(const std::vector<int32_t> & tokens) {
+        const auto & config = runtime_->assets().config.text_decoder;
+        if (static_cast<int64_t>(tokens.size()) != verify_steps_) {
+            throw std::runtime_error("Qwen3 ASR thinker verify token count mismatch");
+        }
+        const int64_t valid = step_cache_.valid_steps();
+        if (valid + verify_steps_ > cache_steps_) {
+            throw std::runtime_error("Qwen3 ASR thinker verify cache exhausted");
+        }
+        const int64_t position_base = step_cache_.current_end();
+        for (int64_t c = 0; c < verify_steps_; ++c) {
+            position_values_[static_cast<size_t>(c)] = static_cast<int32_t>(position_base + c);
+            slot_values_[static_cast<size_t>(c)] = static_cast<int32_t>(valid + c);
+        }
+        ggml_backend_tensor_set(token_ids_, tokens.data(), 0, tokens.size() * sizeof(int32_t));
+        ggml_backend_tensor_set(positions_, position_values_.data(), 0, position_values_.size() * sizeof(int32_t));
+        ggml_backend_tensor_set(cache_slot_, slot_values_.data(), 0, slot_values_.size() * sizeof(int32_t));
+        // Per-column causal mask: column c sits at slot valid + c and may
+        // attend every slot up to and including its own.
+        const auto masked = ggml_fp32_to_fp16(-INFINITY);
+        const auto visible = ggml_fp32_to_fp16(0.0F);
+        std::fill(mask_values_.begin(), mask_values_.end(), masked);
+        for (int64_t c = 0; c < verify_steps_; ++c) {
+            auto * row = mask_values_.data() + static_cast<size_t>(c) * static_cast<size_t>(cache_steps_);
+            std::fill(row, row + valid + c + 1, visible);
+        }
+        ggml_backend_tensor_set(attention_mask_, mask_values_.data(), 0, mask_values_.size() * sizeof(ggml_fp16_t));
+        core::set_backend_threads(runtime_->backend(), runtime_->threads());
+        const ggml_status status = engine::core::compute_backend_graph(runtime_->backend(), graph_);
+        ggml_backend_synchronize(runtime_->backend());
+        if (status != GGML_STATUS_SUCCESS) {
+            throw std::runtime_error("Qwen3 ASR thinker verify graph compute failed");
+        }
+        logits_values_.resize(static_cast<size_t>(verify_steps_) * static_cast<size_t>(config.output_size));
+        ggml_backend_tensor_get(logits_, logits_values_.data(), 0, logits_values_.size() * sizeof(float));
+        std::vector<int32_t> predicted(static_cast<size_t>(verify_steps_), 0);
+        for (int64_t c = 0; c < verify_steps_; ++c) {
+            predicted[static_cast<size_t>(c)] = argmax_index_ptr(
+                logits_values_.data() + static_cast<size_t>(c) * static_cast<size_t>(config.output_size),
+                static_cast<size_t>(config.output_size));
+        }
+        return predicted;
+    }
+
+    // Commit the first `steps` columns of the last verify pass: their K/V
+    // rows are now part of the sequence.
+    void advance(int64_t steps) {
+        step_cache_.advance_after_direct_append(steps);
+    }
+
+private:
+    std::shared_ptr<ThinkerWeightsRuntime> runtime_;
+    int64_t cache_steps_ = 0;
+    int64_t verify_steps_ = 0;
+    std::unique_ptr<ggml_context, GgmlContextDeleter> ctx_;
+    ggml_tensor * token_ids_ = nullptr;
+    ggml_tensor * positions_ = nullptr;
+    ggml_tensor * cache_slot_ = nullptr;
+    ggml_tensor * attention_mask_ = nullptr;
+    ggml_tensor * logits_ = nullptr;
+    std::vector<ggml_fp16_t> mask_values_;
+    std::vector<int32_t> position_values_;
+    std::vector<int32_t> slot_values_;
+    std::vector<float> logits_values_;
+    runtime::TransformerKVCache step_cache_;
+    ggml_cgraph * graph_ = nullptr;
+    ggml_backend_buffer_t buffer_ = nullptr;
+};
+
 // Batched decode-step graph (transcribe.cpp run_batch style): n_seqs
 // utterances share one step graph. Each sequence has its own KV slab inside
 // the per-layer [n_seqs, cache_steps, kv_heads, head_dim] caches, its own
@@ -998,7 +1189,27 @@ struct Qwen3ASRThinkerRuntime::Impl {
             audio_embeddings.values,
             prompt.audio_token_positions);
         debug::timing_log_scalar("qwen3_asr.thinker.prefill_total_ms", engine::debug::elapsed_ms(timing_start, Clock::now()));
+        // Speculative drafts (transcribe.cpp arch/qwen3_asr's 1-gram-lookup
+        // mechanism, merged in Phase 10.5). k == 0 is the reference path and
+        // stays byte-identical to the pre-merge loop; k > 0 verifies k + 1
+        // columns per graph run and commits only what that run predicted.
+        // The family default is 0: on short clips the ~1.1 accepted
+        // tokens/run transcribe.cpp measured do not amortize a verify pass
+        // that costs ~1.5x a single step on CPU. Repetitive long-form
+        // dictation accepts more; request it per run with spec_k_drafts.
+        int64_t k_drafts = std::clamp<int64_t>(options.spec_k_drafts, 0, kQwen3ASRSpecKMax);
+        if (k_drafts > 0 && prompt_steps + options.max_new_tokens + k_drafts > config.max_position_embeddings) {
+            // The draft columns need headroom inside the position budget; if
+            // there is none, fall back to plain stepping rather than fail.
+            k_drafts = 0;
+        }
+        if (k_drafts > 0) {
+            return generate_speculative(prompt, prefill, k_drafts, options);
+        }
+
         const int64_t required_cache_steps = prompt_steps + options.max_new_tokens;
+        // The two decode graphs each own a full KV cache; hold one at a time.
+        verify_graph.reset();
         if (decode_graph == nullptr || !decode_graph->can_run(*weights, required_cache_steps)) {
             decode_graph.reset();
             decode_graph = std::make_unique<DecodeGraph>(weights, required_cache_steps, decode_graph_arena_bytes);
@@ -1012,6 +1223,7 @@ struct Qwen3ASRThinkerRuntime::Impl {
         std::vector<float> logits = std::move(prefill.logits);
         timing_start = Clock::now();
         for (int64_t step = 0; step < options.max_new_tokens; ++step) {
+            poll_run_control(options, step, options.max_new_tokens);
             const int32_t token = argmax_index(logits);
             if (is_eos(config, token)) {
                 break;
@@ -1020,6 +1232,89 @@ struct Qwen3ASRThinkerRuntime::Impl {
             logits = decode_graph->run_step(token);
         }
         debug::timing_log_scalar("qwen3_asr.thinker.decode_total_ms", engine::debug::elapsed_ms(timing_start, Clock::now()));
+        return out;
+    }
+
+    // The k > 0 path of generate(): see VerifyGraph for the mechanism and its
+    // numerics caveat. `prefill` is consumed - its logits pick the first token,
+    // its K/V seeds the verify cache.
+    Qwen3ASRGeneratedTokens generate_speculative(
+        const Qwen3ASRPrompt & prompt,
+        PrefillOutput & prefill,
+        int64_t k_drafts,
+        const Qwen3ASRGenerationOptions & options) {
+        const auto & config = weights->assets().config.text_decoder;
+        const int64_t prompt_steps = static_cast<int64_t>(prompt.input_ids.size());
+        const int64_t verify_steps = k_drafts + 1;
+        // A verify pass writes up to k rows past the last committed slot, so
+        // the cache carries that slack on top of the generation budget.
+        const int64_t required_cache_steps = prompt_steps + options.max_new_tokens + k_drafts;
+        decode_graph.reset();
+        if (verify_graph == nullptr || !verify_graph->can_run(*weights, required_cache_steps, verify_steps)) {
+            verify_graph.reset();
+            verify_graph = std::make_unique<VerifyGraph>(
+                weights, required_cache_steps, verify_steps, decode_graph_arena_bytes);
+        } else {
+            debug::timing_log_scalar("qwen3_asr.thinker.verify.graph.build_ms", 0.0);
+            debug::trace_log_scalar("qwen3_asr.thinker.verify_cache_steps", required_cache_steps);
+            debug::trace_log_scalar("qwen3_asr.thinker.verify_steps", verify_steps);
+        }
+        verify_graph->import_state(prefill.kv_state);
+
+        Qwen3ASRGeneratedTokens out;
+        const auto timing_start = Clock::now();
+        int64_t graph_runs = 0;
+        int32_t next_token = argmax_index(prefill.logits);
+        if (!is_eos(config, next_token)) {
+            out.token_ids.push_back(next_token);
+            modules::transformers::NgramLookupDrafter drafter(
+                prompt.input_ids, next_token, options.max_new_tokens + k_drafts);
+            std::vector<int32_t> columns(static_cast<size_t>(verify_steps), 0);
+            std::vector<int32_t> committed;
+            committed.reserve(static_cast<size_t>(verify_steps));
+            int64_t position = prompt_steps;  // absolute position of next_token
+            bool done = false;
+            while (!done && static_cast<int64_t>(out.token_ids.size()) < options.max_new_tokens) {
+                poll_run_control(options, static_cast<int64_t>(out.token_ids.size()), options.max_new_tokens);
+                columns[0] = next_token;
+                drafter.draft(next_token, k_drafts, columns.data() + 1);
+                const auto predicted = verify_graph->run_verify(columns);
+                ++graph_runs;
+                // Column 0 is always committed; column i > 0 is valid only if
+                // the previous column predicted the draft it was fed.
+                committed.clear();
+                for (int64_t i = 0; i < verify_steps; ++i) {
+                    if (i > 0 && predicted[static_cast<size_t>(i - 1)] != columns[static_cast<size_t>(i)]) {
+                        break;
+                    }
+                    const int32_t token = predicted[static_cast<size_t>(i)];
+                    committed.push_back(token);
+                    if (is_eos(config, token)) {
+                        done = true;
+                        break;
+                    }
+                    out.token_ids.push_back(token);
+                    if (static_cast<int64_t>(out.token_ids.size()) >= options.max_new_tokens) {
+                        done = true;
+                        break;
+                    }
+                }
+                const int64_t n_commit = static_cast<int64_t>(committed.size());
+                drafter.commit(next_token, position, committed.data(), n_commit);
+                // Rows [position, position + n_commit) now hold the K/V of
+                // committed inputs; anything above is stale and is rewritten
+                // by the next pass before it can be read.
+                verify_graph->advance(n_commit);
+                position += n_commit;
+                next_token = committed.back();
+            }
+        }
+        debug::timing_log_scalar("qwen3_asr.thinker.decode_total_ms", engine::debug::elapsed_ms(timing_start, Clock::now()));
+        debug::trace_log_scalar("qwen3_asr.thinker.spec_k_drafts", k_drafts);
+        debug::trace_log_scalar("qwen3_asr.thinker.spec_graph_runs", graph_runs);
+        debug::trace_log_scalar(
+            "qwen3_asr.thinker.spec_tokens_per_run",
+            graph_runs > 0 ? static_cast<double>(out.token_ids.size()) / static_cast<double>(graph_runs) : 0.0);
         return out;
     }
 
@@ -1137,6 +1432,7 @@ struct Qwen3ASRThinkerRuntime::Impl {
             tokens[b] = tok;
         }
         for (int64_t step = 1; step < options.max_new_tokens && active > 0; ++step) {
+            poll_run_control(options, step, options.max_new_tokens);
             const auto logits_batch = decode.run_step(tokens, positions, slots, visible);
             for (size_t b = 0; b < n; ++b) {
                 if (finished[b]) {
@@ -1166,6 +1462,7 @@ struct Qwen3ASRThinkerRuntime::Impl {
     size_t decode_graph_arena_bytes = 0;
     std::unique_ptr<PrefillGraph> prefill_graph;
     std::unique_ptr<DecodeGraph> decode_graph;
+    std::unique_ptr<VerifyGraph> verify_graph;
     std::unique_ptr<PromptClassificationGraph> classification_graph;
 };
 

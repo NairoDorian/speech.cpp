@@ -24,6 +24,10 @@ public:
         const std::string & text,
         int64_t audio_feature_tokens) const;
 
+    // Raw byte-level BPE encode of `text` (special tokens split out), i.e. the
+    // exact ids build_prompt() feeds the thinker. Exposed for parity gates.
+    std::vector<int32_t> encode(const std::string & text) const;
+
     std::string decode(const std::vector<int32_t> & token_ids) const;
 
 private:

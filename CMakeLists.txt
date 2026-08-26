@@ -1909,6 +1909,18 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
                          "${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-tiny.en.bin"
                          "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
             set_tests_properties(asr_e2e_whisper_wer_test PROPERTIES SKIP_RETURN_CODE 2)
+
+            # Phase 10.5: qwen3_asr through the public C ABI. The audio.cpp
+            # GGUF carries general.architecture == "audiocpp" and reaches the
+            # engine through the framework adapter, never a transcribe arch,
+            # so it resolves only where the product links the family.
+            if ("qwen3_asr" IN_LIST AUDIOCPP_LINKED_MODELS)
+                add_test(NAME asr_e2e_qwen3_asr_wer_test
+                         COMMAND asr_e2e_wer_test
+                             "${CMAKE_CURRENT_SOURCE_DIR}/models/qwen3-asr-0.6b-q8_0.gguf"
+                             "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
+                set_tests_properties(asr_e2e_qwen3_asr_wer_test PROPERTIES SKIP_RETURN_CODE 2)
+            endif()
         endif()
 
         # -------------------------------------------------------------------
@@ -3119,6 +3131,47 @@ if (ENGINE_BUILD_TESTS)
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
     set_tests_properties(whisper_engine_smoke_test PROPERTIES SKIP_RETURN_CODE 2)
+
+    # Phase 10.5: the Phase-10 verdict for qwen3_asr executed - the engine
+    # package is canonical and transcribe.cpp's distinguishing features moved
+    # in (1-gram-lookup speculative decode, HF BPE parity, BCP-47 language
+    # hints). The gates link the product OBJECT libraries rather than
+    # re-listing sources, so what is tested is exactly what audiocpp_cli and
+    # the C ABI link; in model sets that already carry the family the objects
+    # come from engine_runtime instead. Both model-backed gates skip (exit 2)
+    # while the pinned GGUF is absent (scripts/fetch_asr_test_model.py).
+    function(audiocpp_test_link_model_objects target_name)
+        foreach(model_name IN LISTS ARGN)
+            if (NOT model_name IN_LIST AUDIOCPP_LINKED_MODELS)
+                target_sources(${target_name} PRIVATE $<TARGET_OBJECTS:engine_model_${model_name}>)
+            endif()
+        endforeach()
+    endfunction()
+
+    add_engine_unittest(ngram_lookup_drafter_test tests/unittests/test_ngram_lookup_drafter.cpp)
+    add_test(NAME ngram_lookup_drafter_test COMMAND ngram_lookup_drafter_test)
+
+    add_engine_unittest(qwen3_asr_bpe_parity_test tests/unittests/test_qwen3_asr_bpe_parity.cpp)
+    audiocpp_test_link_model_objects(qwen3_asr_bpe_parity_test qwen3_asr qwen3_forced_aligner)
+    target_include_directories(qwen3_asr_bpe_parity_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    add_test(
+        NAME qwen3_asr_bpe_parity_test
+        COMMAND qwen3_asr_bpe_parity_test ${CMAKE_CURRENT_SOURCE_DIR}/models/qwen3-asr-0.6b-q8_0.gguf
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    set_tests_properties(qwen3_asr_bpe_parity_test PROPERTIES SKIP_RETURN_CODE 2)
+
+    add_engine_unittest(qwen3_asr_engine_smoke_test tests/unittests/test_qwen3_asr_engine.cpp)
+    audiocpp_test_link_model_objects(qwen3_asr_engine_smoke_test qwen3_asr qwen3_forced_aligner)
+    target_include_directories(qwen3_asr_engine_smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    add_test(
+        NAME qwen3_asr_engine_smoke_test
+        COMMAND qwen3_asr_engine_smoke_test
+            ${CMAKE_CURRENT_SOURCE_DIR}/models/qwen3-asr-0.6b-q8_0.gguf
+            ${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    set_tests_properties(qwen3_asr_engine_smoke_test PROPERTIES SKIP_RETURN_CODE 2)
 
 
     add_engine_unittest(fun_asr_nano_frontend_probe tests/fun_asr_nano/fun_asr_nano_frontend_probe.cpp)

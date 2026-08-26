@@ -137,6 +137,13 @@ public:
         const std::optional<QwenDecoderStackState> & prefix_state = std::nullopt,
         const std::optional<core::TensorValue> & attention_mask = std::nullopt) const;
 
+    // Static-cache tail over ONE sequence. `input` is [1, steps, hidden]:
+    // steps == 1 is the classic decode step; steps > 1 appends `steps`
+    // consecutive tokens at the slots in `cache_slot` ({steps} entries) under
+    // a [1, 1, steps, cache_steps] attention mask - the primitive speculative
+    // verify passes are built on (DirectSetRows update mode only). With
+    // logits_mode == LastStep only the final step's logits are produced;
+    // AllSteps yields [1, steps, logits_size].
     QwenCausalDecoderStaticCacheOutputs build_static_cache_tail(
         core::ModuleBuildContext & ctx,
         ggml_cgraph * graph,

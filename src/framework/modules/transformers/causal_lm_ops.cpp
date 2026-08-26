@@ -50,4 +50,37 @@ int prefill_chunk_size() {
     return kPrefillChunkDefault;
 }
 
+NgramLookupDrafter::NgramLookupDrafter(const std::vector<int32_t> & prompt_ids, int32_t first_token, int64_t reserve_extra) {
+    all_ids_.reserve(prompt_ids.size() + 1 + static_cast<size_t>(reserve_extra > 0 ? reserve_extra : 0));
+    all_ids_.insert(all_ids_.end(), prompt_ids.begin(), prompt_ids.end());
+    all_ids_.push_back(first_token);
+    last_pos_by_tok_.reserve(all_ids_.capacity());
+    for (size_t p = 0; p < prompt_ids.size(); ++p) {
+        last_pos_by_tok_[prompt_ids[p]] = static_cast<int64_t>(p);
+    }
+}
+
+void NgramLookupDrafter::draft(int32_t next_token, int64_t k, int32_t * out) const {
+    if (k <= 0 || out == nullptr) {
+        return;
+    }
+    const auto it = last_pos_by_tok_.find(next_token);
+    const int64_t origin = it != last_pos_by_tok_.end() ? it->second : -1;
+    const int64_t size = static_cast<int64_t>(all_ids_.size());
+    for (int64_t c = 1; c <= k; ++c) {
+        const int64_t src = origin >= 0 ? origin + c : -1;
+        out[c - 1] = (src >= 0 && src < size) ? all_ids_[static_cast<size_t>(src)] : next_token;
+    }
+}
+
+void NgramLookupDrafter::commit(int32_t next_token, int64_t position, const int32_t * committed, int64_t n_committed) {
+    last_pos_by_tok_[next_token] = position;
+    for (int64_t i = 0; i < n_committed; ++i) {
+        all_ids_.push_back(committed[i]);
+    }
+    for (int64_t j = 0; j + 1 < n_committed; ++j) {
+        last_pos_by_tok_[committed[j]] = position + 1 + j;
+    }
+}
+
 } // namespace engine::modules::transformers

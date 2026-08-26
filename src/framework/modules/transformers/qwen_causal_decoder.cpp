@@ -125,8 +125,8 @@ QwenDecoderHiddenStaticCacheOutputs QwenDecoderHiddenModule::build_static_cache_
     if (input.shape.rank != 3 || input.shape.dims[2] != config_.stack.hidden_size) {
         throw std::runtime_error("QwenDecoderHiddenModule static-cache input shape must be [batch, steps, hidden]");
     }
-    if (input.shape.dims[0] != 1 || input.shape.dims[1] != 1) {
-        throw std::runtime_error("QwenDecoderHiddenModule static-cache build currently supports single-token decode");
+    if (input.shape.dims[0] != 1 || input.shape.dims[1] < 1) {
+        throw std::runtime_error("QwenDecoderHiddenModule static-cache build requires one sequence of at least one step");
     }
     if (static_cast<int64_t>(weights.stack.layers.size()) != config_.stack.layers) {
         throw std::runtime_error("QwenDecoderHiddenWeights layer count does not match config");
@@ -307,8 +307,8 @@ QwenCausalDecoderStaticCacheOutputs QwenCausalDecoderModule::build_static_cache_
     if (input.shape.rank != 3 || input.shape.dims[2] != config_.stack.hidden_size) {
         throw std::runtime_error("QwenCausalDecoderModule static-cache input shape must be [batch, steps, hidden]");
     }
-    if (input.shape.dims[0] != 1 || input.shape.dims[1] != 1) {
-        throw std::runtime_error("QwenCausalDecoderModule static-cache build currently supports single-token decode");
+    if (input.shape.dims[0] != 1 || input.shape.dims[1] < 1) {
+        throw std::runtime_error("QwenCausalDecoderModule static-cache build requires one sequence of at least one step");
     }
 
     auto hidden_out = QwenDecoderHiddenModule(hidden_config_from_causal(config_))
@@ -322,6 +322,11 @@ QwenCausalDecoderStaticCacheOutputs QwenCausalDecoderModule::build_static_cache_
                               attention_mask,
                               cache_slot);
     auto logits_input = hidden_out.hidden;
+    if (logits_input.shape.dims[1] > 1) {
+        // Multi-token tails honour the configured logits mode; the
+        // single-token graph is left exactly as it was.
+        logits_input = select_hidden_steps(ctx, logits_input, config_.logits_mode);
+    }
     if (config_.lm_head_input_type.has_value() && logits_input.type != *config_.lm_head_input_type) {
         logits_input = core::wrap_tensor(
             ggml_cast(ctx.ggml, logits_input.tensor, *config_.lm_head_input_type),

@@ -655,6 +655,12 @@ QwenDecoderLayerOutputs QwenDecoderLayerModule::build_with_static_cache_tail(
     const std::optional<core::TensorValue> & cache_slot,
     const core::TensorValue & attention_mask) const {
     validate_sequence_input(input, config_.hidden_size, "input");
+    // steps == 1 is the classic decode step. steps > 1 (Phase 10.5) appends
+    // `steps` consecutive tokens of the same sequence at the slots named by
+    // cache_slot under a [steps, cache_steps] mask - the speculative verify
+    // primitive. Everything below is shape-generic except the two spots
+    // marked with `steps`.
+    const int64_t steps = input.shape.dims[1];
     const int64_t dim = require_head_dim(config_);
     const int64_t kv_repeats = config_.num_attention_heads / config_.num_key_value_heads;
 
@@ -716,6 +722,11 @@ QwenDecoderLayerOutputs QwenDecoderLayerModule::build_with_static_cache_tail(
             attention_value_cache = activation_cast(ctx, attention_value_cache, config_.activation_cast);
         }
     } else {
+        if (steps != 1) {
+            throw std::runtime_error(
+                "Qwen decoder scratch-slot static-cache update supports single-token tails only; "
+                "multi-token tails require DirectSetRows");
+        }
         const int64_t scratch_slot = cache_key.shape.dims[1] - 1;
         stored_key = cache_view(ctx, cache_key, scratch_slot, 1, config_.num_key_value_heads, dim);
         stored_value = cache_view(ctx, cache_value, scratch_slot, 1, config_.num_key_value_heads, dim);
@@ -778,7 +789,7 @@ QwenDecoderLayerOutputs QwenDecoderLayerModule::build_with_static_cache_tail(
     context = core::reshape_tensor(
         ctx,
         context,
-        core::TensorShape::from_dims({1, 1, config_.num_attention_heads * dim}));
+        core::TensorShape::from_dims({1, steps, config_.num_attention_heads * dim}));
 
     auto attn_out = LinearModule(
                         {
@@ -861,8 +872,24 @@ QwenDecoderLayerOutputs QwenDecoderLayerModule::build_with_static_cache_tail_bat
         const core::TensorValue * rope_factors = weights.rope_frequency_factors.has_value()
             ? &*weights.rope_frequency_factors
             : nullptr;
-        q = RoPEModule({dim, config_.rope_type, config_.rope_theta}).build(ctx, q, positions, rope_factors);
-        k = RoPEModule({dim, config_.rope_type, config_.rope_theta}).build(ctx, k, positions, rope_factors);
+        // RoPE (like ggml_rope_ext) takes one position per STEP, and each
+        // sequence of a lockstep batch sits at its own position. Rotate
+        // through a [1, batch, heads, dim] view of the same memory - one
+        // "step" per sequence - and view back. Before Phase 10.5 the
+        // [batch, 1, heads, dim] heads were rotated directly, which threw
+        // "positions shape mismatch: expected [1]" for every batch >= 2 and
+        // left run_batch broken for all Qwen-decoder families.
+        const int64_t batch = q.shape.dims[0];
+        const auto rope_rows = [&](const core::TensorValue & heads_value, int64_t heads) {
+            auto rows = core::reshape_tensor(
+                ctx,
+                core::ensure_backend_addressable_layout(ctx, heads_value),
+                core::TensorShape::from_dims({1, batch, heads, dim}));
+            rows = RoPEModule({dim, config_.rope_type, config_.rope_theta}).build(ctx, rows, positions, rope_factors);
+            return core::reshape_tensor(ctx, rows, core::TensorShape::from_dims({batch, 1, heads, dim}));
+        };
+        q = rope_rows(q, config_.num_attention_heads);
+        k = rope_rows(k, config_.num_key_value_heads);
         if (config_.activation_cast.enabled && config_.activation_cast.after_rope) {
             q = activation_cast(ctx, q, config_.activation_cast);
             k = activation_cast(ctx, k, config_.activation_cast);

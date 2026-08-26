@@ -1,6 +1,7 @@
 #include "engine/models/qwen3_asr/tokenizer_text.h"
 
 #include "engine/framework/tokenizers/llama_bpe.h"
+#include "engine/models/qwen3_asr/languages.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -54,7 +55,9 @@ Qwen3ASRPrompt Qwen3ASRTextTokenizer::build_prompt(
     const int64_t audio_feature_tokens) const {
     std::string prompt = default_chat_prompt(context);
     if (!language.empty() && language != "Auto") {
-        prompt += "language " + language + "<asr_text>";
+        // Accept the publisher name ("English") and, since Phase 10.5, the
+        // BCP-47 code the C ABI speaks ("en"); the template wants the name.
+        prompt += "language " + qwen3_asr_prompt_language_name(language) + "<asr_text>";
     }
     return build_raw_audio_prompt(prompt, audio_feature_tokens);
 }
@@ -83,6 +86,11 @@ Qwen3ASRPrompt Qwen3ASRTextTokenizer::build_raw_audio_prompt(
     result.input_ids = std::move(expanded);
     result.attention_mask.assign(result.input_ids.size(), 1);
     return result;
+}
+
+std::vector<int32_t> Qwen3ASRTextTokenizer::encode(const std::string & text) const {
+    const auto ids = impl_->tokenizer->encode(text);
+    return std::vector<int32_t>(ids.begin(), ids.end());
 }
 
 std::string Qwen3ASRTextTokenizer::decode(const std::vector<int32_t> & token_ids) const {

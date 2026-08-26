@@ -477,6 +477,9 @@ runtime::TaskResult Qwen3ASRSession::run_single(const Qwen3ASRRequest & asr_requ
             "qwen3_asr.forced_aligner_model_path=<path-to-Qwen3-ForcedAligner-0.6B>");
     }
     const auto frontend_start = Clock::now();
+    // Stage boundaries are cancellation points (request_abort / a declining
+    // progress callback unwind here); the decode loop polls per token.
+    emit_progress("qwen3_asr", 0, 1);
     const auto features = frontend_.extract(asr_request.audio);
     const auto frontend_end = Clock::now();
     const auto prompt_start = Clock::now();
@@ -489,6 +492,7 @@ runtime::TaskResult Qwen3ASRSession::run_single(const Qwen3ASRRequest & asr_requ
     const auto tokens = thinker_.generate(prompt, audio_embeddings, asr_request.generation);
     const auto thinker_end = Clock::now();
     const auto postprocess_start = Clock::now();
+    emit_progress("qwen3_asr", 1, 1);
     const auto decoded = postprocessor_.decode(tokens, asr_request);
     const auto postprocess_end = Clock::now();
 
@@ -716,6 +720,7 @@ Qwen3ASRRequest Qwen3ASRSession::make_request(const runtime::TaskRequest & reque
     Qwen3ASRRequest out;
     out.audio = *request.audio_input;
     out.generation.max_new_tokens = assets_->config.max_new_tokens;
+    out.generation.run_control = &run_control();
     if (request.text_input.has_value()) {
         out.context = request.text_input->text;
         out.language = request.text_input->language;
@@ -731,6 +736,13 @@ Qwen3ASRRequest Qwen3ASRSession::make_request(const runtime::TaskRequest & reque
     }
     if (const auto value = runtime::find_option(request.options, {"return_timestamps"})) {
         out.generation.return_timestamps = runtime::parse_bool_option(*value, "return_timestamps");
+    }
+    // transcribe ABI convention (transcribe_run_params::spec_k_drafts, which
+    // the C ABI adapter forwards verbatim): -1 = family default, 0 = off,
+    // > 0 = drafts per verify pass, clamped to the family maximum.
+    if (const auto value = runtime::parse_int_option(request.options, {"spec_k_drafts", "qwen3_asr.spec_k_drafts"})) {
+        out.generation.spec_k_drafts =
+            *value < 0 ? 0 : (*value > kQwen3ASRSpecKMax ? kQwen3ASRSpecKMax : static_cast<int64_t>(*value));
     }
     return out;
 }

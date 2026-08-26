@@ -369,12 +369,13 @@ public:
         this->caps.supports_language_detect = !caps_.languages.empty();
         this->caps.supports_translate = false;
         this->caps.supports_streaming = caps_supports_streaming(caps_);
-        this->caps.supports_spec_decode = false;
+        this->caps.supports_spec_decode = caps_.supports_speculative_decode;
         this->caps.max_audio_ms = 0;  // framework sessions chunk internally; treat as unbounded.
         this->caps.n_translate_target_languages = 0;
         this->caps.translate_target_languages = nullptr;
         set_languages(caps_.languages);
 
+        set_feature(this, TRANSCRIBE_FEATURE_CANCELLATION, caps_.supports_cancellation);
         set_feature(this, TRANSCRIBE_FEATURE_DIARIZATION,
                     caps_has_task(caps_, VoiceTaskKind::Diarization));
     }
@@ -422,6 +423,20 @@ public:
             : dynamic_cast<IStreamingVoiceTaskSession *>(streaming_.get());
     }
 
+    // Bridge transcribe_set_abort_callback onto the framework's progress
+    // contract: the session polls RunControl at its stage / decode-step
+    // boundaries and unwinds with ProgressCanceled when our callback declines.
+    // Families that never poll simply run to completion (their capability
+    // set says so: supports_cancellation == false).
+    void install_abort_bridge(IVoiceTaskSession * session) {
+        if (session == nullptr) {
+            return;
+        }
+        session->set_progress_callback([this](const engine::runtime::ProgressInfo &) {
+            return !this->poll_abort();
+        });
+    }
+
     transcribe_status run_offline(const float * pcm, int n_samples, const transcribe_run_params * params) {
         if (pcm == nullptr || n_samples <= 0) {
             return TRANSCRIBE_ERR_INVALID_ARG;
@@ -438,10 +453,16 @@ public:
                 std::vector<float>(pcm, pcm + static_cast<std::size_t>(n_samples))};
             apply_run_params(request, params);
             offline->prepare(build_preparation_request(request));
+            install_abort_bridge(offline);
             const TaskResult result = offline->run(request);
             clear_result();
             map_result_into(this, result);
             return TRANSCRIBE_OK;
+        } catch (const engine::runtime::ProgressCanceled &) {
+            // The transcribe abort callback fired (poll_abort set was_aborted);
+            // same contract as a builtin arch: ERR_ABORTED, no partial result.
+            clear_result();
+            return TRANSCRIBE_ERR_ABORTED;
         } catch (const std::exception & e) {
             transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "adapter run failed: %s", e.what());
             return TRANSCRIBE_ERR_BACKEND;
@@ -476,6 +497,7 @@ public:
                 offline->prepare(build_preparation_request(requests[0]));
             }
 
+            install_abort_bridge(offline);
             const std::vector<TaskResult> results = offline->run_batch(requests);
 
             batch_results.clear();
@@ -510,6 +532,10 @@ public:
             }
 
             return TRANSCRIBE_OK;
+        } catch (const engine::runtime::ProgressCanceled &) {
+            clear_result();
+            batch_results.clear();
+            return TRANSCRIBE_ERR_ABORTED;
         } catch (const std::exception & e) {
             transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "adapter run_batch failed: %s", e.what());
             return TRANSCRIBE_ERR_BACKEND;

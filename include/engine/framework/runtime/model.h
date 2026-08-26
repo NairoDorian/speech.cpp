@@ -31,6 +31,14 @@ struct CapabilitySet {
     bool supports_speaker_reference = false;
     bool supports_style_condition = false;
     bool supports_timestamps = false;
+    // The offline autoregressive decode honours the spec_k_drafts request
+    // option (n-gram-lookup speculative decoding). Mirrors
+    // transcribe_capabilities::supports_spec_decode across the C ABI adapter.
+    bool supports_speculative_decode = false;
+    // run()/run_batch() poll RunControl at stage and decode-step boundaries,
+    // so request_abort() (or a declining progress callback) unwinds them
+    // promptly. Mirrors TRANSCRIBE_FEATURE_CANCELLATION across the C ABI.
+    bool supports_cancellation = false;
 };
 
 struct ModelMetadata {

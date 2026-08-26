@@ -91,6 +91,19 @@ PINNED_MODELS = (
         sha256="921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f",
         size=77_704_715,
     ),
+    # Phase 10.5: the audio.cpp package for the canonical Qwen3-ASR engine
+    # family (model_specs/qwen3_asr.json id qwen3_asr_0_6b_q8_0). Its
+    # general.architecture is "audiocpp", so it exercises the C ABI's
+    # framework routing as well as the engine gates.
+    PinnedModel(
+        filename="qwen3-asr-0.6b-q8_0.gguf",
+        url=(
+            "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/"
+            "Qwen3-ASR-0.6B-GGUF/qwen3-asr-0.6b-q8_0.gguf"
+        ),
+        sha256="6c44ec2fb4cee513892d7863c1fcc3ea6b699ffa4d899b0ef4ab19956d9544f7",
+        size=1_151_272_416,
+    ),
 )
 
 
