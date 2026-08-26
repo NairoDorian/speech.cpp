@@ -38,13 +38,14 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | **Phase 10: Attention & Conformer Module Fusion** | **Done & Verified (`sanm`, `shaw_attn`, `causal_lm_ops`, Bake-Off certified)** | **100%** |
 | **Phase 11 W1a: Native Engine Moonshine (offline)** | **Done & Verified (`moonshine_engine_smoke_test`: engine-path WER 1.449% == arch 1/69 edits; batch + abort contracts)** | **100%** |
 | **Phase 11 W1b: Native Engine Moonshine-Streaming** | **Done & Verified (`moonshine_streaming_engine_smoke_test`: streamed 4.348% == offline 4.348% == arch baseline 3/69, divergence 0; lifecycle + abort contracts)** | **100%** |
+| **Phase 11 W2a: Native Engine Whisper (offline core)** | **Done & Verified (`whisper_engine_smoke_test`: 4.34783% == arch baseline 3/69, RTF 0.155; legacy `.bin` loader + unified MelExtractor)** | **100%** |
 | Specs: Phase 6 Whisper & Moonshine Model Spec Catalogs | Moonshine spec corrected + backed by native loader. **Whisper: `whisper.json` is catalog-only in the strong sense — its 16 packages point at `Whisper-*-GGUF` paths that do NOT exist in `audio-cpp/audio.cpp-gguf` (no Whisper dir at all), so none are downloadable.** Family now gated via the legacy `.bin` instead (see W2 prerequisite). | ~70% |
 | ABI offline + streaming surface | Verified, real CTest gates | 100% |
 | End-to-end ASR **offline text** (WER gate) | Done — 1.45% corpus WER (arch path); engine path now also 1/69 edits | 100% |
 | **End-to-end ASR streaming text** | **Done — streamed 4.35% == offline 4.35%, divergence 0** | **100%** |
-| Test suite status | **102/102 total (98 passed, 4 clean skips on unpinned weights) 100% green** | **100%** |
-| **Completed increment** | **Upstream reconciliation `c79e588` (0 behind), ggml 0.22.0 (CPU+CUDA certified), Phase 11 W1a & W1b** | **DONE** |
-| **Next increment** | **Phase 11 Wave W2: Whisper Universal Family** (W1 retirement step first, if taking it) | Ready |
+| Test suite status | **103/103 total (99 passed, 4 clean skips on unpinned weights) 100% green** | **100%** |
+| **Completed increment** | **Upstream `c79e588` (0 behind), ggml 0.22.0 (CPU+CUDA certified), Phase 11 W1a + W1b + W2a** | **DONE** |
+| **Next increment** | **Phase 11 Wave W2b**: temperature-fallback ladder + DecodeTelemetry, timestamps, long-form seek, language detection, batched decode | Ready |
 
 ## DONE this session (plan R12 records all of it)
 
@@ -139,6 +140,7 @@ reports **`0 path(s) changed`**: `sync + patches == committed tree`, exactly.
 0007's CUDA entry points and the 0.22.0 CUDA kernel churn are compile-
 unverified pending an `sp_cuda` run.
 
+
 ### 2. Phase 11 Wave W1b — Native Engine Moonshine-Streaming, closed (2026-08-26)
 
 Second family off the arch layer, onto the engine framework. New package
@@ -198,7 +200,56 @@ Two findings worth carrying forward:
 Suite: **101/101 green**. Arch copy untouched and still building (§4.4
 coexistence); retiring both moonshine arch dirs stays the separate gated W1
 retirement step (Appendix B B16a/B16b).
-### 3. Phase 11 Wave W1a — Native Engine Moonshine (offline), closed
+### 3. Phase 11 Wave W2a — Native Engine Whisper (offline core), closed (2026-08-26)
+
+Third family off the arch layer. New package `src/models/whisper/`
+(`graphs/assets/runtime/session` + internal headers), registered via
+`audiocpp_add_model` and in the ASR composite; resolves by `whisper` /
+`whisper-offline`.
+
+**The frontend is reuse, not a port.** The Phase-9 `engine::audio::MelExtractor`
+runs Whisper's `PerUtterance` normalization over the exact slaney filterbank
+shipped inside the `.bin` — the "unified MelExtractor" half of W2's scope,
+delivered without a second private mel implementation.
+
+**Weights load from the legacy whisper.cpp `.bin`.** `model_specs/whisper.json`
+is catalog-only: its 16 packages point at `Whisper-*-GGUF` paths that do not
+exist in `audio-cpp/audio.cpp-gguf` (no Whisper directory at all), so no GGUF
+is obtainable. `assets.cpp` carries a metadata-only parser plus the
+special-token and suppress-list synthesis whisper.cpp derives rather than
+stores; payloads stream per tensor at upload. `can_load()` sniffs the `ggml`
+magic instead of resolving a spec bundle, which would fail for every real model.
+
+**Result — parity with the arch, same bar as W1a/W1b:**
+
+| | corpus WER | edits | RTF |
+|---|---|---|---|
+| engine package (W2a) | **4.34783%** | **3/69** | 0.155 |
+| arch `asr_e2e_whisper_wer_test` | 4.34783% | 3/69 | 0.047 |
+
+The gate fails if the engine exceeds the arch's 3 edits — parity, not the 10%
+structural bound. (RTF is higher than the arch's because W2a rebuilds the
+step graph per token; the arch has a static-topology step graph. That is a
+W2b optimization, not a numerics difference.)
+
+**The bug the gate caught — remember this one.** `MelExtractor` writes
+**mel-major** (element (m,t) at `m*n_frames + t`), but a graph input declared
+`ggml_new_tensor_2d(ctx, F32, n_mels, n_frames)` has `n_mels` as its *fastest*
+axis and therefore needs **frame-major**. Passing the extractor's buffer
+straight through fed the encoder a **transposed spectrogram**. Nothing crashed;
+the mel statistics looked perfectly healthy (range ≈ [-0.95, +1.05],
+audio-dependent mean); the decoder produced confident, fluent English unrelated
+to the audio — "You", "So", "I'm going to go to the next one." — at **94% WER**.
+Only the end-to-end numeric gate surfaced it, and only host-side instrumentation
+localized it. **Any family wiring MelExtractor into a ggml graph must
+transpose.**
+
+Suite: **103/103 green**. Arch copy untouched (§4.4 coexistence).
+
+W2b remains: temperature-fallback ladder + DecodeTelemetry, timestamps,
+long-form seek continuation, language detection for multilingual variants,
+batched decode, and the static-topology step graph.
+### 4. Phase 11 Wave W1a — Native Engine Moonshine (offline), closed
 First family migration of the arch layer onto the engine framework
 (FUSION_ROADMAP_PLAN §8, §4.4 steps 5–7). New package `src/models/moonshine/`
 (`graphs/assets/runtime/session` + internal headers in
@@ -220,7 +271,7 @@ measured **1/69 edits == arch baseline**), ordered `run_batch`,
 `request_abort()` unwinds `run()`. Arch copy untouched and still green.
 Suite: 96/96 green.
 
-### 4. Streaming ASR text validation — NEXT #1, closed
+### 5. Streaming ASR text validation — NEXT #1, closed
 `tests/asr_stream_text_wer_test.cpp` + CTest gate `asr_stream_text_wer_test`:
 streams the four LibriSpeech fixtures into **moonshine-streaming-tiny Q8_0**
 (48 MB, MIT, `handy-computer/moonshine-streaming-tiny-gguf` — the exact model
@@ -238,7 +289,7 @@ became a pinned-model table (both gate models; `--only streaming` selects);
 shared scoring lives in `tests/asr_test_text.h`. Report updated:
 `docs/reports/asr_e2e_wer_gate.md`.
 
-### 5. The three "environment/asset" failures — NEXT #2, all fixed, none was assets
+### 6. The three "environment/asset" failures — NEXT #2, all fixed, none was assets
 - `model_spec_system_test` + `fun_asr_nano_assets_test`: model-spec
   resolution walks UP from the cwd, so they only ever passed from build
   trees inside the repo. Fixed with `WORKING_DIRECTORY` registrations.
@@ -259,19 +310,19 @@ shared scoring lives in `tests/asr_test_text.h`. Report updated:
      `~ModelInstaller` (first D7-teardown application to app-layer code).
      Test now passes in 2.7 s.
 
-### 6. `asr_standalone_gguf_test` — NEXT #3, closed by correction
+### 7. `asr_standalone_gguf_test` — NEXT #3, closed by correction
 Filed for three sessions as "needs citrinet+hviske GGUFs". It does not: the
 fixtures are synthetic (dummy safetensors → GGUF), and the failure was the
 same cwd spec-resolution defect. `WORKING_DIRECTORY` registration fixed it;
 the old download-and-pin recommendation is withdrawn. (A real citrinet/hviske
 WER gate would be new, optional work — the plan's §5 Phase-5 corpus item.)
 
-### 7. `scaled_dot_product_attention_test` skips without CUDA
+### 8. `scaled_dot_product_attention_test` skips without CUDA
 It exists to pin the CUDA SDPA lowerings (R10) and hard-required a CUDA
 device, failing CPU-only builds. Now probes `list_backend_devices()` and
 skips (exit 2, `SKIP_RETURN_CODE 2`); stays a hard gate on CUDA builds.
 
-### 8. Performance pass on transcribe.cpp runtime families
+### 9. Performance pass on transcribe.cpp runtime families
 Closed the last depthwise-1D-conv im2col sites in the runtime and a couple
 of decode/frontend hotspots, all with env-override kill switches and
 numerical parity:
