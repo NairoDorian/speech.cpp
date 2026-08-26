@@ -1415,6 +1415,18 @@ audiocpp_add_model(moonshine_streaming
         engine::models::moonshine_streaming::make_moonshine_streaming_loader
 )
 
+audiocpp_add_model(whisper
+    SOURCES
+        src/models/whisper/graphs.cpp
+        src/models/whisper/assets.cpp
+        src/models/whisper/runtime.cpp
+        src/models/whisper/session.cpp
+    INCLUDES
+        engine/models/whisper/session.h
+    LOADERS
+        engine::models::whisper::make_whisper_loader
+)
+
 audiocpp_add_model(vevo2
     SOURCES
         src/models/vevo2/ar.cpp
@@ -1552,6 +1564,7 @@ set(AUDIOCPP_ASR_MODEL_TARGETS
     citrinet_asr
     moonshine
     moonshine_streaming
+    whisper
     qwen3_asr
     parakeet_tdt
     higgs_audio_stt
