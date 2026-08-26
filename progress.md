@@ -45,7 +45,7 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | **End-to-end ASR streaming text** | **Done — streamed 4.35% == offline 4.35%, divergence 0** | **100%** |
 | Test suite status | **103/103 total (99 passed, 4 clean skips on unpinned weights) 100% green** | **100%** |
 | **Completed increment** | **Upstream `c79e588` (0 behind), ggml 0.22.0 (CPU+CUDA certified), Phase 11 W1a + W1b + W2a** | **DONE** |
-| **Next increment** | **Roadmap v6.0 Phase 10.5** — execute the five Phase-10 verdicts (feature-merge, then the first deletions in the project); then 11a (ASR runtime layer) | Ready |
+| **Next increment** | **Phase 10.5, family 2 of 5: `voxtral_realtime`** (cache-aware streaming windows into the engine package, gate, delete B12); then `sortformer_diar`, `sense_asr`, `fun_asr_nano`; then 11a | Ready |
 
 ## DONE this session (plan R12 records all of it)
 
@@ -281,7 +281,81 @@ arch parity, product-registered — and each added a private KV cache and decode
 loop, one re-implemented an existing module, one truncates silently. That is
 the multiplier Phase 11a exists to stop.
 
-### 5. Phase 11 Wave W1a — Native Engine Moonshine (offline), closed
+### 5. Phase 10.5, family 1 of 5 — `qwen3_asr` verdict executed (2026-08-26)
+
+The first real consolidation of the fusion: the transcribe.cpp arch for
+Qwen3-ASR is gone and the engine package carries everything it had.
+Feature-merge commit `89758cf`, deletion commit `9cc5457` (ledger B11).
+
+**Measured before anything was changed (L12):**
+
+- The C ABI could not open the family's only downloadable GGUF at all:
+  `asr_e2e_wer_test models/qwen3-asr-0.6b-q8_0.gguf` → `status=5`
+  (UNSUPPORTED_ARCH). audio.cpp GGUFs carry `general.architecture =
+  "audiocpp"`; `transcribe_model_load_file` only consulted the framework
+  registry for non-GGUF paths, so *no* audio.cpp package was reachable
+  through `transcribe.h`. Not a qwen3_asr problem — every family.
+- The arch could not be run on that GGUF either (it reads
+  `stt.qwen3_asr.*` KVs, a transcribe.cpp converter layout that no public
+  package uses), so there is no arch-vs-engine number for this family. The
+  engine's own first measurement is the baseline, and the ledger says so.
+- The engine's batched decode threw `positions shape mismatch: expected
+  [1], got [2]` for any batch ≥ 2: `build_with_static_cache_tail_batched`
+  rotated `[n_seqs, 1, heads, dim]` heads with `[n_seqs]` positions. The
+  bake-off's "engine has batched decode" was structural, never run. Same
+  code upstream — a candidate audio.cpp contribution (affects
+  `higgs_audio_stt`, `vibevoice_asr` too).
+- `request_abort()` was not honoured by `run()`; the arch advertised
+  `TRANSCRIBE_FEATURE_CANCELLATION`.
+
+**Merged into the engine package** (all gated):
+
+| Arch feature | Where it lives now |
+|---|---|
+| 1-gram-lookup speculative decode (`spec_k_drafts`, `supports_spec_decode`) | `NgramLookupDrafter` in `modules/transformers/causal_lm_ops` (family-agnostic, unit-tested); `VerifyGraph` in `models/qwen3_asr/thinker.cpp` over a new shared primitive: multi-token static-cache tail (`QwenDecoderLayerModule::build_with_static_cache_tail`, steps ≥ 1) + multi-row `FastKVSetRows`. Request option `spec_k_drafts` (−1/0/1..8, transcribe convention), `CapabilitySet::supports_speculative_decode`, adapter maps it to `supports_spec_decode` |
+| HF BPE parity (`qwen3_asr_bpe_parity`) | `qwen3_asr_bpe_parity_test` on the engine tokenizer, same fixture file: 37 strings + 30 language prefixes HF-exact |
+| BCP-47 language hints (`encode_language_prefix`) | `include/engine/models/qwen3_asr/languages.h`; `build_prompt` accepts "en" and "English" |
+| Cancellation | `RunControl` polled at stage boundaries and every decode step; `CapabilitySet::supports_cancellation`; the adapter bridges `transcribe_set_abort_callback` onto the progress callback → `TRANSCRIBE_ERR_ABORTED`, and now advertises `TRANSCRIBE_FEATURE_CANCELLATION` for the engine families that poll (qwen3_asr, whisper, moonshine ×2) |
+
+**Fixed on the way:** batched RoPE positions for all Qwen-decoder families;
+`transcribe_model_load_file` routes `general.architecture == "audiocpp"`
+GGUFs through the framework registry; and `ModelRegistry` auto-detection
+now reads a GGUF's own `audiocpp.model_spec.family` instead of taking the
+first loader whose `can_load()` says yes (`bf0e68a` — the mis-detection that
+decoded a Qwen3-ASR file as Silero VAD; it affected `audiocpp_cli --model`
+and the server too, not only the C ABI).
+
+**Gates (new, all green on the pinned `qwen3-asr-0.6b-q8_0.gguf`, sha
+`6c44ec2f…`, 1,151,272,416 bytes — fourth row of `fetch_asr_test_model.py`):**
+
+| Gate | Result |
+|---|---|
+| `qwen3_asr_engine_smoke_test` | corpus WER **2.89855% (2/69)**, RTF 0.81 (CPU); `spec_k_drafts=4`: divergence **0** words on all four fixtures, 2 edits, RTF 1.23 (slower on short clips, exactly as transcribe.cpp documented — the default stays 0); `run_batch(2)` ordered/non-empty; abort honoured |
+| `qwen3_asr_bpe_parity_test` | 37 + 30 fixtures, HF-exact |
+| `ngram_lookup_drafter_test` | pure-logic drafter semantics |
+| `asr_e2e_qwen3_asr_wer_test` | the same fixtures through `transcribe.h` in a product tree that links the family (`-DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=qwen3_asr`): **corpus WER 2.89855% (2/69), RTF 0.763** — the C ABI and the engine session produce the same text |
+
+**Deleted:** `src/runtime/arch/qwen3_asr/` (4,329 LOC) and the six
+`tests/transcribe/qwen3_asr_*.cpp` (1,650 LOC) that were copied from
+transcribe.cpp but never registered in any CMake file — the "validation
+methodology" they represented was already absent from CI.
+
+**What the goldens could not do:** `tests/golden/qwen3_asr/` (2 manifests)
+need `scripts/dump_reference_qwen3_asr_author.py` and the HF checkpoint;
+neither is in this repo. The manifests stay; running them is Track M work.
+
+**Lessons for families 2–5:**
+
+- Measure the C ABI path and `run_batch` first; two of the four defects
+  above were invisible to every existing gate.
+- A "loser feature" can be a *contract* (cancellation, BCP-47), not only
+  an algorithm. Read the arch's `capabilities.cpp` and the transcribe.h
+  fields it sets before deciding what to merge.
+- The engine's model sets matter: `core` links no ASR family, so C-ABI
+  gates must be guarded on `AUDIOCPP_LINKED_MODELS` and measured in a
+  `custom` tree.
+
+### 6. Phase 11 Wave W1a — Native Engine Moonshine (offline), closed
 First family migration of the arch layer onto the engine framework
 (FUSION_ROADMAP_PLAN §8, §4.4 steps 5–7). New package `src/models/moonshine/`
 (`graphs/assets/runtime/session` + internal headers in
@@ -303,7 +377,7 @@ measured **1/69 edits == arch baseline**), ordered `run_batch`,
 `request_abort()` unwinds `run()`. Arch copy untouched and still green.
 Suite: 96/96 green.
 
-### 6. Streaming ASR text validation — NEXT #1, closed
+### 7. Streaming ASR text validation — NEXT #1, closed
 `tests/asr_stream_text_wer_test.cpp` + CTest gate `asr_stream_text_wer_test`:
 streams the four LibriSpeech fixtures into **moonshine-streaming-tiny Q8_0**
 (48 MB, MIT, `handy-computer/moonshine-streaming-tiny-gguf` — the exact model
@@ -321,7 +395,7 @@ became a pinned-model table (both gate models; `--only streaming` selects);
 shared scoring lives in `tests/asr_test_text.h`. Report updated:
 `docs/reports/asr_e2e_wer_gate.md`.
 
-### 7. The three "environment/asset" failures — NEXT #2, all fixed, none was assets
+### 8. The three "environment/asset" failures — NEXT #2, all fixed, none was assets
 - `model_spec_system_test` + `fun_asr_nano_assets_test`: model-spec
   resolution walks UP from the cwd, so they only ever passed from build
   trees inside the repo. Fixed with `WORKING_DIRECTORY` registrations.
@@ -342,19 +416,19 @@ shared scoring lives in `tests/asr_test_text.h`. Report updated:
      `~ModelInstaller` (first D7-teardown application to app-layer code).
      Test now passes in 2.7 s.
 
-### 8. `asr_standalone_gguf_test` — NEXT #3, closed by correction
+### 9. `asr_standalone_gguf_test` — NEXT #3, closed by correction
 Filed for three sessions as "needs citrinet+hviske GGUFs". It does not: the
 fixtures are synthetic (dummy safetensors → GGUF), and the failure was the
 same cwd spec-resolution defect. `WORKING_DIRECTORY` registration fixed it;
 the old download-and-pin recommendation is withdrawn. (A real citrinet/hviske
 WER gate would be new, optional work — the plan's §5 Phase-5 corpus item.)
 
-### 9. `scaled_dot_product_attention_test` skips without CUDA
+### 10. `scaled_dot_product_attention_test` skips without CUDA
 It exists to pin the CUDA SDPA lowerings (R10) and hard-required a CUDA
 device, failing CPU-only builds. Now probes `list_backend_devices()` and
 skips (exit 2, `SKIP_RETURN_CODE 2`); stays a hard gate on CUDA builds.
 
-### 10. Performance pass on transcribe.cpp runtime families
+### 11. Performance pass on transcribe.cpp runtime families
 Closed the last depthwise-1D-conv im2col sites in the runtime and a couple
 of decode/frontend hotspots, all with env-override kill switches and
 numerical parity:
