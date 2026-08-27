@@ -1,6 +1,6 @@
 # Progress — Unified_Audio.cpp (speech.cpp ggml fork) merge & improve
 
-Status snapshot: **Upstream audio.cpp main fully reconciled at `c79e588` — 63 ahead, 0 behind (the recurring "6 behind" was a lagging merge-base, now fixed). Phase 1 Allocator Hardening applied. Phase 2 Toolchain Modernization & Build Provenance landed. Phase 3 Native Long-Form VAD Chunk Planning & Public C ABI integrated. Phase 4 Process-Wide SharedWeightRegistry, Sortformer v2 Diarization package, Batched Offline ASR Decoders (Qwen3-ASR, Voxtral Realtime, Citrinet, VibeVoice, Higgs Audio), and universal audiocpp C ABI subsystem + progress callbacks fully implemented and verified. **ggml bumped to `36da5713` (v0.22.0)** to match parent transcribe.cpp, with the 7-patch stack rebased and reproducibility certified. **Phase 11 W1b closed: native engine Moonshine-Streaming reproduces the arch baseline exactly (streamed 4.348% == offline 4.348%, divergence 0).** All 101 CPU core tests passing 100% green on the new ggml; CUDA suite 57/57 green. Master architectural blueprint established in [FUSION_ROADMAP_PLAN.md](FUSION_ROADMAP_PLAN.md).** Date: 2026-08-26
+Status snapshot: **Upstream audio.cpp main fully reconciled at `c79e588` — 63 ahead, 0 behind (the recurring "6 behind" was a lagging merge-base, now fixed). Phase 1 Allocator Hardening applied. Phase 2 Toolchain Modernization & Build Provenance landed. Phase 3 Native Long-Form VAD Chunk Planning & Public C ABI integrated. Phase 4 Process-Wide SharedWeightRegistry, Sortformer v2 Diarization package, Batched Offline ASR Decoders (Qwen3-ASR, Voxtral Realtime, Citrinet, VibeVoice, Higgs Audio), and universal audiocpp C ABI subsystem + progress callbacks fully implemented and verified. **ggml bumped to `36da5713` (v0.22.0)** to match parent transcribe.cpp, with the 7-patch stack rebased and reproducibility certified. **Phase 11 W1b closed: native engine Moonshine-Streaming reproduces the arch baseline exactly (streamed 4.348% == offline 4.348%, divergence 0).** **Phase 10.5: families 1–2 retired; family 3 (`sortformer_diar`) feature-merged 2026-08-27 — the chunked AOSC/FIFO scheduler, presets and typed ext live in the engine, and the catalogue's default (NeMo-layout) v2 package opens for the first time in this repo; retirement (step 3) next.** CPU core suite **111/111**; CUDA suite 57/57 green (2026-08-26). Master architectural blueprint established in [FUSION_ROADMAP_PLAN.md](FUSION_ROADMAP_PLAN.md).** Date: 2026-08-27
 
 ## Repo layout (important, non-obvious)
 `Unified_Audio.cpp/` is a **plain container directory with no git repo of its
@@ -43,9 +43,10 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | ABI offline + streaming surface | Verified, real CTest gates | 100% |
 | End-to-end ASR **offline text** (WER gate) | Done — 1.45% corpus WER (arch path); engine path now also 1/69 edits | 100% |
 | **End-to-end ASR streaming text** | **Done — streamed 4.35% == offline 4.35%, divergence 0** | **100%** |
-| Test suite status | **103/103 total (99 passed, 4 clean skips on unpinned weights) 100% green** | **100%** |
+| Test suite status | **111/111 total (107 passed, 4 clean skips on unpinned weights) 100% green** on `build-cpu-core`; custom C-ABI tree (`qwen3_asr,voxtral_realtime,sortformer_diar`) gates green | **100%** |
 | **Completed increment** | **Upstream `c79e588` (0 behind), ggml 0.22.0 (CPU+CUDA certified), Phase 11 W1a + W1b + W2a** | **DONE** |
-| **Next increment** | **Phase 10.5, family 3 of 5: `sortformer_diar`, step 2** — port the arch's chunked diarization scheduler (AOSC speaker cache + FIFO + preset operating points, ~475 LOC of host logic plus a pre-encode/stream-infer graph split) into the engine package, which is offline-only today, and answer for v2-package support; step 1 (first registered gate + cancellation) landed in `65ab43c`. Then `sense_asr`, `fun_asr_nano`; then 11a | Ready |
+| **Phase 10.5, family 3 of 5: `sortformer_diar` step 2 (feature-merge)** | **Done 2026-08-27** — chunked AOSC/FIFO scheduler + presets + typed RUN ext in the engine; the catalogue's default (NeMo-layout) v2 package opens in the engine (neither parent could); chunked == whole-window to 1.8e-7; 0/600 decision flips vs the arch on identical weights; **111/111** core, C-ABI ext gate OK. Report: `docs/reports/sortformer_diar_engine_port.md` | 100% |
+| **Next increment** | **Phase 10.5, family 3 of 5: `sortformer_diar`, step 3 (retirement)** — retire the *standalone* family from the transcribe dispatcher (drop `sortformer::arch` from `transcribe-arch.cpp`, which routes the v2 package to the engine through the C ABI; delete the standalone hooks + offline dump forward from `arch/sortformer/model.cpp`; move `transcribe_sortformer_stream_ext_init` to `transcribe-family-ext.cpp`; re-point `sortformer_diar_ext_abi_test` at v2; delete the never-run `sortformer_stream_ext_unit.cpp`; ledger B15). The embedded-diarizer core stays: the parakeet multitalker arch includes it and parakeet's arch is canonical. Then `sense_asr`, `fun_asr_nano`; then 11a | Ready |
 
 ## DONE this session (plan R12 records all of it)
 
@@ -354,6 +355,77 @@ neither is in this repo. The manifests stay; running them is Track M work.
 - The engine's model sets matter: `core` links no ASR family, so C-ABI
   gates must be guarded on `AUDIOCPP_LINKED_MODELS` and measured in a
   `custom` tree.
+
+### 5b. Phase 10.5, family 3 of 5 — `sortformer_diar` step 2, the feature-merge (2026-08-27)
+
+Full report with every number and command:
+`docs/reports/sortformer_diar_engine_port.md`. The short version:
+
+**Step 1's premise did not survive reproduction.** The catalogue's default
+package (`diar_streaming_sortformer_4spk-v2.q8_0.gguf`,
+`general.architecture = "sortformer"`) was recorded as "a transcribe.cpp-flavoured
+GGUF the arch can load". It is **NVIDIA's own layout** (`sortformer.encoder.*`
+KVs, `encoder.layers.N.*` / `transformer.layers.N.first_sub_layer.*` tensors);
+the arch fails on it exactly like the engine did (`missing KV
+stt.sortformer.max_speakers`). Nothing in the repo could open the default
+package. "Answer for v2 support" therefore meant a third-layout loader in the
+engine — done through a renaming `TensorSource` view over the existing
+HF-named weight loader (new generic helper `make_renamed_tensor_source`), a
+KV → config reader, a per-layout frontend contract, and a loader wrapper so
+registry auto-detection reaches it without a hint.
+
+**The scheduler port.** `src/models/sortformer_diar/streaming.{h,cpp}` is a
+host-for-host port of `arch/sortformer/stream.cpp` (FIFO / speaker-cache
+update, silence profile, the compression stack, NeMo's chunk windows, preset
+table, option + env precedence), graph-agnostic through callbacks. The
+whole-window graph was split into stem + body; the chunked path keeps one
+stem graph and one body graph per 64-frame capacity tier in a small LRU
+instead of rebuilding per chunk (the arch's `low_latency` ran below realtime
+for exactly that reason). Packages that ship a streaming operating point run
+chunked by default; the HF v1 checkpoints stay whole-window; `stream_preset`
+and the per-field `stream_*` options choose explicitly; the typed RUN-slot
+ext goes through the adapter.
+
+**Measured (v2, CPU):** single-speaker fixtures → 1 speaker; the 2-speaker
+oracle → 2 speakers under all five operating points, DER 0.31–0.34 (the
+arch's own probabilities score 0.315–0.334 on this synthetic clip, so the
+gate holds parity with the arch, not absolute quality); chunked ==
+whole-window to **1.8e-7** on a single-chunk clip; vs the arch on identical
+weights (the pinned package re-keyed into the arch's layout) max |Δp| 7.4e-3,
+mean 1.7e-4, **0/600 decision flips** on the three published operating points
+(1/600 on `low_latency` and `small`, the compression-heavy ones). The residual
+is not weight storage (native Q8_0 gives the same size); it is op ordering in
+the engine's modules — a Track M `validate.py` item. `low_latency` on 12 s:
+16 s CPU (25 chunks) with cached graphs.
+
+**Four defects fixed on the way, none in the family's code:** (1) the
+adapter forwarded `language` / `task` / … as request options and every family
+that validates request options strictly (`sortformer_diar`, `sense_asr`,
+`hviske_asr`, `higgs_audio_stt`) rejected them — unusable through the C ABI
+until now; (2) a package's embedded spec outranked the build's, so options
+added after conversion (and step 1's `cancellation` capability, which never
+reached the v1 package) were rejected by the session that implements them —
+the build's copy now wins when present; (3) a GGUF without an embedded spec
+was refused a contract outright, a converter-output rule applied to every
+GGUF — foreign layouts now resolve like a safetensors checkout; (4) the schema
+validator had no `cancellation` capability, so the spec step 1 edited was
+invalid and nothing noticed; (5) registry auto-detection still decoded a
+foreign GGUF as Silero VAD (`bf0e68a` only covered audio.cpp packages) —
+`find_loader` now maps a non-`audiocpp` `general.architecture` through
+`family_registry` before probing, so `audiocpp_cli --model <v2.gguf>` works
+without `--family`.
+
+**Step 3 scope, from the consumers:** the parakeet multitalker arch includes
+the sortformer arch's embedded-diarizer surface and parakeet's arch is the
+canonical one, so only the standalone family retires (dispatcher entry, `Arch`
+hooks, the ext initializer's move); the embedded core stays with parakeet.
+Dropping the dispatcher entry is also what routes the NeMo v2 package to the
+engine through the C ABI.
+
+Gates: `sortformer_diar_streaming_engine_test`, `sortformer_diar_scheduler_test`
+(core, 111/111), `sortformer_diar_ext_abi_test` (custom tree, OK). Not in the
+repo: a formatter — `scripts/ci/clang-format.sh` referenced by AGENTS.md and the
+CI workflow does not exist in this tree.
 
 ### 6. Phase 10.5, family 2 of 5 — `voxtral_realtime` verdict executed (2026-08-26)
 

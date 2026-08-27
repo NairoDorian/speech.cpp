@@ -26,21 +26,25 @@ SortformerFeatureBatch compute_sortformer_features(
     if (audio.sample_rate != assets.feature_config.sample_rate) {
         throw std::runtime_error("Sortformer diar currently requires 16 kHz input audio");
     }
+    const auto & feature_config = assets.feature_config;
     auto mono = audio::mixdown_interleaved_to_mono_average(audio.samples, audio.channels);
-    if (!mono.empty()) {
+    // The HF feature extractor scales the waveform to its peak before
+    // pre-emphasis; NeMo's AudioToMelSpectrogramPreprocessor does not. The
+    // package layout decides (SortformerFeatureExtractorConfig::peak_normalize).
+    if (feature_config.peak_normalize && !mono.empty()) {
         const auto max_it = std::max_element(mono.begin(), mono.end());
         const float scale = 1.0f / (*max_it + 1.0e-3f);
         for (float & sample : mono) {
             sample *= scale;
         }
     }
-    mono = audio::apply_preemphasis(std::move(mono), assets.feature_config.preemphasis);
+    mono = audio::apply_preemphasis(std::move(mono), feature_config.preemphasis);
     audio::AudioTensor mel;
     const auto log_mel_compute = [&]() {
         const audio::STFTConfig stft_config{
-            assets.feature_config.n_fft,
-            assets.feature_config.hop_length,
-            assets.feature_config.win_length,
+            feature_config.n_fft,
+            feature_config.hop_length,
+            feature_config.win_length,
             true,
             // Caution: this is Based on NeMo Sortformer preprocessing, which uses
             // torch.stft(..., center=True, pad_mode="constant"). Other model
@@ -53,7 +57,7 @@ SortformerFeatureBatch compute_sortformer_features(
             static_cast<int64_t>(mono.size()),
             audio.sample_rate,
             stft_config,
-            assets.feature_config.num_mel_bins,
+            feature_config.num_mel_bins,
             static_cast<size_t>(std::max<int64_t>(1, threads)));
     };
     if (timings != nullptr) {
@@ -62,16 +66,23 @@ SortformerFeatureBatch compute_sortformer_features(
         log_mel_compute();
     }
     const int64_t raw_frames = mel.shape[2];
-    const int64_t pad_amount = assets.feature_config.n_fft;
-    const int64_t valid_frames = std::max<int64_t>(
-        0,
-        (static_cast<int64_t>(mono.size()) + pad_amount - assets.feature_config.n_fft)
-            / assets.feature_config.hop_length);
-    std::vector<int64_t> lengths = {std::min(valid_frames, raw_frames)};
+    const int64_t hop = feature_config.hop_length;
+    const int64_t sample_count = static_cast<int64_t>(mono.size());
     // Caution: use the valid frame count, not the raw centered-STFT frame count,
-    // when sizing the padded feature buffer. Based on NeMo, the graph contract
-    // tracks the semantically valid frame length, while the centered STFT can
-    // expose one extra raw frame at exact boundaries.
+    // when sizing the padded feature buffer. The HF port tracks floor(n / hop);
+    // NeMo's preprocessor reports ceil(n / hop) (the transcribe.cpp frontend's
+    // nemo_seq_len_ceil). The centered STFT always yields 1 + floor(n / hop)
+    // frames, so either count fits in what was computed.
+    int64_t valid_frames = 0;
+    switch (feature_config.frame_count) {
+        case SortformerFrameCount::Floor:
+            valid_frames = std::max<int64_t>(0, sample_count / hop);
+            break;
+        case SortformerFrameCount::Ceil:
+            valid_frames = std::max<int64_t>(0, (sample_count + hop - 1) / hop);
+            break;
+    }
+    std::vector<int64_t> lengths = {std::min(valid_frames, raw_frames)};
     const int64_t frames = ((lengths.front() + 15) / 16) * 16;
     audio::FeatureNormalizeOutput normalized;
     const auto normalize_compute = [&]() {
@@ -79,9 +90,11 @@ SortformerFeatureBatch compute_sortformer_features(
             mel.values,
             lengths,
             1,
-            assets.feature_config.num_mel_bins,
+            feature_config.num_mel_bins,
             raw_frames,
-            audio::FeatureNormalizeType::PerFeature);
+            feature_config.normalize == SortformerFeatureNormalize::PerFeature
+                ? audio::FeatureNormalizeType::PerFeature
+                : audio::FeatureNormalizeType::None);
     };
     if (timings != nullptr) {
         timings->feature_normalizer_ms += measure_ms(normalize_compute);
@@ -92,10 +105,10 @@ SortformerFeatureBatch compute_sortformer_features(
     SortformerFeatureBatch batch;
     batch.frames = frames;
     batch.valid_frames = lengths.front();
-    batch.time_major.resize(static_cast<size_t>(frames * assets.feature_config.num_mel_bins), 0.0f);
+    batch.time_major.resize(static_cast<size_t>(frames * feature_config.num_mel_bins), 0.0f);
     for (int64_t t = 0; t < batch.valid_frames; ++t) {
-        for (int64_t m = 0; m < assets.feature_config.num_mel_bins; ++m) {
-            const size_t dst = static_cast<size_t>((t * assets.feature_config.num_mel_bins) + m);
+        for (int64_t m = 0; m < feature_config.num_mel_bins; ++m) {
+            const size_t dst = static_cast<size_t>((t * feature_config.num_mel_bins) + m);
             batch.time_major[dst] = normalized.normalized.values[static_cast<size_t>((m * raw_frames) + t)];
         }
     }

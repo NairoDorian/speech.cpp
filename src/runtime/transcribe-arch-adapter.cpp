@@ -35,9 +35,11 @@
 #include "transcribe-model.h"
 #include "transcribe-path.h"
 #include "transcribe-session.h"
+#include "transcribe/sortformer.h"
 #include "transcribe/voxtral_realtime.h"
 
 #include "engine/framework/core/backend.h"
+#include "engine/framework/model_spec/metadata.h"
 #include "engine/framework/runtime/model.h"
 #include "engine/framework/runtime/registry.h"
 #include "engine/framework/runtime/session.h"
@@ -317,7 +319,87 @@ bool adapter_family_accepts_ext(const std::string & family, transcribe_ext_slot 
     if (family == "voxtral_realtime") {
         return slot == TRANSCRIBE_EXT_SLOT_STREAM && kind == TRANSCRIBE_EXT_KIND_VOXTRAL_REALTIME_STREAM;
     }
+    if (family == "sortformer_diar") {
+        // The streaming operating point rides the RUN slot: the compute core
+        // is chunked, but the shipped entry point is transcribe_run over a
+        // whole recording (transcribe/sortformer.h).
+        return slot == TRANSCRIBE_EXT_SLOT_RUN && kind == TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM;
+    }
     return false;
+}
+
+// The preset name the engine session reads for each public enum value; the
+// engine owns the geometry table (engine/models/sortformer_diar/streaming.h).
+static const char * sortformer_preset_option_value(transcribe_sortformer_preset preset) {
+    switch (preset) {
+        case TRANSCRIBE_SORTFORMER_PRESET_DEFAULT:           return "default";
+        case TRANSCRIBE_SORTFORMER_PRESET_VERY_HIGH_LATENCY: return "very_high_latency";
+        case TRANSCRIBE_SORTFORMER_PRESET_HIGH_LATENCY:      return "high_latency";
+        case TRANSCRIBE_SORTFORMER_PRESET_LOW_LATENCY:       return "low_latency";
+    }
+    return nullptr;
+}
+
+// Validate a run extension without touching session state; called from
+// run_validate, i.e. BEFORE the dispatcher clears the previous result, so a
+// rejected preset cannot destroy the prior speaker segments. Mirrors the
+// arch's run_validate: kind/size, then the preset must be in the enum.
+transcribe_status adapter_check_run_ext(const std::string & family,
+                                        const transcribe_run_params * run_params) {
+    const transcribe_ext * fam = (run_params != nullptr) ? run_params->family : nullptr;
+    if (fam == nullptr) {
+        return TRANSCRIBE_OK;
+    }
+    if (family == "sortformer_diar") {
+        if (const transcribe_status st = transcribe_ext_check(
+                fam, TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM,
+                sizeof(transcribe_sortformer_stream_ext));
+            st != TRANSCRIBE_OK) {
+            return st;
+        }
+        const auto * sf = reinterpret_cast<const transcribe_sortformer_stream_ext *>(fam);
+        return sortformer_preset_option_value(sf->preset) != nullptr ? TRANSCRIBE_OK : TRANSCRIBE_ERR_INVALID_ARG;
+    }
+    // An extension pointed at a family with no run-slot surface: the generic
+    // contract says probe first, so reject rather than silently ignore it.
+    return TRANSCRIBE_ERR_INVALID_ARG;
+}
+
+// Translate an already-validated run extension into the request options the
+// framework session reads.
+void adapter_apply_run_ext(TaskRequest & request,
+                           const std::string & family,
+                           const transcribe_run_params * run_params) {
+    const transcribe_ext * fam = (run_params != nullptr) ? run_params->family : nullptr;
+    if (fam == nullptr || family != "sortformer_diar") {
+        return;
+    }
+    const auto * sf = reinterpret_cast<const transcribe_sortformer_stream_ext *>(fam);
+    if (const char * value = sortformer_preset_option_value(sf->preset)) {
+        request.options["stream_preset"] = value;
+    }
+}
+
+// apply_run_params() forwards every transcribe_run_params field as a request
+// option so families that read them (language, task, spec_k_drafts, ...) can.
+// Spec-backed families validate request options against their contract and
+// reject keys they do not declare - which made every such family
+// (sortformer_diar, sense_asr, hviske_asr, higgs_audio_stt) fail through the
+// C ABI with "unknown request option: language". Keep only what the family's
+// contract accepts; a family without a schema-v1 contract keeps the old
+// pass-through.
+void prune_request_options_to_contract(TaskRequest & request, const std::string & family) {
+    const auto contract = engine::model_spec::model_contract(family);
+    if (!contract.has_value()) {
+        return;
+    }
+    for (auto it = request.options.begin(); it != request.options.end();) {
+        if (contract->request_option_keys.find(it->first) == contract->request_option_keys.end()) {
+            it = request.options.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 // Validate a stream extension without touching session state; called from
@@ -524,6 +606,8 @@ public:
                 1,
                 std::vector<float>(pcm, pcm + static_cast<std::size_t>(n_samples))};
             apply_run_params(request, params);
+            adapter_apply_run_ext(request, framework_family(), params);
+            prune_request_options_to_contract(request, framework_family());
             offline->prepare(build_preparation_request(request));
             install_abort_bridge(offline);
             const TaskResult result = offline->run(request);
@@ -562,6 +646,8 @@ public:
                         std::vector<float>(pcm[i], pcm[i] + static_cast<std::size_t>(n_samples[i]))};
                 }
                 apply_run_params(req, params);
+                adapter_apply_run_ext(req, framework_family(), params);
+                prune_request_options_to_contract(req, framework_family());
                 requests.push_back(std::move(req));
             }
 
@@ -624,6 +710,7 @@ public:
             TaskRequest request;
             apply_run_params(request, run_params);
             adapter_apply_stream_ext(request, framework_family(), stream_params);
+            prune_request_options_to_contract(request, framework_family());
             // prepare() BEFORE start_stream(): every framework session gates
             // its streaming entry points on require_prepared(), and the
             // default start_stream() delegates to reset() - which is itself
@@ -1044,6 +1131,15 @@ transcribe_status adapter_run_validate_impl(const struct transcribe_session * ct
     if (params != nullptr && params->struct_size > 0 &&
         params->struct_size < sizeof(transcribe_run_params)) {
         return TRANSCRIBE_ERR_BAD_STRUCT_SIZE;
+    }
+    if (params != nullptr && params->family != nullptr) {
+        const auto * model = dynamic_cast<const AdapterModel *>(ctx->model);
+        const std::string family = (model != nullptr && model->framework_model() != nullptr)
+            ? model->framework_model()->metadata().family
+            : std::string();
+        if (const transcribe_status st = adapter_check_run_ext(family, params); st != TRANSCRIBE_OK) {
+            return st;
+        }
     }
     return TRANSCRIBE_OK;
 }

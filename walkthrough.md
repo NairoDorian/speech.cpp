@@ -1,240 +1,111 @@
-# Upstream Synchronization (`d25ffac`) & Phase 11 Migration: Walkthrough
+# Phase 10.5, family 3 of 5 — `sortformer_diar` step 2: Walkthrough
 
 > Session artifact per `MULTI_AGENT_FUSION_PLAN_AND_TRACKER.md` §1 rule 3.
-> Covers:
-> 1. **Upstream Synchronization (`0xShug0/audio.cpp:main@d25ffac`)**: device enumeration (`--list-devices`), chunk speech metadata resilience, and test suite gates.
-> 2. **`speech.cpp` Progressive Naming Unification**: CMake executable aliases (`speech_cli`, `speechcpp_cli`, `speech_server`, `speechcpp_server`, `speech_gguf`, `speechcpp_gguf`) and test names (`speech_cli_list_devices`, `speech_server_list_devices`).
-> 3. **Phase 11 Wave W1a**: native engine Moonshine (offline ASR).
-> Baseline before this session: 96/96 targets green; **Current suite: 100/100 targets green** on `build-cpu-core`.
+> Date: 2026-08-27. Baseline before this session: 109/109 on `build-cpu-core`
+> (step 1, `65ab43c`). After: **111/111** core, plus `sortformer_diar_ext_abi_test`
+> green in the custom C-ABI tree. Full measurements:
+> `docs/reports/sortformer_diar_engine_port.md`.
 
 ---
 
-## 0. Upstream Synchronization & `speech.cpp` Aliases (2026-08-25)
+## 0. The first thing that changed: the premise
 
-### 0.1 Merged Changes from Upstream `audio.cpp:main`
-- **Core Backend Device Enumeration**: Added `engine::core::print_backend_devices(std::ostream & out)` in `include/engine/framework/core/backend.h` & `src/framework/core/backend.cpp`.
-- **HTTP Server `--list-devices` Support**: `app/server/main.cpp` now supports `--list-devices`, prints backend devices to `std::cout` and exits 0 before server init.
-- **CLI Clean Refactor**: `app/cli/main.cpp` replaced its inlined loop with `engine::core::print_backend_devices(std::cout)`.
-- **Chunk Speech Metadata Resilience**: In `src/framework/audio/chunking.cpp` (`append_chunk_speech_metadata`), out-of-span metadata segments/turns now emit a warning diagnostic and return `std::nullopt` instead of aborting with an uncaught `std::runtime_error`. Verified via `test_chunk_speech_metadata_merge_drops_outside_spans` in `tests/unittests/test_audio_chunking.cpp`.
-
-### 0.2 `speech.cpp` Progressive Rebranding & Aliases
-- Added CMake executable aliases:
-  - `speech_cli` and `speechcpp_cli` $\to$ `audiocpp_cli`
-  - `speech_server` and `speechcpp_server` $\to$ `audiocpp_server`
-  - `speech_gguf` and `speechcpp_gguf` $\to$ `audiocpp_gguf`
-- Added CTest targets `speech_cli_list_devices` and `speech_server_list_devices`.
-- Total suite status: **100/100 test targets 100% green** on MSVC CPU core build (96 passed, 4 clean skips on unpinned models).
-
----
+Step 1 recorded the catalogue's default Sortformer package as a
+"transcribe.cpp-flavoured GGUF the arch can load". Reproducing that
+(`abi_bridge_hello.exe models/diar_streaming_sortformer_4spk-v2.q8_0.gguf`)
+gave `missing KV stt.sortformer.max_speakers`. A KV/tensor dump showed why:
+NVIDIA publishes its **own** GGUF layout (`sortformer.encoder.*`,
+`sortformer.streaming.*`, `sortformer.scoring.*` KVs; `encoder.layers.N.*`,
+`transformer.layers.N.first_sub_layer.query_net.*`, `head.*` tensors). Neither
+parent read it. So the increment had three parts, not two: the scheduler, the
+typed ext, **and a third-layout loader** — otherwise the retirement would leave
+the default package as unreachable as before.
 
 ## 1. What was built
 
-### 1.1 New files
-
-| File | LOC | Purpose |
-|---|---:|---|
-| `include/engine/models/moonshine/graphs_internal.h` | ~250 | Hparams, weight-slot catalog, KV cache, graph-builder declarations |
-| `src/models/moonshine/graphs.cpp` | ~700 | Encoder, cross-KV, KV-cached decoder graph builders (ported numerics-identically from `src/runtime/arch/moonshine/{encoder,decoder}.cpp`) |
-| `include/engine/models/moonshine/assets.h` + `src/models/moonshine/assets.cpp` | ~330 | GGUF `stt.*` hparams reader with arch-identical invariants; tokenizer via `engine::text::load_tokenizer_from_gguf`; tensor source via ResourceBundle |
-| `include/engine/models/moonshine/runtime.h` + `src/models/moonshine/runtime.cpp` | ~380 | Per-session backend weights (`core::BackendWeightStore`), encode → cross-KV → greedy decode orchestration, `RunControl` progress/abort |
-| `include/engine/models/moonshine/session.h` + `src/models/moonshine/session.cpp` | ~300 | `MoonshineSession` (`RuntimeSessionBase` + `IOfflineVoiceTaskSession`), `MoonshineLoadedModel`, `MoonshineLoader`, factory `make_moonshine_loader()` |
-| `tests/unittests/test_moonshine_engine.cpp` | ~210 | Engine-path gate (see §3) |
-
-### 1.2 Modified files
-
-| File | Change |
+| File | Purpose |
 |---|---|
-| `CMakeLists.txt` | `audiocpp_add_model(moonshine ...)` (graphs/assets/runtime/session sources); added to `AUDIOCPP_ASR_MODEL_TARGETS`; registered `moonshine_engine_smoke_test` (sources linked directly — core model set does not carry ASR families in `engine_runtime`; `WORKING_DIRECTORY` pinned to source root for spec resolution; `SKIP_RETURN_CODE 2` on missing pinned model) |
-| `model_specs/moonshine.json` | Sources block corrected: removed required `config` / `tokenizer_json` file mappings (and the safetensors branch) — see finding F-1 below |
+| `include/engine/framework/assets/tensor_source.h`, `src/framework/assets/tensor_source.cpp` | `make_renamed_tensor_source(source, rename_fn)` — a view exposing a source's tensors under other names (generic; later ports will need it too) |
+| `include/engine/models/sortformer_diar/assets.h`, `src/models/sortformer_diar/assets.cpp` | `SortformerPackageLayout {HuggingFace, NemoGguf}`, streaming defaults + AOSC scoring constants in the model config, per-layout frontend contract, `is_nemo_sortformer_gguf`, KV → config reader, HF↔NeMo tensor-name map, shape-tolerant pointwise-conv loading |
+| `src/models/sortformer_diar/frontend.cpp` | Honours the layout contract: normalization mode, peak scaling, floor/ceil framing |
+| `include/engine/models/sortformer_diar/graph.h`, `src/models/sortformer_diar/graph.cpp` | Stem/body split; `SortformerPreEncodeGraph` (graph A) and `SortformerBodyGraph` (graph B) per capacity tier with masks; the whole-window graph is stem + body |
+| `include/engine/models/sortformer_diar/streaming.h`, `src/models/sortformer_diar/streaming.cpp` | The scheduler: presets, option/env resolution (`resolve_sortformer_run_plan`), `SortformerStreamState`, `sortformer_streaming_update`, `sortformer_compress_spkcache`, `plan_sortformer_chunks`, `run_sortformer_chunked` (graph-agnostic, callback-driven) |
+| `include/engine/models/sortformer_diar/session.h`, `src/models/sortformer_diar/session.cpp` | Run-plan dispatch, tiered graph caches (LRU 3), per-chunk progress/abort, `last_probabilities()` / `last_run_plan()`, `SortformerDiarLoader` wrapper (NeMo `can_load`), alias `sortformer` |
+| `model_specs/sortformer_diar.json` | `stream_preset` + six `stream_*` geometry options (request and session) |
+| `src/runtime/transcribe-arch-adapter.cpp` | RUN-slot `transcribe_sortformer_stream_ext` (accept / validate pre-clear / translate); `prune_request_options_to_contract` |
+| `src/framework/model_spec/package.cpp` | Contract resolution: build's spec outranks a package's embedded copy; non-audiocpp GGUFs resolve like a safetensors checkout |
+| `src/framework/model_spec/schema.cpp` | `cancellation` as a cross-task capability |
+| `src/framework/runtime/registry.cpp` | Foreign `general.architecture` resolved through the family registry before `can_load()` probing |
+| `tests/unittests/test_sortformer_diar_streaming.cpp` | The v2 gate (auto-detect, chunked-by-default, oracle under every preset with DER vs the golden RTTM, chunked == whole-window, determinism, cancellation, rejections; `--dump-probs`, `--weight-type` diagnostics) |
+| `tests/unittests/test_sortformer_diar_scheduler.cpp` | Host-logic unit test: chunk planning, FIFO/cache update + compression invariants, plan resolution + precedence, the chunk driver on a stand-in model |
+| `tests/sortformer_diar_ext_abi_test.cpp` | The C-ABI ext gate (custom tree) |
+| `CMakeLists.txt` | `streaming.cpp` in the model; alias; three test registrations |
+| `docs/reports/sortformer_diar_engine_port.md` | The report |
 
-Not modified: everything under `src/runtime/arch/moonshine/` (arch copy stays
-green per §4.4 coexistence), all transcribe-side tests.
-
-## 2. How the port works
+## 2. How the chunked path runs
 
 ```
-ModelRegistry.load(family_hint="moonshine")        registry.cpp find_loader()
-  └─ MoonshineLoader::load                         session.cpp
-       └─ load_moonshine_assets                    assets.cpp
-            ├─ ResourceBundle("weights") → GgufTensorSource (lazy, native types)
-            ├─ gguf_init_from_file(no_alloc) → stt.moonshine.* hparams + invariants
-            └─ TokenizerHub::load_tokenizer_from_gguf
-create_task_session → MoonshineSession             RuntimeSessionBase owns RunControl
-  └─ MoonshineRuntime                              BackendWeightStore.upload() once
-       run(): encoder graph → host readback → KV cache (F32 default)
-              → cross-KV precompute → greedy single-token loop
-              (fresh step graph per step = arch CPU path; argmax int32 readback)
+run(request)
+  resolve_sortformer_run_plan(config, session ⊕ request options, env)
+    ├─ WholeWindow → run_offline_diarization (stem + body, fixed session context; over-length is REJECTED, never trimmed)
+    └─ Chunked     → run_chunked_diarization
+         compute_sortformer_features (layout contract)
+         run_sortformer_chunked(features, params, pre_encode, infer, progress)
+           for each NeMo window [win_lo, win_hi):
+             progress(chunk, n)            ← RunControl unwinds here
+             pre_encode: graph A @ tier(M)  → embeddings [T_diar, 512]
+             concat [spkcache | fifo | chunk]
+             infer:      graph B @ tier(T_concat) → preds [T_concat, 4]
+             sortformer_streaming_update (FIFO pop → silence profile → cache append → compress)
+           trim to ceil(feat_len / 8)
+         decode_sortformer_speaker_turns (the engine post-processing, both paths)
 ```
 
-Key integration points:
-
-- **Weights**: every slot is `BackendWeightStore::load_tensor(...)` with a
-  *logical* (PyTorch-order) expected shape; the store reverses into ggml
-  `ne` internally (`core::to_ggml_dims`). Native Q8_0 storage is preserved
-  so quantized matmuls stay native. `upload()` participates in
-  `SharedWeightRegistry` when inside a `ScopedWeightShareKey` (the C ABI /
-  CLI wrap load+session-create).
-- **Tokenizer**: hub GGUF-BPE decode emits raw `▁` (U+2581); the package
-  post-processes `▁ → space` and trims the leading space (mirrors the arch
-  `Tokenizer::decode`). Hub-level fix deferred (finding F-3).
-- **Abort/progress**: no auto-reset of the abort latch between runs;
-  `request_abort()` therefore honors pre-run cancellation requests, and the
-  decode loop checks it at every step via `emit_progress`.
-- **Batch**: `run_batch` serializes with per-utterance isolation
-  (empty result, batch continues) and immediate unwind on abort — the
-  engine equivalent of the `Arch::run_batch` contract. (The arch's GPU-only
-  native batched step graph is not ported yet; on CPU both serialize.)
+NeMo's `xscaling` is applied inside graph B on the concatenation (cached rows
+are raw pre-encode output), as the arch did. Padding rows are zero, masked out
+of attention, zeroed before the depthwise convs and never read back — which is
+what lets one graph per 64-frame tier serve every chunk geometry, and what the
+1.8e-7 whole-window-vs-chunked agreement verifies.
 
 ## 3. Verification
 
-Baseline first: full rebuild + ctest on untouched tree → 95/95 green.
-
-New gate `moonshine_engine_smoke_test` (CTest #85):
-
-1. Registry resolves canonical id `moonshine` and alias `moonshine-offline`.
-2. Loads pinned `models/moonshine-tiny-Q8_0.gguf` (35 MB, skip-contract if absent).
-3. Runs the four LibriSpeech fixtures offline through
-   `IOfflineVoiceTaskSession::run` after `prepare(...)`.
-4. Gates corpus WER ≤ 10% (structural bound shared with the arch gates).
-
-Measured transcripts (engine path):
-
-```
-librispeech_test_clean_6930-75918-0000.wav: Concord returned to its place amidst the tents.
-librispeech_test_clean_6930-75918-0001.wav: The English voted to the French baskets of flowers, …
-librispeech_test_other_7902-96591-0000.wav: I am from the cutter lying off the coast.
-librispeech_test_other_7902-96591-0001.wav: Don't cry, he said. I was obliged to come.
-corpus WER: 1.44928% (1/69 edits)
-```
-
-**1/69 edits — identical to the arch-side baseline** (`asr_e2e_wer_test` /
-`asr_e2e_edits_test` measure the same 1 edit on the same fixtures through
-`transcribe.dll`). The one edit is the same FORWARDED→VOTED-class
-substitution class the arch path produces; text is otherwise word-identical.
-
-Additional assertions in the gate: ordered non-empty `run_batch` results;
-`request_abort()` before `run()` unwinds with `ProgressCanceled`.
-
-Product-surface reachability (roadmap §8 Phase 11, per-family step 7):
-
 ```powershell
-.\build_env.bat .\build-cpu-full\bin\audiocpp_cli.exe --task asr --family moonshine `
-    --model .\models\moonshine-tiny-Q8_0.gguf --backend cpu `
-    --audio .\assets\asr_validation\librispeech\librispeech_test_other_7902-96591-0000.wav
-# => family=moonshine / task=asr / mode=offline
-#    text_output=I am from the cutter lying off the coast.
+.\build_env.bat cmake --build build-cpu-core --config Release -j 12
+.\build_env.bat ctest --test-dir build-cpu-core --output-on-failure -C Release   # 111/111
+.\build-cpu-core\bin\sortformer_diar_streaming_engine_test.exe models\diar_streaming_sortformer_4spk-v2.q8_0.gguf assets\asr_validation\librispeech samples\sortformer-2spk-mix.wav tests\golden\sortformer\sortformer-2spk-mix.rttm
+# custom tree (links the family): -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=qwen3_asr,voxtral_realtime,sortformer_diar
+.\build-cpu-qwen3\bin\sortformer_diar_ext_abi_test.exe models\sortformer-diar-4spk-v1-q8_0.gguf assets\asr_validation\librispeech
+.\build-cpu-qwen3\bin\audiocpp_cli.exe --task diar --model models\diar_streaming_sortformer_4spk-v2.q8_0.gguf --backend cpu --audio samples\sortformer-2spk-mix.wav --turns-out turns.json --metrics
 ```
 
-`engine_model_moonshine` also compiles under the full model set and
-`audiocpp.dll` links with the loader wired into the generated registry
-(server/WebUI/C ABI share this registry path).
+Headline numbers (CPU, i9-13900H): fixtures 1 speaker each; oracle 2 speakers
+under all five operating points, DER 0.31–0.34 (arch on the same weights:
+0.315–0.334); chunked == whole-window 1.8e-7; vs the arch 0/600 decision flips
+on the published operating points (max |Δp| 7.4e-3); CLI RTF 0.21 on the
+oracle with the shipped operating point.
 
-Full suite after W1a: **96/96 targets green** (92 passed, 4 clean skips:
-sortformer stream ext + committed-pointer stability [need streaming model
-contract], parakeet ×2 [download contract]).
+## 4. Findings to carry forward
 
-Commands:
+- **Reproduce a package-layout claim with a KV dump** before planning around
+  it. `uv run --with gguf python -c "from gguf import GGUFReader; ..."` costs a
+  minute; step 1's claim cost the plan a wrong scope.
+- **Two contracts were in play through the C ABI**: the session validated
+  request options against the spec embedded in the package (stale), the
+  adapter pruned against the workspace spec. Whenever a family option is added,
+  ask which spec the running binary will resolve.
+- **Strict request-option validation is a contract that the adapter has to
+  honour**, not a family quirk — four families were unusable through the C ABI.
+- **Read the arch's consumers before scoping a deletion.** `grep -rn sortformer
+  src/runtime/arch/parakeet` bounded step 3 to the standalone family.
+- **`scripts/ci/clang-format.sh` does not exist in this tree** although
+  `AGENTS.md` and the CI workflow reference it; formatting was done by hand to
+  the surrounding style.
 
-```powershell
-.\build_env.bat cmake --build build-cpu-core --config Release -j 8
-.\build_env.bat ctest --test-dir build-cpu-core --output-on-failure -C Release
-.\build_env.bat ctest -R moonshine_engine_smoke_test --output-on-failure -C Release
-```
+## 5. Handoff state
 
-Formatting: all new files pass pinned `uvx clang-format`.
-
-## 4. Findings (root-caused during W1a)
-
-- **F-1 — Latent Phase-6 spec defect.** The pinned moonshine GGUFs carry
-  **no embedded `config.json` / `tokenizer.json` sidecars** (verified by
-  scanning the binary: only `stt.*`, `tokenizer.ggml.*`, `general.*`
-  metadata keys exist). `model_specs/moonshine.json` required those sidecar
-  mappings in its gguf source block, so any loader following the spec could
-  never have loaded the shipped packages. Fixed to a tensors-only source
-  block; hparams/tokenizer now come from GGUF metadata exactly like the
-  arch loader.
-- **F-2 — Engine shape convention.** `GgufTensorSource` reports *logical*
-  (row-major, PyTorch-order) shapes; `BackendWeightStore` converts into
-  ggml `ne` order itself. Migrated families must pass logical shapes to
-  `load_tensor` (e.g. conv `[out, in, K]`, linear `[out, in]`,
-  embedding `[vocab, d_model]`).
-- **F-3 — TokenizerHub GGUF-BPE decode gap.** `decode()` returns pieces
-  with raw `▁`. The moonshine package compensates locally; a hub-level
-  SentencePiece-flavour option should be added later (small follow-up, not
-  blocking).
-- **F-4 — Abort latch semantics.** `RunControl` has `reset_abort()`, but an
-  abort requested before `run()` must not be silently cleared by the next
-  call. The package never auto-resets; consumers get deterministic cancel
-  semantics (documented contract test included).
-
-## 5. Deferred within Wave W1 (next increment)
-
-- **W1b — `moonshine_streaming` native package.** Design map follows in §6.
-- Retirement of `src/runtime/arch/{moonshine,moonshine_streaming}/`: its own
-  commit(s) + Appendix B rows B16a/B16b, only after W1b green **and** user
-  review approval (L2/L3/L7).
-- Optional perf parity work: static-topology GPU step graph + native batched
-  decode (arch has them; CPU behavior identical without them).
-
-## 6. W1b design map (recorded for the next session)
-
-Source of truth: `src/runtime/arch/moonshine_streaming/`
-(`model.cpp` 2,252 lines; encoder 372; decoder 737; weights ~700).
-
-Streaming architecture facts (verified against the code):
-
-- **Encoder** differs from offline: embedder (CMVN → compact → linear →
-  two causal stride-2 convs) then blocks with **sliding-window attention**
-  using per-layer masks (`enc_sliding_windows[2i], [2i+1]` = L/R frames);
-  builder exposes `per_layer_masks[i]` inputs filled by
-  `build_sliding_window_mask(T_enc, L, R, ...)`.
-- **Adapter**: absolute-frame `pos_emb` get_rows + add (+ optional proj)
-  applied per window slice; positions start at `abs_frame_offset` so slices
-  concatenate to the one-shot result (encoder ergodicity argument, comment
-  lines 10–21 of model.cpp).
-- **Incremental pipeline per feed**:
-  geometry helpers `cumulative_right_context` / `cumulative_left_context`
-  (sum of R_i−1 / L_i−1), `k_frontend_pad_enc_frames = 4`,
-  `samples_per_encoder_frame = 4 * enc_frame_len`;
-  `encode_window_to_host` → `apply_adapter_window` →
-  `project_cross_kv_window` append into committed host buffers
-  (`stream_adapter_committed`, `stream_cross_k/v_committed[il]`);
-  PCM older than `(T_emitted − L_total − frontend_pad)` frames dropped
-  (`stream_pcm_buffer` + `stream_pcm_start_sample`).
-- **Partial decode** (`decode_partial`, throttled by
-  `stream_min_decode_frames` / min-decode-interval-ms):
-  `ensure_kv_cache_for_T` → `commit_cross_kv_from_host` (per-layer upload
-  graph with F32→F16 cpy support) → `decode_from_kv_cache` greedy loop
-  bounded by `dec_max_position_embeddings` AND
-  `decode_generation_budget(T_enc)` (13/2 tokens/sec + floor 24).
-  Commit = longest common prefix across `stream_token_id_history`.
-- **Finalize**: flush remaining stable frames, top up trailing tail, final
-  AR decode only if T advanced past last partial; otherwise commit last
-  partial as-is.
-- **Engine mapping**:
-  - Session derives from `engine::runtime::StreamingSessionBase`;
-    `on_process_audio_chunk` implements feed (chunker already re-blocks PCM),
-    `on_finalize` implements finalize; lifecycle/revision/commit policy are
-    base-owned.
-  - Map LCP-commit to base `STABLE_PREFIX` policy (`agreement_n` from the
-    family extension default), or drive `update_text(full)` per partial and
-    let the base split committed/tentative — prefer the latter for contract
-    uniformity; keep history-based LCP as the native boundary provider if
-    agreement-N diverges.
-  - Offline `run()` reuses the one-shot inner path
-    (`run_one_shot_inner`) so streamed-vs-offline divergence stays
-    measurable against the W1a package.
-  - Gate: new `moonshine_streaming_engine_smoke_test` feeding odd-sized
-    chunks (~100–400 ms) through `IStreamingVoiceTaskSession`, asserting
-    streamed == offline transcript (divergence 0) vs the W1a engine package
-    on the same fixture set, mirroring `asr_stream_text_wer_test`.
-  - Spec: correct `model_specs/moonshine_streaming.json` sources block the
-    same way as F-1; register `audiocpp_add_model(moonshine_streaming ...)`.
-
-## 7. Handoff state
-
-- Suite: 96/96 green on `build-cpu-core` (MODEL_SET=core, unified ABI +
-  transcribe arches ON).
-- Working tree intentionally left uncommitted (repo rule: commit only on
-  explicit user request). All W1a changes are in the working tree.
-- Next agent task: execute §6 verbatim, verify, update docs, pause.
+- Working tree: all step-2 changes, committed as one feature-merge commit (see
+  `git log`).
+- Next: step 3 — retire the standalone `sortformer` family from the transcribe
+  dispatcher (scope in the tracker's IMMEDIATE NEXT TASK block and roadmap
+  Appendix B row B15), which is also what routes the NeMo v2 package to the
+  engine through the C ABI; re-point `sortformer_diar_ext_abi_test` at v2 then.

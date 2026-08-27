@@ -3,6 +3,9 @@
 #include "engine/framework/assets/tensor_source.h"
 #include "engine/framework/debug/trace.h"
 #include "engine/framework/model_spec/package.h"
+#include "engine/framework/runtime/family_registry.h"
+
+#include <gguf.h>
 #include "engine/framework/io/config.h"
 #include "engine/framework/io/filesystem.h"
 #include "engine/models/marblenet_vad/session.h"
@@ -62,6 +65,44 @@ std::optional<std::string> embedded_gguf_family(const std::filesystem::path & pa
         // Not a GGUF, or no readable metadata: fall back to can_load probing.
     }
     return std::nullopt;
+}
+
+// The general.architecture of a GGUF that is NOT an audio.cpp package (those
+// name their family through the embedded spec above). Third-party
+// conversions - NVIDIA's Sortformer GGUF ("sortformer"), transcribe.cpp's
+// ("moonshine", "parakeet", ...) - carry the family only here, and the family
+// registry maps every such arch name to exactly one canonical id (§5.5). Nullopt
+// for non-GGUF files, unreadable metadata, or an audio.cpp package.
+std::optional<std::string> foreign_gguf_architecture(const std::filesystem::path & path) {
+    if (!engine::io::is_existing_file(path)) {
+        return std::nullopt;
+    }
+    std::string extension = path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (extension != ".gguf") {
+        return std::nullopt;
+    }
+    ggml_context * tensors = nullptr;
+    gguf_init_params params{};
+    params.no_alloc = true;
+    params.ctx = &tensors;
+    gguf_context * gguf = gguf_init_from_file(path.string().c_str(), params);
+    if (gguf == nullptr) {
+        if (tensors != nullptr) ggml_free(tensors);
+        return std::nullopt;
+    }
+    std::optional<std::string> arch;
+    const int64_t id = gguf_find_key(gguf, "general.architecture");
+    if (id >= 0 && gguf_get_kv_type(gguf, id) == GGUF_TYPE_STRING) {
+        const std::string value = gguf_get_val_str(gguf, id);
+        if (!value.empty() && value != "audiocpp") {
+            arch = value;
+        }
+    }
+    gguf_free(gguf);
+    if (tensors != nullptr) ggml_free(tensors);
+    return arch;
 }
 
 void log_model_load_trace(const ModelInspection & inspection, const ILoadedVoiceModel & model) {
@@ -221,6 +262,26 @@ const IVoiceModelLoader * ModelRegistry::find_loader(const ModelLoadRequest & re
         throw std::runtime_error(
             "model " + request.model_path.string() + " declares family '" + *embedded +
             "', which is not registered in this build");
+    }
+
+    // A GGUF written by another tool names its family only through
+    // general.architecture. Resolve that through the family registry rather
+    // than by probing: several loaders' can_load() accept any GGUF whose
+    // resource bundle resolves, so probing decoded NVIDIA's Sortformer package
+    // as Silero VAD ("missing tensor: stft_conv.weight") - the same
+    // mis-detection the embedded-family check above closed for audio.cpp
+    // packages (Phase 10.5, family 3).
+    if (const auto arch = foreign_gguf_architecture(request.model_path)) {
+        if (const FamilyEntry * entry = resolve_family(*arch)) {
+            for (const auto & loader : loaders_) {
+                if (matches_family(*loader, std::string(entry->canonical_id))) {
+                    return loader.get();
+                }
+            }
+            throw std::runtime_error(
+                "model " + request.model_path.string() + " has general.architecture '" + *arch +
+                "' (family '" + std::string(entry->canonical_id) + "'), which is not registered in this build");
+        }
     }
 
     for (const auto & loader : loaders_) {

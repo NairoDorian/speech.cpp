@@ -395,10 +395,17 @@ void validate_capabilities(const json::Value & value,
         if (task_ids.find(task) == task_ids.end()) {
             fail(task_path, "capability key must be one of this model's tasks");
         }
-        const auto & allowed = capabilities_for_task(task);
-        if (allowed.empty()) {
+        const auto & task_allowed = capabilities_for_task(task);
+        if (task_allowed.empty()) {
             fail(task_path, "task does not define typed capabilities");
         }
+        // Capabilities that describe the session contract rather than a
+        // task's output, so every task may declare them. "cancellation":
+        // run()/run_batch() poll RunControl (Phase 10.5; read by
+        // capabilities_from_spec into CapabilitySet::supports_cancellation).
+        static const std::unordered_set<std::string> cross_task = {"cancellation"};
+        std::unordered_set<std::string> allowed = task_allowed;
+        allowed.insert(cross_task.begin(), cross_task.end());
         validate_nonempty_string_set(rows, &allowed, task_path, "capability");
     }
 }

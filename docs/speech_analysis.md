@@ -99,19 +99,26 @@ audiocpp_cli --task vad --family marblenet_vad --model assets/framework/models/m
 
 ## Sortformer Diarization
 
-Sortformer diarization identifies speaker turns. The packaged model path is the 4-speaker variant.
+Sortformer diarization identifies speaker turns. Two package kinds are supported: the
+**streaming checkpoints** (`diar_streaming_sortformer_4spk-v2`, the catalogue default —
+NVIDIA's own GGUF layout) run chunked with an arrival-order speaker cache and FIFO, so a
+recording of any length diarizes in bounded memory; the **offline v1 checkpoints**
+(`Sortformer-Diar-4spk-v1-GGUF`, an audio.cpp package) run one whole-window graph bounded
+by `session_len_sec`.
 
 | Field | Value |
 |---|---|
-| Family | `sortformer_diar` |
-| Model directory | `models/Sortformer-Diar-4spk-v1-GGUF` |
+| Family | `sortformer_diar` (alias `sortformer`) |
+| Model directory | `models/diar_streaming_sortformer_4spk-v2` (default) or `models/Sortformer-Diar-4spk-v1-GGUF` |
 | Task | `diar` |
 | Modes | `offline` |
 | Output | Speaker turn JSON through `--turns-out` |
 | Speakers | Up to the speaker count supported by the model package; the default model is 4-speaker |
 
 ```bash
-audiocpp_cli --task diar --family sortformer_diar --model models/Sortformer-Diar-4spk-v1-GGUF/sortformer-diar-4spk-v1-q8_0.gguf --backend cuda --audio meeting_16k.wav --turns-out turns.json
+audiocpp_cli --task diar --family sortformer_diar --model models/diar_streaming_sortformer_4spk-v2/diar_streaming_sortformer_4spk-v2.q8_0.gguf --backend cuda --audio meeting_16k.wav --turns-out turns.json
+# low-latency operating point (~1 s lookahead) of the streaming checkpoint
+audiocpp_cli --task diar --family sortformer_diar --model models/diar_streaming_sortformer_4spk-v2/diar_streaming_sortformer_4spk-v2.q8_0.gguf --backend cpu --audio meeting_16k.wav --request-option stream_preset=low_latency --turns-out turns.json
 ```
 
 | Option | Values | Default | Meaning |
@@ -121,10 +128,15 @@ audiocpp_cli --task diar --family sortformer_diar --model models/Sortformer-Diar
 | `--request-option speaker_threshold=<float>` | float | session default | Per-request speaker activation threshold. |
 | `--request-option speaker_min_frames=<n>` | integer | session default | Per-request minimum speaker segment frames. |
 | `--request-option speaker_pad_frames=<n>` | integer | session default | Per-request padding around speaker turns. |
+| `--request-option stream_preset=<name>` | `default`, `offline`, `very_high_latency`, `high_latency`, `low_latency`, `small` | `default` | How the recording is diarized. `default`: chunked with the checkpoint's shipped operating point when it ships one, otherwise whole-window. `offline`: always whole-window. The three named presets are the publisher's validated chunk geometries (~30.4 s / ~10 s / ~1.04 s lookahead); `small` is a diagnostic geometry. |
+| `--request-option stream_chunk_len=<n>` | frames (80 ms) | preset | Chunked diarization: new audio per chunk. Any `stream_*` field forces the chunked path. |
+| `--request-option stream_left_context=<n>` / `stream_right_context=<n>` | frames | preset | Context frames prepended / appended to each chunk (right context is the latency lever). |
+| `--request-option stream_fifo_len=<n>` / `stream_spkcache_len=<n>` / `stream_update_period=<n>` | frames | preset | FIFO length, speaker-cache capacity, frames moved from the FIFO into the cache per update. |
+| `--session-option sortformer_diar.stream_preset=<name>` (and the six `sortformer_diar.stream_*` fields) | as above | `default` | Session defaults for the request options of the same name. |
 | `--session-option sortformer_diar.speaker_threshold=<float>` | float | `0.5` | Default speaker activation threshold. |
 | `--session-option sortformer_diar.speaker_min_frames=<n>` | integer | `0` | Default minimum speaker segment frames. |
 | `--session-option sortformer_diar.speaker_pad_frames=<n>` | integer | `0` | Default padding around speaker turns. |
-| `--session-option sortformer_diar.session_len_sec=<float>` | seconds | `20.0` | Diarization graph window length. |
+| `--session-option sortformer_diar.session_len_sec=<float>` | seconds | `20.0` | Whole-window graph length. Longer input on the whole-window path is rejected, never trimmed; the chunked path has no limit. |
 | `--session-option sortformer_diar.graph_capacity_mode=<mode>` | `fixed`, `tiered`, `grow`, `double` | backend default | Offline graph capacity policy. |
 | `--session-option sortformer_diar.graph_arena_mb=<n>` | MB | `512` | Inference graph arena size. |
 | `--session-option sortformer_diar.weight_context_mb=<n>` | MB | `128` | Weight context size. |

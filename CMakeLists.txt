@@ -1338,10 +1338,13 @@ audiocpp_add_model(sortformer_diar
         src/models/sortformer_diar/modules.cpp
         src/models/sortformer_diar/postprocess.cpp
         src/models/sortformer_diar/session.cpp
+        src/models/sortformer_diar/streaming.cpp
     INCLUDES
         engine/models/sortformer_diar/session.h
     LOADERS
         engine::models::sortformer_diar::make_sortformer_diar_loader
+    ALIASES
+        sortformer
 )
 
 audiocpp_add_model(stable_audio
@@ -1819,6 +1822,14 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
     # does: #include "transcribe/voxtral_realtime.h".
     target_include_directories(voxtral_realtime_ext_abi_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+    # Phase 10.5: the Sortformer streaming operating-point run extension,
+    # served by the ArchAdapter over the engine package. Links only the C ABI.
+    add_executable(sortformer_diar_ext_abi_test tests/sortformer_diar_ext_abi_test.cpp)
+    target_link_libraries(sortformer_diar_ext_abi_test PRIVATE transcribe)
+    target_include_directories(sortformer_diar_ext_abi_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+
     # Streaming-text counterpart: streams the same fixtures through
     # begin/feed/finalize and scores the STREAMED text (plus the streaming
     # model's offline text and their divergence).
@@ -1939,6 +1950,19 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
                          COMMAND voxtral_realtime_ext_abi_test
                              "${CMAKE_CURRENT_SOURCE_DIR}/models/voxtral-mini-4b-realtime-2602-q4_k.gguf")
                 set_tests_properties(voxtral_realtime_ext_abi_test PROPERTIES SKIP_RETURN_CODE 2)
+            endif()
+
+            # Same rule for the Sortformer run extension. The v1 package is an
+            # audio.cpp GGUF and reaches the engine through the adapter; the
+            # NeMo-layout v2 package still names the builtin arch while that
+            # arch exists, so this gate runs on v1 until the retirement lands.
+            if ("sortformer_diar" IN_LIST AUDIOCPP_LINKED_MODELS)
+                add_test(NAME sortformer_diar_ext_abi_test
+                         COMMAND sortformer_diar_ext_abi_test
+                             "${CMAKE_CURRENT_SOURCE_DIR}/models/sortformer-diar-4spk-v1-q8_0.gguf"
+                             "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech"
+                         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+                set_tests_properties(sortformer_diar_ext_abi_test PROPERTIES SKIP_RETURN_CODE 2)
             endif()
         endif()
 
@@ -3224,6 +3248,29 @@ if (ENGINE_BUILD_TESTS)
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
     set_tests_properties(sortformer_diar_engine_smoke_test PROPERTIES SKIP_RETURN_CODE 2)
+
+    # Step 2: the chunked (AOSC speaker cache + FIFO) scheduler and the NeMo
+    # GGUF layout, on the catalogue's default package. The oracle 2-speaker
+    # mix and its RTTM are committed; only the package is fetched.
+    add_engine_unittest(sortformer_diar_streaming_engine_test tests/unittests/test_sortformer_diar_streaming.cpp)
+    audiocpp_test_link_model_objects(sortformer_diar_streaming_engine_test sortformer_diar)
+    target_include_directories(sortformer_diar_streaming_engine_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    add_test(
+        NAME sortformer_diar_streaming_engine_test
+        COMMAND sortformer_diar_streaming_engine_test
+            ${CMAKE_CURRENT_SOURCE_DIR}/models/diar_streaming_sortformer_4spk-v2.q8_0.gguf
+            ${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech
+            ${CMAKE_CURRENT_SOURCE_DIR}/samples/sortformer-2spk-mix.wav
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/sortformer/sortformer-2spk-mix.rttm
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    set_tests_properties(sortformer_diar_streaming_engine_test PROPERTIES SKIP_RETURN_CODE 2)
+
+    # The scheduler's host logic (chunk planning, FIFO / speaker-cache update,
+    # compression, operating-point resolution) needs no model.
+    add_engine_unittest(sortformer_diar_scheduler_test tests/unittests/test_sortformer_diar_scheduler.cpp)
+    audiocpp_test_link_model_objects(sortformer_diar_scheduler_test sortformer_diar)
+    add_test(NAME sortformer_diar_scheduler_test COMMAND sortformer_diar_scheduler_test)
 
 
     add_engine_unittest(fun_asr_nano_frontend_probe tests/fun_asr_nano/fun_asr_nano_frontend_probe.cpp)

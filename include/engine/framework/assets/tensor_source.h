@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <initializer_list>
 #include <memory>
 #include <optional>
@@ -162,6 +163,17 @@ std::shared_ptr<const TensorSource> make_prefixed_tensor_source(
 std::shared_ptr<const TensorSource> make_weight_norm_folded_tensor_source(
     std::shared_ptr<const TensorSource> source,
     std::vector<std::string> patterns);
+// A view that exposes `source`'s tensors under different names. `rename` is
+// applied to every tensor the source holds; a nullopt result drops the tensor
+// from the view, otherwise the returned name is the one callers use. Lets a
+// family whose loader is written against one checkpoint naming (say the
+// HuggingFace layout) read a package converted by a different tool (a NeMo
+// GGUF) without a second loader. Two source tensors mapping to one name is an
+// error, as is a view that ends up empty.
+using TensorRenameFn = std::function<std::optional<std::string>(std::string_view)>;
+std::shared_ptr<const TensorSource> make_renamed_tensor_source(
+    std::shared_ptr<const TensorSource> source,
+    TensorRenameFn rename);
 struct TensorSourceInput {
     std::filesystem::path path;
     std::string tensor_prefix;

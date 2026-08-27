@@ -2,7 +2,7 @@
   "schema_version": 1,
   "family": "sortformer_diar",
   "display_name": "Sortformer Diarization",
-  "description": "NVIDIA Transformer-based end-to-end speaker diarization model trained primarily on English speech, predicting speaker labels directly from audio and resolving speaker ordering by arrival time for up to four speakers.",
+  "description": "NVIDIA Transformer-based end-to-end speaker diarization model trained primarily on English speech, predicting speaker labels directly from audio and resolving speaker ordering by arrival time for up to four speakers. The streaming checkpoints (v2) run chunked with an arrival-order speaker cache, so recordings of any length diarize in bounded memory; the offline v1 checkpoints run one whole-window graph.",
   "category": "speech_analysis",
   "status": "supported",
   "tasks": [
@@ -47,9 +47,123 @@
         "required": false,
         "min": 0,
         "default": 0
+      },
+      {
+        "name": "stream_preset",
+        "type": "enum",
+        "description": "How the recording is diarized. default: chunked with the checkpoint's shipped streaming operating point (AOSC speaker cache + FIFO) when the package ships one, otherwise one whole-window graph. offline: always whole-window (bounded by session_len_sec). very_high_latency (~30.4 s lookahead, the published offline operating point), high_latency (~10 s), low_latency (~1.04 s): the publisher's validated chunk geometries; small: a diagnostic geometry that forces several chunks and a cache compression on short clips.",
+        "values": [
+          "default",
+          "offline",
+          "very_high_latency",
+          "high_latency",
+          "low_latency",
+          "small"
+        ],
+        "required": false,
+        "default": "default"
+      },
+      {
+        "name": "stream_chunk_len",
+        "type": "int",
+        "description": "Chunked diarization: frames of new audio per chunk (80 ms frames). Overrides the preset / shipped geometry and forces the chunked path.",
+        "required": false,
+        "min": 1
+      },
+      {
+        "name": "stream_left_context",
+        "type": "int",
+        "description": "Chunked diarization: frames of left context prepended to each chunk; default 1.",
+        "required": false,
+        "min": 0
+      },
+      {
+        "name": "stream_right_context",
+        "type": "int",
+        "description": "Chunked diarization: frames of lookahead appended to each chunk (the latency lever of the presets).",
+        "required": false,
+        "min": 0
+      },
+      {
+        "name": "stream_fifo_len",
+        "type": "int",
+        "description": "Chunked diarization: frames held in the FIFO before they move into the speaker cache; 0 moves every chunk straight through.",
+        "required": false,
+        "min": 0
+      },
+      {
+        "name": "stream_spkcache_len",
+        "type": "int",
+        "description": "Chunked diarization: speaker-cache capacity in frames (compressed back to this size whenever it overflows).",
+        "required": false,
+        "min": 1
+      },
+      {
+        "name": "stream_update_period",
+        "type": "int",
+        "description": "Chunked diarization: frames popped from the FIFO into the speaker cache per update.",
+        "required": false,
+        "min": 1
       }
     ],
     "session": [
+      {
+        "name": "stream_preset",
+        "type": "enum",
+        "description": "Session default for the request option of the same name.",
+        "values": [
+          "default",
+          "offline",
+          "very_high_latency",
+          "high_latency",
+          "low_latency",
+          "small"
+        ],
+        "required": false,
+        "default": "default"
+      },
+      {
+        "name": "stream_chunk_len",
+        "type": "int",
+        "description": "Session default for the request option of the same name.",
+        "required": false,
+        "min": 1
+      },
+      {
+        "name": "stream_left_context",
+        "type": "int",
+        "description": "Session default for the request option of the same name.",
+        "required": false,
+        "min": 0
+      },
+      {
+        "name": "stream_right_context",
+        "type": "int",
+        "description": "Session default for the request option of the same name.",
+        "required": false,
+        "min": 0
+      },
+      {
+        "name": "stream_fifo_len",
+        "type": "int",
+        "description": "Session default for the request option of the same name.",
+        "required": false,
+        "min": 0
+      },
+      {
+        "name": "stream_spkcache_len",
+        "type": "int",
+        "description": "Session default for the request option of the same name.",
+        "required": false,
+        "min": 1
+      },
+      {
+        "name": "stream_update_period",
+        "type": "int",
+        "description": "Session default for the request option of the same name.",
+        "required": false,
+        "min": 1
+      },
       {
         "name": "graph_arena_mb",
         "type": "int",
@@ -69,7 +183,7 @@
       {
         "name": "session_len_sec",
         "type": "float",
-        "description": "Base offline graph context length in seconds; must be positive, default 20.",
+        "description": "Whole-window graph context length in seconds; must be positive, default 20. Longer input is rejected on the whole-window path (never trimmed); the chunked path (stream_preset) has no length limit.",
         "required": false,
         "min": 0.0,
         "default": 20.0

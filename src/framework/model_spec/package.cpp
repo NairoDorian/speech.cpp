@@ -5,6 +5,8 @@
 #include "engine/framework/io/filesystem.h"
 #include "engine/framework/io/json.h"
 
+#include <gguf.h>
+
 #include <algorithm>
 #include <cctype>
 #include <iostream>
@@ -94,6 +96,29 @@ std::string directory_gguf_hint(std::string_view family) {
     return "GGUF has no embedded model spec for family '" + std::string(family) + "': " +
            files.front().string() + "; install model_specs/" + std::string(family) +
            ".json next to it, or pass --model-spec-override";
+}
+
+// True when the GGUF's general.architecture is "audiocpp", i.e. it was written
+// by audio.cpp's converter and is bound by its packaging rules. Unreadable or
+// untagged files answer false (they cannot be an audio.cpp package).
+bool gguf_is_audiocpp_package(const std::filesystem::path & path) {
+    ggml_context * tensors = nullptr;
+    gguf_init_params params{};
+    params.no_alloc = true;
+    params.ctx = &tensors;
+    gguf_context * gguf = gguf_init_from_file(path.string().c_str(), params);
+    if (gguf == nullptr) {
+        if (tensors != nullptr) ggml_free(tensors);
+        return false;
+    }
+    bool audiocpp = false;
+    const int64_t id = gguf_find_key(gguf, "general.architecture");
+    if (id >= 0 && gguf_get_kv_type(gguf, id) == GGUF_TYPE_STRING) {
+        audiocpp = std::string_view(gguf_get_val_str(gguf, id)) == "audiocpp";
+    }
+    gguf_free(gguf);
+    if (tensors != nullptr) ggml_free(tensors);
+    return audiocpp;
 }
 
 std::optional<std::filesystem::path> active_gguf_path() {
@@ -514,7 +539,14 @@ std::filesystem::path default_contract_spec_path(std::string_view family) {
     if (const auto gguf = active_gguf_path()) {
         const auto & embedded = embedded_model_spec();
         if (!embedded.has_value()) {
-            if (family == "minimax_h3") {
+            // "Published GGUF packages must embed a model spec" is a rule for
+            // packages audio.cpp's converter produced. A GGUF written by
+            // another tool (NVIDIA's Sortformer packages, a whisper.cpp or
+            // transcribe.cpp conversion) carries a different
+            // general.architecture and cannot embed one; those resolve their
+            // contract from the workspace / builtin catalog like a
+            // safetensors checkout does.
+            if (family == "minimax_h3" || !gguf_is_audiocpp_package(*gguf)) {
                 if (const auto external = discover_workspace_model_spec(family)) {
                     return *external;
                 }
@@ -528,6 +560,20 @@ std::filesystem::path default_contract_spec_path(std::string_view family) {
                                      "or pass --model-spec-override.");
         }
         if (embedded_model_spec_has_v1_contract(*embedded, family)) {
+            // The embedded copy makes a package self-describing where no
+            // catalog exists. When this build carries the family's spec, that
+            // copy is the contract the compiled session code validates
+            // options against, so it must win: a package converted before an
+            // option was added would otherwise reject the option forever
+            // ("unknown request option"), and the adapter - which resolves
+            // the contract outside the load - would prune against a different
+            // contract than the session enforces (Phase 10.5, family 3).
+            if (const auto external = discover_workspace_model_spec(family)) {
+                return *external;
+            }
+            if (builtin_model_specs().find(std::string(family)) != builtin_model_specs().end()) {
+                return std::filesystem::path("@builtin") / (std::string(family) + ".json");
+            }
             return std::filesystem::path("@gguf") / (std::string(family) + ".json");
         }
         active_gguf_has_legacy_spec = true;

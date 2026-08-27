@@ -17,6 +17,40 @@
 
 namespace engine::models::sortformer_diar {
 
+// Two published package layouts reach this family:
+//
+//   HuggingFace  audio.cpp GGUFs / safetensors converted from the HF
+//                transformers port: config.json + processor_config.json
+//                sidecars, tensors named fc_encoder.* / tf_encoder.* /
+//                sortformer_modules.*. The v1 packages.
+//   NemoGguf     the GGUF NVIDIA publishes for the streaming checkpoints
+//                (nvidia/diar_streaming_sortformer_4spk-v2): no sidecars,
+//                hparams in sortformer.* KVs, tensors named encoder.* /
+//                transformer.* / head.*, and the streaming operating point
+//                + AOSC scoring constants shipped as KVs. The catalogue's
+//                default package. Before Phase 10.5 nothing in this repo
+//                could open it - the transcribe.cpp arch read a third naming
+//                (its own converter's stt.sortformer.* / enc.blocks.*).
+enum class SortformerPackageLayout {
+    HuggingFace,
+    NemoGguf,
+};
+
+enum class SortformerFeatureNormalize {
+    None,
+    PerFeature,
+};
+
+// How many mel frames an utterance of n samples yields. The HF feature
+// extractor reports floor(n / hop); NeMo's AudioToMelSpectrogramPreprocessor
+// reports ceil(n / hop) (the transcribe.cpp frontend's nemo_seq_len_ceil).
+// They differ by one frame exactly when n is a multiple of hop, which the
+// streaming chunk geometry then sees.
+enum class SortformerFrameCount {
+    Floor,
+    Ceil,
+};
+
 struct SortformerFeatureExtractorConfig {
     int64_t sample_rate = 0;
     int64_t n_fft = 0;
@@ -25,6 +59,10 @@ struct SortformerFeatureExtractorConfig {
     int64_t num_mel_bins = 0;
     float preemphasis = 0.0f;
     bool return_attention_mask = true;
+    // Layout-dependent frontend contract (see SortformerPackageLayout).
+    SortformerFeatureNormalize normalize = SortformerFeatureNormalize::PerFeature;
+    bool peak_normalize = true;
+    SortformerFrameCount frame_count = SortformerFrameCount::Floor;
 };
 
 struct BatchNorm1dEvalWeights {
@@ -116,6 +154,34 @@ struct SortformerModulesConfig {
     float dropout_rate = 0.0f;
 };
 
+// The streaming operating point a checkpoint ships with (NeMo's
+// sortformer_modules streaming cfg). All lengths are in diarization frames
+// (80 ms at the shipped 8x subsampling). `present` is false for packages
+// that publish none (the offline v1 checkpoints): those run whole-window by
+// default and only run chunked when a caller names a preset.
+struct SortformerStreamingDefaults {
+    bool present = false;
+    int64_t chunk_len = 188;
+    int64_t chunk_left_context = 1;
+    int64_t chunk_right_context = 1;
+    int64_t fifo_len = 0;
+    int64_t spkcache_len = 188;
+    int64_t spkcache_update_period = 188;
+};
+
+// AOSC speaker-cache compression constants (NeMo SortformerModules). The
+// defaults are the values every published checkpoint ships; a NeMo GGUF
+// carries them as sortformer.scoring.* KVs.
+struct SortformerScoringConfig {
+    int64_t spkcache_sil_frames_per_spk = 3;
+    float sil_threshold = 0.2f;
+    float pred_score_threshold = 0.25f;
+    float scores_boost_latest = 0.05f;
+    float strong_boost_rate = 0.75f;
+    float weak_boost_rate = 1.5f;
+    float min_pos_scores_rate = 0.5f;
+};
+
 struct SortformerModelConfig {
     std::string model_type;
     std::string variant;
@@ -125,6 +191,8 @@ struct SortformerModelConfig {
     SortformerFastConformerConfig fc_encoder;
     SortformerTransformerConfig tf_encoder;
     SortformerModulesConfig modules;
+    SortformerStreamingDefaults streaming;
+    SortformerScoringConfig scoring;
 };
 
 struct SortformerDiarWeights {
@@ -137,10 +205,16 @@ struct SortformerDiarWeights {
 
 struct SortformerAssets {
     assets::ResourceBundle resources;
+    SortformerPackageLayout layout = SortformerPackageLayout::HuggingFace;
     SortformerModelConfig model_config;
     SortformerFeatureExtractorConfig feature_config;
     std::shared_ptr<const assets::TensorSource> model_weights;
 };
+
+// True when `model_path` is (or is a directory holding) a GGUF whose
+// general.architecture is "sortformer" - the NeMo-layout package. Cheap: reads
+// the GGUF header only. Never throws; unreadable paths answer false.
+bool is_nemo_sortformer_gguf(const std::filesystem::path & model_path) noexcept;
 
 std::shared_ptr<const SortformerAssets> load_sortformer_assets(const std::filesystem::path & model_root);
 SortformerModelConfig parse_sortformer_model_config(const assets::ResourceBundle & resources);

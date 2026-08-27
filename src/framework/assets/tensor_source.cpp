@@ -1528,6 +1528,96 @@ std::shared_ptr<const TensorSource> make_prefixed_tensor_source(
 
 namespace {
 
+class RenamedTensorSourceView final : public TensorSource {
+public:
+    RenamedTensorSourceView(std::shared_ptr<const TensorSource> source, TensorRenameFn rename)
+        : source_(std::move(source)) {
+        for (const auto & tensor : source_->tensors()) {
+            const auto renamed = rename(tensor.name);
+            if (!renamed.has_value()) continue;
+            if (!routes_.emplace(*renamed, tensor.name).second) {
+                throw std::runtime_error("renamed tensor source maps two tensors onto '" + *renamed + "'");
+            }
+        }
+        if (routes_.empty()) throw std::runtime_error("renamed tensor source exposes no tensors");
+    }
+
+    const std::filesystem::path & source_path() const noexcept override { return source_->source_path(); }
+    bool has_tensor(std::string_view name) const noexcept override {
+        return routes_.find(std::string(name)) != routes_.end();
+    }
+    TensorMetadata require_metadata(std::string_view name) const override {
+        auto metadata = source_->require_metadata(require_name(name));
+        metadata.name = std::string(name);
+        return metadata;
+    }
+    std::vector<TensorMetadata> tensors() const override {
+        std::vector<TensorMetadata> result;
+        result.reserve(routes_.size());
+        for (const auto & [name, _] : routes_) result.push_back(require_metadata(name));
+        std::sort(result.begin(), result.end(), [](const auto & lhs, const auto & rhs) { return lhs.name < rhs.name; });
+        return result;
+    }
+    void release_storage() const override { source_->release_storage(); }
+    RawTensorData require_tensor_data(std::string_view name) const override {
+        auto data = source_->require_tensor_data(require_name(name));
+        data.metadata.name = std::string(name);
+        return data;
+    }
+    std::vector<float> require_f32(
+        std::string_view name,
+        const std::optional<std::vector<int64_t>> & expected_shape) const override {
+        return source_->require_f32(require_name(name), expected_shape);
+    }
+    std::optional<std::vector<float>> optional_f32(
+        std::string_view name,
+        const std::optional<std::vector<int64_t>> & expected_shape) const override {
+        if (!has_tensor(name)) return std::nullopt;
+        return require_f32(name, expected_shape);
+    }
+    void set_backend_tensor(
+        ggml_tensor * tensor,
+        std::string_view name,
+        TensorStorageType storage_type,
+        const std::vector<int64_t> & expected_shape) const override {
+        source_->set_backend_tensor(tensor, require_name(name), storage_type, expected_shape);
+    }
+    void set_backend_f32_tensor(
+        ggml_tensor * tensor,
+        std::string_view name,
+        const std::vector<int64_t> & expected_shape) const override {
+        set_backend_tensor(tensor, name, TensorStorageType::F32, expected_shape);
+    }
+    int64_t require_i64_scalar(std::string_view name) const override {
+        return source_->require_i64_scalar(require_name(name));
+    }
+
+private:
+    const std::string & require_name(std::string_view name) const {
+        const auto it = routes_.find(std::string(name));
+        if (it == routes_.end()) throw std::runtime_error("missing tensor in renamed source: " + std::string(name));
+        return it->second;
+    }
+    std::shared_ptr<const TensorSource> source_;
+    std::unordered_map<std::string, std::string> routes_;
+};
+
+}  // namespace
+
+std::shared_ptr<const TensorSource> make_renamed_tensor_source(
+    std::shared_ptr<const TensorSource> source,
+    TensorRenameFn rename) {
+    if (source == nullptr) {
+        throw std::runtime_error("renamed tensor source requires a source");
+    }
+    if (!rename) {
+        throw std::runtime_error("renamed tensor source requires a rename function");
+    }
+    return std::make_shared<RenamedTensorSourceView>(std::move(source), std::move(rename));
+}
+
+namespace {
+
 std::vector<std::pair<std::string, std::string>> read_gguf_embedded_sidecars(
     const std::filesystem::path & path) {
     ggml_context * tensor_context = nullptr;
