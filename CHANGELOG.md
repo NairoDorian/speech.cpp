@@ -11,6 +11,29 @@ Dates are the work-session dates recorded in the plan.
 
 ### Added
 
+- **Upstream Synchronization (`0xShug0/audio.cpp:main@6d530f4`) — 0 behind, 35 upstream commits integrated (2026-08-28)**:
+  - **New Model Families & Modules**:
+    - `AudioSR`: Audio super-resolution model with DDIM sampler, UNet, and HiFi-GAN vocoder (`src/models/audiosr/`).
+    - `ControlFoley`: Video-to-audio Foley sound synthesis with visual conditioning and flow denoiser (`src/models/controlfoley/`).
+    - `MiDashengLM-Gen`: Autoregressive speech and audio generation runtime (`src/models/midashenglm_gen/`).
+    - `FireRedTTS3` & `FireRedAudio`: Chinese/English multi-task speech synthesis and audio understanding (`src/models/fireredtts3/`, `src/models/firered_audio/`).
+    - `Granite Speech 5.0 470M TurboCTC ASR`: IBM Granite CTC ASR community engine (`src/community_models/granite5asr/`).
+    - `Echo-TTS`: DiT-based TTS community model with PCA latent post-processing (`src/community_models/echo_tts/`).
+    - Reusable neural components: `mel_latent_vae44k_runtime`, `redae_codec_runtime`, `fish_dac_codec_runtime`, `s3_tokenizer`, `hifigan_vocoder`, and conditioning runtimes (`cav_mae_st`, `clap_audio`, `musicgen_style`, `open_clip`, `synchformer`).
+  - **Core & Framework Enhancements**:
+    - `wav_reader.cpp`: Extended WAV parser support for 8-bit unsigned PCM, 32-bit signed PCM, 64-bit IEEE float, A-law, $\mu$-law, and `WAVEFORMATEXTENSIBLE` containers.
+    - Server: `--idle-unload-ms` automatic resource reclaim and pre-load memory guards (`app/server/model_memory.cpp`, `app/server/runtime.cpp`).
+    - Parakeet TDT: Native VAD chunking support in `src/community_models/parakeet_tdt/session.cpp`.
+    - Qwen3 ASR & Forced Aligner: Attention mask reuse fix, word timestamp diagnostics, and opt-in `clamp_timestamps_to_audio`.
+    - ACE-Step: Caption rewrite action.
+    - VibeVoice: 7B model decoding improvements.
+    - CUDA: Staging zeroing for MMQ stream-k fixup pool memory.
+  - **WebUI**:
+    - Native UI themes, i18n localization (Italian, Polish, Russian, Chinese), and Arena multi-model comparison workflow.
+  - **Verification & State**:
+    - Full CTest suite passes **112/112 100% green** (108 passed, 4 clean skips on unpinned weights).
+    - `git rev-list --left-right --count HEAD...upstream/main` reads **`88  0`**.
+
 - **Phase 10.5, family 3 of 5 (step 2): the chunked Sortformer scheduler and the NeMo package layout, in the engine (2026-08-27)** — full report: `docs/reports/sortformer_diar_engine_port.md`.
   - **Step 1's premise was wrong, and reproducing it changed the scope.** The catalogue's default package (`nvidia/diar_streaming_sortformer_4spk-v2`, `general.architecture = "sortformer"`) is **NVIDIA's own GGUF layout** — `sortformer.encoder.*` / `sortformer.streaming.*` KVs, `encoder.layers.N.*` / `transformer.layers.N.first_sub_layer.*` / `head.*` tensors — not the transcribe.cpp converter's (`stt.sortformer.*`, `enc.blocks.*`). The arch fails on it too (`missing KV stt.sortformer.max_speakers`, status 4). Until this step **nothing in the repository could open the package the catalogue installs by default.**
   - **The engine package now opens it.** A NeMo-layout loader (KVs → config, HF-named weight loader served through a renaming `TensorSource` view; `make_renamed_tensor_source` is a new generic framework helper), a per-layout frontend contract (NeMo: no per-feature normalization, no peak scaling, ceil(n/hop) framing), and a loader wrapper so registry **auto-detection with no family hint** reaches it. `--family sortformer` works as an alias.

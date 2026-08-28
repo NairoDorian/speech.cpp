@@ -288,41 +288,26 @@ Every agent working on this repository must strictly adhere to these 7 protocol 
 
 ## 4. Current State & Handoff Summary for AI Agents
 
-- **Current Timestamp**: 2026-08-26 (Upstream reconciliation to `c79e588` — **0 behind**; dual-parentage doctrine recorded; ggml bumped to `36da5713` / v0.22.0 and certified CPU **and** CUDA; **Phase 11 Wave W1 complete** (W1a + W1b) and **W2a closed** — native engine Whisper matches the arch baseline 4.34783%)
+- **Current Timestamp**: 2026-08-28 (Upstream synchronization to `6d530f4` — **0 behind, 88 ahead**; 35 commits merged; ggml `36da5713` / v0.22.0 certified; 112/112 CTest targets 100% green)
 - **Last Completed Increments**:
-  - **Phase 11 Wave W2a — Native Engine Whisper (offline core)** — `100% DONE`
-    - Package `src/models/whisper/` + internal headers; loads the legacy whisper.cpp `.bin` (the family's only obtainable weights); frontend is the Phase-9 `MelExtractor`, not a private mel.
-    - Gate `whisper_engine_smoke_test`, held to **parity** not the 10% bound: **corpus WER 4.34783% (3/69) == arch baseline**, RTF 0.155.
-    - Found and fixed a mel **layout transpose** (MelExtractor is mel-major, ggml `[n_mels, n_frames]` needs frame-major) that produced confident unrelated text at 94% WER without crashing.
-    - Total CTest targets: **103/103 100% green**.
+  - **Upstream Synchronization (`0xShug0/audio.cpp:main@6d530f4`) — 88 ahead, 0 behind**:
+    - Audited, resolved, and merged 35 upstream commits from `c79e588` to `6d530f4`.
+    - Integrated new model families: `AudioSR`, `ControlFoley`, `FireRedTTS3`, `FireRedAudio`, `MiDashengLM-Gen`, `Echo-TTS`, and `IBM Granite Speech 5.0 470M TurboCTC ASR`.
+    - Added reusable modules & conditioners: `mel_latent_vae44k_runtime`, `redae_codec_runtime`, `fish_dac_codec_runtime`, `s3_tokenizer`, `hifigan_vocoder`, `cav_mae_st`, `clap_audio`, `musicgen_style`, `open_clip`, `synchformer`.
+    - Extended WAV reader format coverage in `src/framework/audio/wav_reader.cpp` (PCM8/32, float64, A-law, $\mu$-law, `WAVEFORMATEXTENSIBLE`).
+    - Added server `--idle-unload-ms` and pre-load memory guard check (`app/server/model_memory.cpp`, `app/server/runtime.cpp`).
+    - Integrated Parakeet TDT VAD chunking, Qwen3 timestamp clamping & word diagnostics, ACE-Step caption rewriting, VibeVoice 7B improvements, and CUDA stream-k staging zeroing.
+    - Updated WebUI with native themes, i18n localization, and Arena comparison workflow.
+    - Resolved merge conflicts in `CMakeLists.txt`, `README.md`, `app/server/runtime.cpp`, `external/ggml/src/ggml-cuda/mmq.cuh`, `include/engine/models/qwen3_asr/types.h`, and `src/models/qwen3_asr/session.cpp`.
+    - Preserved all `speech.cpp` native engine ASR ports (`moonshine`, `moonshine_streaming`, `whisper`), transcribe runtime, and ALIAS product targets.
+    - Total CTest targets: **112/112 100% green** (108 passed, 4 clean skips on unpinned weights).
+  - **Phase 10.5, family 3 of 5 (step 2): Chunked Sortformer scheduler & NeMo package layout in engine** — `100% DONE` (111/111 green).
+  - **Phase 11 Wave W2a — Native Engine Whisper (offline core)** — `100% DONE` (103/103 green).
   - **Dual Parentage recorded + ggml bumped to `36da5713` (v0.22.0)**:
-    - **`speech.cpp` is equally a child of `audio.cpp` and of `transcribe.cpp`** — forking audio.cpp was a convenience, not precedence. Recorded in `AGENTS.md` § "Dual Parentage" and **Operating Rule 7**; the Master Key and Target Repository lines above were corrected. The doctrine had eroded because only audio.cpp has an `upstream` remote (so only it yields a "N behind" number), and the concrete cost was treating transcribe.cpp's ggml bump as a curiosity rather than as our own dependency floor moving.
-    - **`scripts/sync-deps.sh`** — read-only drift report over all three sources (audio.cpp remote, transcribe.cpp sibling, ggml vs upstream HEAD **and** vs parent transcribe.cpp's pin). `--fetch` fast-forwards siblings. Never pulls/merges/re-vendors speech.cpp. **Run before any release state.**
-    - **ggml `8c63e709` (0.20.2) → `36da5713` (0.22.0)**, all 7 patches applying. **0005 rebased** (upstream rewrote `concat_any` into row-wise memcpy — it converged on most of that fork delta; byte math moved to block-aware `ggml_row_size`, fixing a latent quantized over-count in our own patch). **0007 regenerated** — the old file was hand-written, never round-trip verified, and `git apply`-corrupt (21-line declared hunk over a 35-line body, no trailing newline); its content was in the tree, so **the delta was one sync from silent loss**.
-    - API drift purely additive; **no engine source changes required**. Build 444 targets clean; **CTest 100/100** unchanged from baseline; `lint_teardown` green at `src/runtime`; re-sync reports **`0 path(s) changed`** — reproducibility certified.
-    - **CUDA certified (2026-08-26)**: the `sp_cuda` build (sm_89, CUDA 13.3) compiles clean against `36da5713` including patch 0007's CUDA entry points, and its **57/57 CTest suite passes** — among them `scaled_dot_product_attention_test`, which only executes on a real CUDA device. HIP/Metal/Vulkan remain unbuilt here.
-  - **Phase 11 Wave W1b — Native Engine Moonshine-Streaming** — `100% DONE` (Wave W1 now complete)
-    - Package `src/models/moonshine_streaming/` + internal headers; registered in `audiocpp_add_model` and the ASR composite; session on `StreamingSessionBase` with base-owned lifecycle and `STABLE_PREFIX` commit.
-    - Gate `moonshine_streaming_engine_smoke_test`: **streamed 4.34783% == offline 4.34783% (3/69), divergence 0** — exactly the arch `asr_stream_text_wer_test` baseline.
-    - Fixed the same latent Phase-6 sidecar defect in `model_specs/moonshine_streaming.json` that W1a found in `moonshine.json`.
-    - Total CTest targets: **101/101 100% green**.
-  - **Upstream Reconciliation (`0xShug0/audio.cpp:main@c79e588`) — 63 ahead, 0 behind**:
-    - Root-caused the recurring "6 commits behind": the prior sync (`9b34fd2`) content-copied instead of merging, so the merge-base stayed at `62735ea` and git re-reported already-applied commits. **2 of the 6 were phantoms** (`288a271` `--list-devices`, `d25ffac` chunk metadata — both verified present in the tree by symbol, not by subject line).
-    - Cherry-picked `4ec485d` supertonic voice preset (→ `90659b1`) and `d03b957` IndexTTS2 HIP F16 KV/conv default (→ `3682698`); both applied clean with upstream authorship preserved.
-    - Adapted `c79e588` tag-driven release CI (→ `a775463`): `.github/workflows/release.yml` + `docs/RELEASING.md`, artifacts rebranded `audio-<tag>-…` → `speech-<tag>-…`.
-    - Declared `c6805de` (audio.cpp README 0.7 banner) **N/A** — fork README has no such banner; recorded in the merge ledger so it is not re-triaged.
-    - Closed with `git merge -s ours upstream/main` carrying the full 6-commit disposition ledger. `git rev-list --left-right --count HEAD...upstream/main` now reads **`63  0`**. See Operating Rule 6.
-    - Reference trees pulled: `audio.cpp`→`c79e588`, `transcribe.cpp`→`2102bca` (**ggml bumped to upstream master `36da5713` / v0.22.0**), `audio_cunba`→`8cf5136`, `transcribe_cunba`→`2345350`. `speech.cpp` was fetched only, never pulled.
-    - Total CTest targets: **100/100 100% green** (96 passed, 4 clean model-dependent skips) — unchanged from baseline.
-  - **Upstream Synchronization (`0xShug0/audio.cpp:main@d25ffac`) & `speech.cpp` Naming Aliases**:
-    - Extracted device enumeration into `engine::core::print_backend_devices`.
-    - Added `--list-devices` support to `audiocpp_server` and CLI.
-    - Added CMake ALIAS targets (`speech_cli`, `speechcpp_cli`, `speech_server`, `speechcpp_server`, `speech_gguf`, `speechcpp_gguf`).
-    - Handled out-of-span chunk speech metadata resilience in `chunking.cpp`.
-    - Total CTest targets: **100/100 100% green** (96 passed, 4 clean model-dependent skips).
-  - **Phase 11 Wave W1a — Native Engine Moonshine (offline)** — `100% DONE`
-    - Package `src/models/moonshine/` + internal headers in `include/engine/models/moonshine/`.
-    - Gate `moonshine_engine_smoke_test`: engine-path corpus WER **1.449% (1/69 edits) == arch baseline**.
+    - **`speech.cpp` is equally a child of `audio.cpp` and of `transcribe.cpp`** — forking audio.cpp was a convenience, not precedence.
+    - `scripts/sync-deps.sh` reporting drift over all three sources.
+  - **Phase 11 Wave W1b — Native Engine Moonshine-Streaming** — `100% DONE` (Wave W1 complete, 101/101 green).
+  - **Phase 11 Wave W1a — Native Engine Moonshine (offline)** — `100% DONE` (96/96 green).
 - **IMMEDIATE NEXT TASK FOR AGENT** *(roadmap v6.0, 2026-08-26)*:
   - **Read first**: `docs/reports/fusion_review_2026-08-26.md` (why the plan changed) and `FUSION_ROADMAP_PLAN.md` §0.4, §5.6–5.9, Phases 10.5 / 11a / 12 / 11b / 11c.
   - **Execute Phase 10.5**: `qwen3_asr` is DONE (9cc5457 — read `progress.md` §5 for the pattern: measure first, merge the arch's distinguishing features into the engine package, gate, delete, ledger). `voxtral_realtime` is DONE (fdaa9a5; its typed stream extension now lives in the ArchAdapter). `sortformer_diar`'s feature-merge is DONE (step 2, 2026-08-27 — read `docs/reports/sortformer_diar_engine_port.md`): the engine package runs the chunked AOSC/FIFO scheduler with the publisher's presets, accepts the typed RUN-slot ext through the adapter, and opens the catalogue's default (NeMo-layout) v2 package, which neither parent could. **Next: step 3, the retirement**, scoped by what the code consumes — the parakeet multitalker arch includes `arch/sortformer/{sortformer.h,weights.*,stream.cpp}` and the embedded-diarizer functions in `model.cpp`, and parakeet's arch is canonical, so retire the **standalone family**: drop `sortformer::arch` from `transcribe-arch.cpp` (this is what routes `general.architecture == "sortformer"` GGUFs — the v2 package — to the adapter), delete the standalone `load` / `init_context` / `run` / `run_validate` / `accepts_ext_kind` and the offline dump forward from `arch/sortformer/model.cpp`, move `transcribe_sortformer_stream_ext_init` to `transcribe-family-ext.cpp`, re-point `sortformer_diar_ext_abi_test` at the v2 package, delete `tests/transcribe/sortformer_stream_ext_unit.cpp` (env-gated, never run), fill Appendix B row B15 with the remainder stated. Then `sense_asr` (verify goldens), `fun_asr_nano` (WER gate at the arch baseline). These are the **first deletions in the project**; the ledger must work here before 11c.
