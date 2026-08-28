@@ -17,6 +17,7 @@ constexpr int64_t kQwen3ASRSpecKMax = 8;
 struct Qwen3ASRGenerationOptions {
     int64_t max_new_tokens = 512;
     bool return_timestamps = false;
+    bool clamp_timestamps_to_audio = false;
     // 0 = plain one-token-per-step autoregression (the byte-equal reference
     // path and the family default); 1..kQwen3ASRSpecKMax = draft that many
     // tokens per verify pass on the offline single-utterance path. The
