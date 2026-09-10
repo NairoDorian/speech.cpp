@@ -28,7 +28,9 @@ namespace engine::models::vibevoice_asr {
 class VibeVoiceDecoderPrefillGraph;
 class VibeVoiceDecoderCachedStepGraph;
 class VibeVoiceDecoderCachedStepGraphBatched;
+class VibeVoiceDecoderCachedSuffixGraph;
 class VibeVoiceDecoderEmbeddingGraph;
+class VibeVoiceDecoderKVCache;
 
 class VibeVoiceDecoderCachedState final {
 public:
@@ -44,8 +46,10 @@ private:
     friend class VibeVoiceDecoderWeightsRuntime;
 
     std::unique_ptr<VibeVoiceDecoderCachedStepGraph> graph_;
+    std::unique_ptr<VibeVoiceDecoderCachedSuffixGraph> suffix_graph_;
+    std::unique_ptr<VibeVoiceDecoderKVCache> cache_;
     runtime::TransformerKVState pending_state_;
-    bool graph_has_state_ = false;
+    bool cache_has_state_ = false;
 };
 
 // Batched variant of VibeVoiceDecoderCachedState: one shared step graph holds
@@ -157,6 +161,7 @@ public:
         const std::vector<int32_t> & speech_positions) const;
     VibeVoiceDecoderPrefillOutput prefill_embeddings(const std::vector<float> & embeddings, int64_t steps) const;
     void reset_cached_state(VibeVoiceDecoderCachedState & state, runtime::TransformerKVState prefill_state) const;
+    void prepare_cached_state(VibeVoiceDecoderCachedState & state, int64_t cache_capacity) const;
     runtime::TransformerKVState export_cached_state(VibeVoiceDecoderCachedState & state) const;
     void clone_cached_state(
         const VibeVoiceDecoderCachedState & source,
@@ -166,8 +171,7 @@ public:
         const std::vector<float> & embedding,
         VibeVoiceDecoderCachedState & state,
         int64_t cache_capacity) const;
-    // Batched decode: reset_batched_state imports one prefill K/V per
-    // sequence, then batched_cached_step advances all sequences in lockstep
+    // Batched cached step: advances N sequences concurrently in one graph execution
     // (embeddings [n_seqs, hidden]; positions/slots/visible are per-sequence).
     void reset_batched_state(
         VibeVoiceDecoderCachedStateBatched & state,
@@ -178,6 +182,16 @@ public:
         const std::vector<int32_t> & slots,
         const std::vector<int64_t> & visible,
         VibeVoiceDecoderCachedStateBatched & state,
+        int64_t cache_capacity) const;
+
+    void append_cached_step(
+        const std::vector<float> & embedding,
+        VibeVoiceDecoderCachedState & state,
+        int64_t cache_capacity) const;
+    VibeVoiceDecoderResult cached_suffix(
+        const std::vector<float> & embeddings,
+        int64_t steps,
+        VibeVoiceDecoderCachedState & state,
         int64_t cache_capacity) const;
 
 private:
