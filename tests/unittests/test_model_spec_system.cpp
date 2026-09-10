@@ -227,6 +227,32 @@ void expect_rejects(const std::string & label, const std::string & spec_text, co
     engine::test::require(rejected, label + " should reject with: " + needle);
 }
 
+std::string spec_with_download(const std::string & download) {
+    auto text = schema_v1_spec_text("[]");
+    const std::string anchor = "\"download\": {\"kind\": \"unsupported\", \"reason\": \"test fixture\"}";
+    const auto at = text.find(anchor);
+    engine::test::require(at != std::string::npos, "download fixture anchor exists");
+    text.replace(at, anchor.size(), "\"download\": " + download);
+    return text;
+}
+
+void test_download_kinds_schema() {
+    // ModelScope snapshot downloads validate like Hugging Face snapshots:
+    // repo is required, revision is optional.
+    engine::model_spec::validate_spec(
+        json::parse(spec_with_download(
+            R"JSON({"kind": "modelscope_snapshot", "repo": "audio-cpp/toy-model"})JSON")),
+        "modelscope_snapshot_repo_only");
+    engine::model_spec::validate_spec(
+        json::parse(spec_with_download(
+            R"JSON({"kind": "modelscope_snapshot", "repo": "audio-cpp/toy-model", "revision": "master"})JSON")),
+        "modelscope_snapshot_with_revision");
+    expect_rejects(
+        "modelscope_snapshot_missing_repo",
+        spec_with_download(R"JSON({"kind": "modelscope_snapshot"})JSON"),
+        "missing required field 'repo'");
+}
+
 void test_legacy_dependencies_schema() {
     // Valid legacy specs accept required model dependencies and conditional bundled dependencies.
     const auto spec = json::parse(schema_v1_spec_text(R"JSON([
@@ -1170,6 +1196,96 @@ void test_schema_v1_metadata_projection() {
     std::filesystem::remove_all(root);
 }
 
+void test_contract_projection_ignores_package_metadata_validation() {
+    const auto root = make_temp_root();
+    std::string spec_text = schema_v1_spec_with_options(R"JSON({
+      "request": [
+        {
+          "name": "reference_text",
+          "type": "string",
+          "required": false,
+          "description": "Reference transcript."
+        }
+      ],
+      "session": [],
+      "load": []
+    })JSON");
+    const std::string marker = "\"default\": true";
+    const auto pos = spec_text.find(marker);
+    engine::test::require(pos != std::string::npos, "test fixture package marker");
+    spec_text.replace(pos, marker.size(), "\"default\": true,\n      \"strip_prefix\": \"\"");
+    const auto spec_path = write_text(root, "toy_model.json", spec_text);
+
+    bool full_validation_rejected = false;
+    try {
+        (void) engine::model_spec::load_spec(spec_path);
+    } catch (const std::runtime_error & error) {
+        full_validation_rejected = std::string(error.what()).find("strip_prefix: expected non-empty string") !=
+            std::string::npos;
+    }
+    engine::test::require(
+        full_validation_rejected,
+        "full package/catalog validation should reject empty strip_prefix");
+
+    const engine::model_spec::ScopedSpecOverride spec_override(root);
+    const auto contract = engine::model_spec::model_contract("toy_model");
+    engine::test::require(contract.has_value(), "contract projection should ignore package metadata validation");
+    engine::test::require(contract->metadata.weight_candidates.empty(), "contract metadata should not read packages");
+    engine::test::require(
+        contract->request_option_keys.find("reference_text") != contract->request_option_keys.end(),
+        "contract should include reference_text");
+
+    std::filesystem::remove_all(root);
+}
+
+void test_legacy_spec_contract_behavior_unchanged() {
+    const auto root = make_temp_root();
+    write_text(root, "toy_model.json", legacy_spec_text("[]"));
+
+    const engine::model_spec::ScopedSpecOverride spec_override(root);
+    const auto contract = engine::model_spec::model_contract("toy_model");
+    engine::test::require(!contract.has_value(), "legacy specs should not expose schema v1 contracts");
+
+    std::filesystem::remove_all(root);
+}
+
+void test_experimental_spec_without_installable_package() {
+    const std::string experimental = R"JSON({
+      "schema_version": 1,
+      "family": "local_only_model",
+      "display_name": "Local Only Model",
+      "description": "Requires a local checkpoint conversion.",
+      "category": "tts",
+      "status": "experimental",
+      "tasks": ["tts"],
+      "modes": ["offline"],
+      "languages": ["en"],
+      "runtime": {"tags": ["gguf"]},
+      "capabilities": {},
+      "options": {"request": [], "session": [], "load": []},
+      "packages": [],
+      "dependencies": [],
+      "ui": {"tags": ["TTS"], "docs": ["docs/local.md"]},
+      "sources": [{
+        "format": "safetensors",
+        "roots": {"model": "."},
+        "files": {"config": "model:config.json"},
+        "tensors": {"weights": "model:model.safetensors"}
+      }]
+    })JSON";
+    engine::model_spec::validate_spec(
+        json::parse(experimental), "experimental_local_only");
+
+    auto community = experimental;
+    const auto status = community.find("\"status\": \"experimental\"");
+    engine::test::require(status != std::string::npos, "experimental status fixture");
+    community.replace(status, std::string("\"status\": \"experimental\"").size(),
+                      "\"status\": \"community\"");
+    expect_rejects(
+        "community_requires_package", community,
+        "packages must not be empty unless status is experimental");
+}
+
 void test_contract_spec_prefers_workspace_over_package_local_spec() {
     const auto root = make_temp_root();
     const auto workspace = root / "workspace";
@@ -1231,11 +1347,15 @@ void test_loading_and_resource_bundle() {
 int main() {
     try {
         test_legacy_dependencies_schema();
+        test_download_kinds_schema();
         test_typed_schema_renamed_dependencies();
         test_dependency_option_mapping_from_production_spec();
         test_options_schema();
         test_option_name_mapping_from_production_spec();
         test_schema_v1_metadata_projection();
+        test_contract_projection_ignores_package_metadata_validation();
+        test_legacy_spec_contract_behavior_unchanged();
+        test_experimental_spec_without_installable_package();
         test_contract_spec_prefers_workspace_over_package_local_spec();
         test_loading_and_resource_bundle();
     } catch (const std::exception & error) {

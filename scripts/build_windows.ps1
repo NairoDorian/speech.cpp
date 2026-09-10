@@ -4,6 +4,7 @@ param(
     [string]$Target = "audiocpp_cli",
     [int]$Jobs = 0,
     [switch]$ConfigureOnly,
+    [switch]$RunTests,
     [switch]$Clean,
     [string]$CudaArchitectures = "auto",
     [ValidateSet("", "native", "avx2", "baseline")]
@@ -19,6 +20,7 @@ param(
     [ValidateSet("full", "core", "custom")]
     [string]$ModelSet = "full",
     [string]$Models = "",
+    [string]$Version = "dev",
     [string]$VsInstall = "",
     [switch]$Ccache
 )
@@ -460,6 +462,9 @@ function Find-VulkanRoot {
 }
 
 $settings = Get-PresetSettings $Preset
+if ($RunTests) {
+    $settings.BuildTests = "ON"
+}
 $cpuArchSettings = Get-CpuArchSettings $CpuArch
 if ($null -ne $cpuArchSettings.Native) {
     $settings.Native = $cpuArchSettings.Native
@@ -552,6 +557,7 @@ Write-Host "Model composite: $ModelSet"
 if ($Models -ne "") {
     Write-Host "Selected models: $Models"
 }
+Write-Host "audio.cpp version: $Version"
 
 if ($Clean) {
     $buildDirForClean = Join-Path (Join-Path (Split-Path $PSScriptRoot -Parent) "build") $Preset
@@ -588,6 +594,7 @@ $configureArgs = @(
     "-DAUDIOCPP_DEPLOYMENT_BUILD=$deploymentBuildValue",
     "-DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=$nativeModelManagerValue",
     "-DAUDIOCPP_USE_SYSTEM_OPENSSL=$systemOpenSslValue",
+    "-DAUDIOCPP_VERSION=$Version",
     "-U", "AUDIOCPP_BORINGSSL_ARCHIVE",
     "-DAUDIOCPP_MODEL_SET=$ModelSet",
     "-DAUDIOCPP_MODELS=$Models"
@@ -652,3 +659,11 @@ if ($Target -ne "") {
 
 Write-Host "Build jobs: $effectiveJobs"
 Invoke-Checked $cmake $buildArgs
+
+if ($RunTests) {
+    # Unit tests live under ENGINE_BUILD_TESTS; flip ON above, build everything
+    # that the -Target build skipped, then run the registered ctest suite.
+    Invoke-Checked $cmake @("--build", $buildDir, "-j", $effectiveJobs.ToString())
+    $ctest = Join-Path (Split-Path $cmake -Parent) "ctest.exe"
+    Invoke-Checked $ctest @("--test-dir", $buildDir, "--output-on-failure", "-j", $effectiveJobs.ToString())
+}

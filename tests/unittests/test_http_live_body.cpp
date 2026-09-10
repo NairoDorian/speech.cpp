@@ -248,9 +248,10 @@ size_t byte_sum(const std::string & data) {
 }  // namespace
 
 int main() {
+    try {
 #ifdef _WIN32
-    WSADATA wsa;
-    WSAStartup(MAKEWORD(2, 2), &wsa);
+        WSADATA wsa;
+        WSAStartup(MAKEWORD(2, 2), &wsa);
 #endif
     EchoHandler handler;
     // The server default, spelled out rather than pulled from config.h so this test
@@ -442,14 +443,10 @@ int main() {
         require(
             contains(reply, "\"stream\":false"),
             "only the live endpoint may consume an incremental body: " + reply);
-        // Pins pre-existing behaviour rather than endorsing it: the buffered path
-        // sizes the body from Content-Length, which a chunked request does not send,
-        // so it has always yielded an empty body there. Asserted so that a future
-        // change to chunked handling elsewhere is a deliberate one, and to show this
-        // change did not introduce it.
+        // Buffered path buffers chunked request bodies (#479)
         require(
-            contains(reply, "\"buffered\":0"),
-            "chunked bodies on other routes must keep their existing handling: " + reply);
+            contains(reply, "\"buffered\":4"),
+            "chunked bodies on other routes must be buffered: " + reply);
     }
 
     // Limits are resolved per request, not compiled in. The same 2000-byte chunk is
@@ -542,4 +539,8 @@ int main() {
     server.join();
     std::cout << "http_live_body_test: all cases passed\n";
     return 0;
+} catch (const std::exception & ex) {
+    std::cerr << "http_live_body_test failed: " << ex.what() << "\n";
+    return 1;
+}
 }

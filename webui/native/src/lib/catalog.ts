@@ -42,10 +42,14 @@ const specsByFamily = new Map(Object.values(specModules).map((spec) => [spec.fam
 const exposeAllGgufPackageFamilies = new Set([
   'audiosr',
   'controlfoley',
+  'breeze_tts',
+  'cosyvoice3',
   'firered_audio',
   'fireredtts3',
+  'irodori_tts',
   'meanvc2',
-  'midashenglm_gen'
+  'midashenglm_gen',
+  'sanotts'
 ]);
 
 const hanCharacters = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/u;
@@ -116,6 +120,7 @@ function relatedExposeAllGgufPackages(entry: CatalogEntry): PackageEntry[] {
   const family = packages.filter((candidate) =>
     candidate.family === entry.family && candidate.format === 'gguf');
   if (!family.length) return [];
+  if (entry.family === 'sanotts') return family;
   if (!entry.download_id) return family;
   const exact = family.find((candidate) => candidate.id === entry.download_id);
   if (!exact) return relatedPackages(entry);
@@ -134,6 +139,15 @@ function exposedPackageRank(entry: PackageEntry, selectedId?: string): number {
 }
 
 function packageLabel(entry: PackageEntry): string {
+  if (entry.family === 'sanotts') {
+    if (entry.id.includes('_heart_nano_')) return 'Heart Nano';
+    if (entry.id.includes('_heart_')) return 'Heart';
+    if (entry.id.includes('_amy_')) return 'Amy';
+    if (entry.id.includes('_hfc_')) return 'HFC';
+    if (entry.id.includes('_kristin_')) return 'Kristin';
+    if (entry.id.includes('_vi_')) return 'Vietnamese';
+    if (entry.id.includes('_id_')) return 'Indonesian';
+  }
   if (entry.family === 'ace_step') {
     const precision = entry.precision === 'bf16'
       ? 'BF16'
@@ -145,6 +159,7 @@ function packageLabel(entry: PackageEntry): string {
     if (entry.id.includes('_turbo_')) return `GGUF Turbo ${precision}`;
     return `GGUF ${precision}`;
   }
+  if (entry.family === 'irodori_tts' && entry.id.includes('_anime_')) return 'Anime Q8';
   if (entry.format === 'safetensors') return 'Safetensors';
   if (entry.id.includes('int8_dit')) return 'GGUF Q4 ConvRot';
   if (entry.precision === 'q4_k' || entry.precision === 'q4_0') return 'GGUF Q4';

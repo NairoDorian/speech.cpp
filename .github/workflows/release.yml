@@ -58,6 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
     needs: check-release
     if: ${{ needs.check-release.outputs.should_release == 'true' }}
     steps:
@@ -76,7 +77,9 @@ jobs:
             exit 1
           fi
           [[ "$TAG" == v* ]] || TAG="v${TAG}"
+          VERSION="${TAG#v}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
   macos-metal:
     name: macOS (${{ matrix.build }})
@@ -105,6 +108,7 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_RPATH='@loader_path' -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
             -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF \
+            -DAUDIOCPP_VERSION=${{ needs.get-version.outputs.version }} \
             ${{ matrix.defines }} ${{ env.CMAKE_ARGS }}
       - name: Build
         run: cmake --build build --config Release --parallel "$(sysctl -n hw.logicalcpu)" --target ${{ env.BUILD_TARGETS }}
@@ -132,7 +136,9 @@ jobs:
       - name: Configure
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-            -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF ${{ env.CMAKE_ARGS }}
+            -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF \
+            -DAUDIOCPP_VERSION=${{ needs.get-version.outputs.version }} \
+            ${{ env.CMAKE_ARGS }}
       - name: Build
         run: cmake --build build --config Release --parallel "$(nproc)" --target ${{ env.BUILD_TARGETS }}
       - name: Stage bundle
@@ -159,7 +165,9 @@ jobs:
       - name: Configure
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-            -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=ON ${{ env.CMAKE_ARGS }}
+            -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=ON \
+            -DAUDIOCPP_VERSION=${{ needs.get-version.outputs.version }} \
+            ${{ env.CMAKE_ARGS }}
       - name: Build
         run: cmake --build build --config Release --parallel "$(nproc)" --target ${{ env.BUILD_TARGETS }}
       - name: Stage bundle
@@ -184,9 +192,9 @@ jobs:
       - name: Build
         shell: pwsh
         run: |
-          .\scripts\build_windows.ps1 -Preset windows-cpu-release -Target audiocpp_cli -DeploymentBuild -NativeModelManager
-          .\scripts\build_windows.ps1 -Preset windows-cpu-release -Target audiocpp_server -DeploymentBuild -NativeModelManager
-          .\scripts\build_windows.ps1 -Preset windows-cpu-release -Target audiocpp_gguf -DeploymentBuild -NativeModelManager
+          .\scripts\build_windows.ps1 -Preset windows-cpu-release -Target audiocpp_cli -DeploymentBuild -NativeModelManager -Version ${{ needs.get-version.outputs.version }}
+          .\scripts\build_windows.ps1 -Preset windows-cpu-release -Target audiocpp_server -DeploymentBuild -NativeModelManager -Version ${{ needs.get-version.outputs.version }}
+          .\scripts\build_windows.ps1 -Preset windows-cpu-release -Target audiocpp_gguf -DeploymentBuild -NativeModelManager -Version ${{ needs.get-version.outputs.version }}
       - name: Bundle VC runtime
         shell: pwsh
         working-directory: build/windows-cpu-release/bin
@@ -221,6 +229,55 @@ jobs:
           name: speech-${{ needs.get-version.outputs.tag }}-bin-windows-x64-cpu
           path: build/windows-cpu-release/bin/*
 
+  windows-cpu-portable:
+    name: Windows x64 (CPU portable)
+    needs: [check-release, get-version]
+    if: ${{ needs.check-release.outputs.should_release == 'true' }}
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build
+        shell: pwsh
+        run: |
+          .\scripts\build_windows.ps1 -Preset windows-cpu-release -Target audiocpp_cli -DeploymentBuild -NativeModelManager -CpuArch baseline -Llamafile OFF -Version ${{ needs.get-version.outputs.version }}
+          .\scripts\build_windows.ps1 -Preset windows-cpu-release -Target audiocpp_server -DeploymentBuild -NativeModelManager -CpuArch baseline -Llamafile OFF -Version ${{ needs.get-version.outputs.version }}
+          .\scripts\build_windows.ps1 -Preset windows-cpu-release -Target audiocpp_gguf -DeploymentBuild -NativeModelManager -CpuArch baseline -Llamafile OFF -Version ${{ needs.get-version.outputs.version }}
+      - name: Bundle VC runtime
+        shell: pwsh
+        working-directory: build/windows-cpu-release/bin
+        # App-local deployment of the MSVC runtime so the prebuilt binaries run
+        # on clean Windows without a separately installed VC++ Redistributable.
+        # Sizes: vcruntime140* + msvcp140* + vcomp140 ~2 MB (well under 1 MB
+        # compressed), negligible against the CPU/Vulkan/CUDA zip sizes.
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -property installationPath
+          $redist = Get-ChildItem "$vs\VC\Redist\MSVC" -Directory |
+            Sort-Object { try { [version]$_.Name } catch { [version]'0.0' } } -Descending |
+            Select-Object -First 1
+          foreach ($sub in 'x64\Microsoft.VC143.CRT', 'x64\Microsoft.VC143.OPENMP') {
+            $dir = Join-Path $redist.FullName $sub
+            if (Test-Path $dir) {
+              Get-ChildItem "$dir\*.dll" | Where-Object {
+                $_.Name -match '^(vcruntime140|msvcp140|vcomp140)'
+              } | Copy-Item -Destination . -ErrorAction SilentlyContinue
+            }
+          }
+          Get-ChildItem *.dll | Select-Object Name | Out-String | Write-Host
+      - name: Stage bundle
+        shell: pwsh
+        working-directory: build/windows-cpu-release/bin
+        run: |
+          cp ..\..\..\LICENSE . 2>$null
+          Copy-Item -Recurse ..\..\..\tools .\tools -ErrorAction SilentlyContinue
+          Copy-Item -Recurse ..\..\..\model_specs .\model_specs -ErrorAction SilentlyContinue
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audio-${{ needs.get-version.outputs.tag }}-bin-windows-x64-cpu-portable
+          path: build/windows-cpu-release/bin/*
+
   windows-vulkan:
     name: Windows x64 (Vulkan)
     needs: [check-release, get-version]
@@ -240,9 +297,9 @@ jobs:
       - name: Build
         shell: pwsh
         run: |
-          .\scripts\build_windows.ps1 -Preset windows-vulkan-release -Target audiocpp_cli -DeploymentBuild -NativeModelManager
-          .\scripts\build_windows.ps1 -Preset windows-vulkan-release -Target audiocpp_server -DeploymentBuild -NativeModelManager
-          .\scripts\build_windows.ps1 -Preset windows-vulkan-release -Target audiocpp_gguf -DeploymentBuild -NativeModelManager
+          .\scripts\build_windows.ps1 -Preset windows-vulkan-release -Target audiocpp_cli -DeploymentBuild -NativeModelManager -Version ${{ needs.get-version.outputs.version }}
+          .\scripts\build_windows.ps1 -Preset windows-vulkan-release -Target audiocpp_server -DeploymentBuild -NativeModelManager -Version ${{ needs.get-version.outputs.version }}
+          .\scripts\build_windows.ps1 -Preset windows-vulkan-release -Target audiocpp_gguf -DeploymentBuild -NativeModelManager -Version ${{ needs.get-version.outputs.version }}
       - name: Bundle VC runtime
         shell: pwsh
         working-directory: build/windows-vulkan-release/bin
@@ -324,6 +381,7 @@ jobs:
             -DENGINE_ENABLE_LLAMAFILE=ON -DENGINE_ENABLE_NATIVE_CPU=ON -DENGINE_BUILD_TESTS=OFF ^
             -DENGINE_ENABLE_CPU_ALL_VARIANTS=ON ^
             "-DCMAKE_CUDA_ARCHITECTURES=${{ matrix.cuda_archs }}" ^
+            -DAUDIOCPP_VERSION=${{ needs.get-version.outputs.version }} ^
             -DAUDIOCPP_DEPLOYMENT_BUILD=ON -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON -DCUDAToolkit_ROOT="%CUDA_PATH%"
           cmake --build build --config Release -j %NUMBER_OF_PROCESSORS% --target ${{ env.BUILD_TARGETS }}
       - name: Bundle CUDA runtime
@@ -402,6 +460,7 @@ jobs:
       - linux-cpu
       - linux-vulkan
       - windows-cpu
+      - windows-cpu-portable
       - windows-vulkan
       - windows-cuda
     if: ${{ needs.check-release.outputs.should_release == 'true' && (github.ref_type == 'tag' || inputs.publish) }}

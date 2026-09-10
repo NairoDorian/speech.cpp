@@ -1,6 +1,6 @@
 # Progress — Unified_Audio.cpp (speech.cpp ggml fork) merge & improve
 
-Status snapshot: **Upstream audio.cpp main fully merged and synchronized at `6d530f4` — 88 ahead, 0 behind (35 commits merged from upstream 0.7 baseline). Phase 1 Allocator Hardening applied. Phase 2 Toolchain Modernization & Build Provenance landed. Phase 3 Native Long-Form VAD Chunk Planning & Public C ABI integrated. Phase 4 Process-Wide SharedWeightRegistry, Sortformer v2 Diarization package, Batched Offline ASR Decoders (Qwen3-ASR, Voxtral Realtime, Citrinet, VibeVoice, Higgs Audio), and universal audiocpp C ABI subsystem + progress callbacks fully implemented and verified. **ggml bumped to `36da5713` (v0.22.0)** to match parent transcribe.cpp, with the 7-patch stack rebased and reproducibility certified. **Phase 11 W1b closed: native engine Moonshine-Streaming reproduces the arch baseline exactly (streamed 4.348% == offline 4.348%, divergence 0).** **Phase 10.5: families 1–2 retired; family 3 (`sortformer_diar`) feature-merged 2026-08-27 — the chunked AOSC/FIFO scheduler, presets and typed ext live in the engine, and the catalogue's default (NeMo-layout) v2 package opens for the first time in this repo; retirement (step 3) next.** CPU core suite **112/112**; CUDA suite 57/57 green. Master architectural blueprint established in [FUSION_ROADMAP_PLAN.md](FUSION_ROADMAP_PLAN.md).** Date: 2026-08-28
+Status snapshot: **Upstream audio.cpp main fully merged and synchronized at `fa5aaac9` — 0 behind (91 commits merged from upstream audio.cpp baseline). All conflicts cleanly resolved across external/ggml (vulkan shaders generator, ggml-vulkan, ggml.c, ggml-cpu ops), CMakeLists.txt (preserving dual parentage transcribe/audio versions, test link gates), README.md, and model specifications. ggml pinned invariant `36da5713` (v0.22.0) preserved with patches. MSVC `/utf-8` compile option enabled. 100% CTest test suite pass rate (104 passed, 2 clean fixture skips, 0 failed out of 106 tests on `build-cpu-core`).** Date: 2026-09-10
 
 ## Repo layout (important, non-obvious)
 `Unified_Audio.cpp/` is a **plain container directory with no git repo of its
@@ -48,7 +48,19 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | **Phase 10.5, family 3 of 5: `sortformer_diar` step 2 (feature-merge)** | **Done 2026-08-27** — chunked AOSC/FIFO scheduler + presets + typed RUN ext in the engine; the catalogue's default (NeMo-layout) v2 package opens in the engine (neither parent could); chunked == whole-window to 1.8e-7; 0/600 decision flips vs the arch on identical weights; **111/111** core, C-ABI ext gate OK. Report: `docs/reports/sortformer_diar_engine_port.md` | 100% |
 | **Next increment** | **Phase 10.5, family 3 of 5: `sortformer_diar`, step 3 (retirement)** — retire the *standalone* family from the transcribe dispatcher (drop `sortformer::arch` from `transcribe-arch.cpp`, which routes the v2 package to the engine through the C ABI; delete the standalone hooks + offline dump forward from `arch/sortformer/model.cpp`; move `transcribe_sortformer_stream_ext_init` to `transcribe-family-ext.cpp`; re-point `sortformer_diar_ext_abi_test` at v2; delete the never-run `sortformer_stream_ext_unit.cpp`; ledger B15). The embedded-diarizer core stays: the parakeet multitalker arch includes it and parakeet's arch is canonical. Then `sense_asr`, `fun_asr_nano`; then 11a | Ready |
 
-## DONE this session (plan R12 records all of it)
+## DONE this session
+
+### Upstream audio.cpp reconciliation — `fa5aaac9`, 0 behind (2026-09-10)
+Synchronized 91 commits from upstream `0xShug0/audio.cpp:main` (from baseline `6d530f4` up to `fa5aaac9`).
+- **Conflict Resolution**:
+  - `external/ggml/`: Kept pinned invariant `36da5713` (v0.22.0) matching `transcribe.cpp`. Reconciled `vulkan-shaders-gen.cpp`, `ggml-vulkan.cpp` (cleanly adding BF16 round op & copy pipelines), `ggml.c` (MSVC C2371 fix for `ggml_calc_conv_output_size`), and `ggml-cpu/ops.cpp` (`ggml_i8_s_quantize_range`/`requantize`).
+  - `CMakeLists.txt`: Integrated upstream 3-tier test structure (`ENGINE_BUILD_TESTS`, `ENGINE_BUILD_EXTENDED_TESTS`, `ENGINE_BUILD_MODEL_TESTS`), preserved dual parentage (`TRANSCRIBE_VERSION` + `AUDIOCPP_VERSION`), preserved Phase 10.5/11 test additions, and added MSVC `/utf-8` compile option.
+  - `README.md`: Integrated 0.7.2 upstream notes, community models (`sanotts`, `sopro_tts`, `soprano_tts`, `vibeasr`, `voxcpm1`), and binary distribution table while preserving `speech.cpp` dual-parentage notices.
+  - `include/engine/framework/model_spec/schema.h` & `src/framework/model_spec/schema.cpp`: Aligned `kModelSpecSchemaVersion = 1` matching upstream and all catalog model specs.
+  - `tests/unittests/test_http_live_body.cpp`: Updated test expectation for chunked uploads on non-live routes to `buffered: 4` reflecting commit `9c2f238a3b58` ("Buffer chunked HTTP uploads (#479)").
+- **Verification**:
+  - Built Release mode on MSVC x64: 573/573 targets cleanly built.
+  - CTest test suite: 106 tests total, 104 Passed, 2 Skipped (expected fixture skips), 0 Failed (100% pass rate).
 
 ### 0. Upstream audio.cpp reconciliation — `c79e588`, now 0 behind (2026-08-26)
 

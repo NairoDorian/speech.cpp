@@ -3,8 +3,10 @@
 | Model | Family | Task(s) | Quick Start |
 |---|---|---|---|
 | Qwen3 TTS | `qwen3_tts` | `tts`, `vdes` | [Qwen3 TTS](#qwen3-tts) |
+| BreezeTTS 2 | `breeze_tts` | `tts`, `clon` | [BreezeTTS 2](models/breeze_tts.md) |
 | Chatterbox | `chatterbox` | `clon`, `vc` | [Chatterbox](#chatterbox) |
 | Confucius4-TTS | `confucius4_tts` | `clon` | [Confucius4-TTS](#confucius4-tts) |
+| CosyVoice3 | `cosyvoice3` | `tts`, `clon` | [CosyVoice3](models/cosyvoice3.md) |
 | DramaBox | `dramabox` | `tts`, `clon` | [DramaBox](#dramabox) |
 | DotTTS | `dots_tts` | `tts`, `clon` | [DotTTS](#dottts) |
 | F5-TTS | `f5_tts` | `tts`, `clon` | [F5-TTS](community_models/f5_tts.md) |
@@ -17,6 +19,7 @@
 | NeuTTS | `neutts` | `tts` | [NeuTTS](#neutts) |
 | OmniVoice | `omnivoice` | `tts` | [OmniVoice](#omnivoice), [full guide](models/omnivoice.md) |
 | PocketTTS | `pocket_tts` | `tts` | [PocketTTS](#pockettts) |
+| VoxCPM1 | `voxcpm1` | `tts` | [VoxCPM1](#voxcpm1) |
 | VoxCPM2 | `voxcpm2` | `tts`, `vdes` | [VoxCPM2](#voxcpm2) |
 | Higgs Audio v3 TTS | `higgs_audio_tts` | `tts` | [Higgs Audio v3 TTS](#higgs-audio-v3-tts) |
 | Fish Audio S2 Pro | `fish_audio` | `tts` | [Fish Audio S2 Pro](#fish-audio-s2-pro) |
@@ -28,6 +31,7 @@
 | GLM-TTS | `glm_tts` | `tts`, `clon` | [GLM-TTS](#glm-tts) |
 | Inflect Micro v2 | `inflect_v2` | `tts` | [Inflect v2](#inflect-v2) |
 | OuteTTS | `outetts` | `tts`, `clon` | [OuteTTS](#outetts) |
+| sanoTTS voice family | `sanotts` | `tts` | [sanoTTS](#sanotts) |
 | Supertonic | `supertonic` | `tts` | [Supertonic](#supertonic) |
 | VieNeu-TTS | `vietneu_tts` | `tts`, `clon` | [VieNeu-TTS](community_models/vietneu_tts.md) |
 | VibeVoice | `vibevoice` | `tts` | [VibeVoice](#vibevoice) |
@@ -98,6 +102,52 @@ audiocpp_cli --task vc --family chatterbox --model models/chatterbox --backend c
 | `--repetition-penalty` | float | `2.0` | T3 repetition penalty. |
 | `--max-tokens` | integer | `1000` | Maximum generated T3 tokens per chunk. |
 | `--do-sample` | `true`, `false` | `true` | Enable stochastic T3 sampling. |
+
+## Chatterbox Turbo
+
+Chatterbox Turbo is a [community model](community_models/chatterbox_turbo.md): Resemble AI's
+distilled 350M-parameter sibling of Chatterbox, with a GPT2-style T3 backbone (vs. the base
+model's 0.5B Llama-style backbone), a GPT2 BPE tokenizer with 19 built-in emotion/style tags
+(`[laugh]`, `[sigh]`, ...), and a 2-step meanflow-distilled S3Gen decoder (vs. the base model's
+10-step CFG decoder) for substantially faster built-in-voice TTS. It is English-only.
+
+`chatterbox_turbo` is a separate model family from `chatterbox` (not a variant selectable within
+it): its T3 backbone and tokenizer differ from the base model's, and it reuses base Chatterbox's
+own S3Gen/HiFT-vocoder loader code for the flow decoder and vocoder half.
+
+The package is one self-contained, audio.cpp-native GGUF produced by repacking Resemble AI's
+weights (via the third-party `cstr/chatterbox-turbo-GGUF` conversion published for the CrispASR
+project, MIT-relicensed) with
+[`tools/community_models/chatterbox_turbo/repack_chatterbox_turbo_gguf.py`](../tools/community_models/chatterbox_turbo/repack_chatterbox_turbo_gguf.py)
+— see that model's community doc for details.
+
+**Current limitations:** only the built-in default voice baked into the package is supported.
+Custom voice cloning is not supported; `--voice-ref` is rejected with an explicit error rather
+than silently ignored.
+
+| Field | Value |
+|---|---|
+| Family | `chatterbox_turbo` |
+| Model directory | `Chatterbox-Turbo-GGUF/chatterbox-turbo-{q8_0,f16}.gguf` (single self-contained file) |
+| Tasks | `tts` |
+| Modes | `offline` |
+| Languages | `en` |
+| Voice input | Not supported — omit `--voice-ref` to use the built-in voice |
+| Built-in voices | One, embedded in the package |
+
+```bash
+audiocpp_cli --task tts --family chatterbox_turbo --model models/Chatterbox-Turbo-GGUF/chatterbox-turbo-q8_0.gguf --backend cuda --text "Hello from Chatterbox Turbo." --out out.wav
+```
+
+| Option | Values | Default | Meaning |
+|---|---|---:|---|
+| `--temperature` | float | `0.8` | T3 sampling temperature. |
+| `--top-p` | float | `0.95` | T3 nucleus sampling limit. |
+| `top_k` (session option) | integer | `1000` | T3 top-k sampling limit. |
+| `--repetition-penalty` | float | `1.2` | T3 repetition penalty. |
+| `--max-tokens` | integer | `1000` | Maximum generated T3 tokens. |
+
+`--guidance-scale`/exaggeration/min_p have no effect on Turbo (it was distilled without CFG) and are accepted but ignored, matching upstream's own behavior.
 
 ## Confucius4-TTS
 
@@ -427,6 +477,49 @@ audiocpp_cli --task tts --family pocket_tts --model models/pocket-tts --backend 
 | `--text-chunk-size` | integer chars | `256` | Long-form chunk size. |
 | `--session-option pocket_tts.voice_state_cache_slots=<n>` | integer slots | `4` | Prepared voice-state cache slots; set `0` to disable reuse. |
 
+## VoxCPM1
+
+VoxCPM1 supports offline and streaming TTS plus short-reference voice cloning. It reuses the VoxCPM2 runtime tree with a GGUF tensor-adaptation layer that understands the OpenBMB folded AudioVAE weights. The registered package is the 16 kHz 0.5B model; the runtime is size-agnostic, so a different VoxCPM1 GGUF can still be loaded via an explicit `--model <path>`.
+
+| Field | Value |
+|---|---|
+| Family | `voxcpm1` |
+| Model directory | `models/VoxCPM1-GGUF` (0.5B) |
+| Task | `tts` |
+| Modes | `offline`, `streaming` |
+| Languages | Model auto-handles supported languages |
+| Voice input | Optional reference WAV; optional transcript through `--reference-text` |
+| Built-in voices | Not exposed |
+
+Text to speech:
+
+```bash
+audiocpp_cli --task tts --family voxcpm1 --model models/VoxCPM1-GGUF/voxcpm-0.5b-q8_0-audiovae-f16.gguf --backend cpu --text "Hello from VoxCPM1." --out out.wav
+```
+
+Voice clone:
+
+```bash
+audiocpp_cli --task tts --family voxcpm1 --model models/VoxCPM1-GGUF/voxcpm-0.5b-q8_0-audiovae-f16.gguf --backend cpu --text "Hello from VoxCPM1." --voice-ref assets/resources/b.wav --out out.wav
+```
+
+Streaming output:
+
+```bash
+audiocpp_cli --task tts --family voxcpm1 --model models/VoxCPM1-GGUF/voxcpm-0.5b-q8_0-audiovae-f16.gguf --backend cpu --mode streaming --text "Hello from VoxCPM1." --request-option retry_badcase=false --out out.wav
+```
+
+| Option | Values | Default | Meaning |
+|---|---:|---:|---|
+| `--voice-ref` | WAV path | not set | Reference speaker audio. |
+| `--reference-text` | text | empty string | Transcript for the reference audio (clone prompting). |
+| `--mode` | `offline`, `streaming` | `offline` | Full-output or streaming run mode; streaming requires `retry_badcase=false`. |
+| `--session-option voxcpm1.mem_saver=true\|false` | bool | `false` | Use tighter graph workspaces and release MiniCPM/AudioVAE request graphs after completion to reduce resident VRAM. |
+| `--session-option voxcpm1.prompt_cache_slots=<n>` | integer | `1` | Prompt and prompt-audio embedding cache slots. Set to `0` to disable prompt caching. |
+| `--max-tokens` | integer | `4096` | Maximum generated AR tokens. |
+| `--num-inference-steps` | integer | `10` | Flow matching steps. |
+| `--guidance-scale` | float | `2.0` | CFG strength. |
+
 ## VoxCPM2
 
 VoxCPM2 supports plain TTS, voice design, controllable voice cloning, and an ultimate-clone style that uses both prompt audio and transcript. The CLI expresses voice design with the same text convention as the upstream examples: put the voice/style description in parentheses at the start of `--text`.
@@ -475,6 +568,7 @@ audiocpp_cli --task tts --family voxcpm2 --model models/VoxCPM2 --backend cuda -
 | `--session-option voxcpm2.prompt_cache_slots=<n>` | integer | `1` | Prompt and prompt-audio embedding cache slots. Set to `0` to disable prompt caching. |
 | `--text-chunk-size` | integer chars | `2048` | Long-form chunk size. |
 | `--text-chunk-mode` | `default`, `tag_aware`, `japanese`, `endline` | `tag_aware` | Long-form chunking mode; keeps style/tag controls attached to chunks by default. |
+| `--request-option voxcpm2.chunk_strategy=continuation\|stateless` | enum | `continuation` | Long-form chunk generation strategy. `stateless` synthesizes each text chunk from the same original prompt/reference and concatenates the audio; use it for plain text/reference-clone long-form input, not voice/emotion tag carry-over. |
 | `--max-tokens` | integer | `4096` | Maximum generated AR tokens. |
 | `--num-inference-steps` | integer | `10` | Flow matching steps. |
 | `--guidance-scale` | float | `2.0` | CFG strength. |
@@ -513,6 +607,7 @@ python3 tools/model_manager_v2.py install --models-root models higgs_audio_tts_4
 | `--top-k` | integer | `30` | AR top-k sampling limit. The narrower default is less prone to premature EOC than the Python client's `50`. |
 | `--top-p` | float | `0.8` | AR nucleus sampling limit. The Python client's unfiltered equivalent is `1.0`. |
 | `--repetition-penalty` | float | `1.1` | Accepted for Python API compatibility; Higgs audio-code sampling does not consume it. |
+| `--session-option higgs_audio_tts.attention=<mode>` | `auto`, `flash`, `eager` | `auto` | Attention kernel. `auto` uses flash except on Volta/Turing GPUs (e.g. V100), where it falls back to eager to avoid missing MMA kernels. |
 
 ## Fish Audio S2 Pro
 
@@ -677,6 +772,29 @@ audiocpp_cli --task tts --family inflect_v2 \
 See the [Inflect v2 community model guide](community_models/inflect_v2.md) for
 eSpeak-ng paths, long-form behavior, source/conversion instructions, and
 limitations.
+
+## sanoTTS
+
+sanoTTS is a family of very small offline TTS voices (English, Vietnamese,
+Indonesian, Czech, German, Spanish, French, Italian, Portuguese, Romanian,
+Russian, Turkish, Nepali and Hindi; 294k to 2.27M parameters) with native GGML
+runtimes; the
+smallest voice also runs on microcontrollers. The GGUF packages are
+standalone and download from Hugging Face. sanoTTS requires an external
+eSpeak-ng installation:
+
+```bash
+python3 tools/model_manager_v2.py install sanotts_heart_nano_orig --models-root models
+
+audiocpp_cli --task tts --family sanotts \
+  --model models/sanoTTS-heart-nano-GGUF --backend cpu \
+  --text "Hello from sano T T S, a very small neural text to speech model." \
+  --request-option speaking_rate=1.0 \
+  --out sanotts.wav
+```
+
+See the [sanoTTS community model guide](community_models/sanotts.md) for
+eSpeak-ng paths, seed semantics, parity evidence, and performance numbers.
 
 ## Supertonic
 

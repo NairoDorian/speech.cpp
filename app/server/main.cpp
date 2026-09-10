@@ -2,6 +2,8 @@
 #include "http.h"
 #include "runtime.h"
 
+#include "../common/build_info.h"
+
 #include "engine/framework/core/backend.h"
 #include "engine/framework/debug/trace.h"
 
@@ -66,10 +68,13 @@ void print_help() {
         << "                [--model-spec-override <json-or-directory>] [--voice-dir <directory>]\n"
         << "                [--log] [--log-file <path>]\n"
         << "                [--cors-origins <origins>]\n"
+        << "  --version                        print build version, commit, compiler, platform, and enabled backends\n"
         << "  --ui                             serve the embedded WebUI\n"
         << "  --no-ui                          disable the embedded WebUI\n"
         << "  --ui-management                  allow WebUI model management and downloads; requires\n"
         << "                                   AUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON at build time\n"
+        << "  --host <ip>                      server bind address; default 127.0.0.1\n"
+        << "  --port <port>                    server listening port; default 8080\n"
         << "  --backend cpu|cuda|hip|rocm|vulkan|metal  default cuda (rocm is an alias for hip)\n"
         << "  --list-devices                   list available backend devices and exit\n"
         << "  --busy-timeout-ms <ms>           fail a request with 503 when the model has been\n"
@@ -109,6 +114,8 @@ void print_help() {
         << "       raw PCM in a chunked body, speech audio deltas as SSE on the same connection\n"
         << "  POST /v1/audio/transcriptions\n"
         << "       fields: file, model, language, prompt, stream\n"
+        << "  POST /v1/audio/alignments\n"
+        << "       fields: file, model, text, language\n"
         << "       OpenAI-style streaming: speech stream_format=sse|audio, transcription stream=true\n"
         << "  POST /v1/audio/transcriptions/live?model=<id>\n"
         << "       raw PCM in a chunked body, transcript deltas as SSE on the same connection\n"
@@ -121,6 +128,10 @@ int main(int argc, char ** argv) {
     try {
         if (has_arg(argc, argv, "--list-devices")) {
             engine::core::print_backend_devices(std::cout);
+            return 0;
+        }
+        if (has_arg(argc, argv, "--version")) {
+            minitts::app::print_build_info(std::cout);
             return 0;
         }
         if (has_arg(argc, argv, "--help") || has_arg(argc, argv, "-h")) {

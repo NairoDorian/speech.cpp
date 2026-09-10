@@ -4624,7 +4624,7 @@ void ggml_backend_cuda_trim_pools(ggml_backend_t backend) {
     }
 }
 
-void ggml_backend_cuda_clear_graph(ggml_backend_t backend, const ggml_cgraph * graph) {
+void ggml_backend_cuda_clear_graph(ggml_backend_t backend, const struct ggml_cgraph * graph) {
 #ifdef USE_CUDA_GRAPH
     if (!ggml_backend_is_cuda(backend) || graph == nullptr || graph->n_nodes <= 0) {
         return;
@@ -4636,6 +4636,22 @@ void ggml_backend_cuda_clear_graph(ggml_backend_t backend, const ggml_cgraph * g
     GGML_UNUSED(backend);
     GGML_UNUSED(graph);
 #endif
+}
+
+void ggml_backend_cuda_set_stream_priority(ggml_backend_t backend, int priority) {
+    if (!ggml_backend_is_cuda(backend)) {
+        return;
+    }
+    ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
+    cuda_ctx->stream_priority = priority;
+}
+
+void * ggml_backend_cuda_get_stream(ggml_backend_t backend) {
+    if (!ggml_backend_is_cuda(backend)) {
+        return nullptr;
+    }
+    ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
+    return (void *) cuda_ctx->stream();
 }
 
 int ggml_backend_cuda_get_device_count() {
@@ -5541,6 +5557,12 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     }
     if (strcmp(name, "ggml_backend_cuda_trim_pools") == 0) {
         return (void *)ggml_backend_cuda_trim_pools;
+    }
+    if (strcmp(name, "ggml_backend_cuda_set_stream_priority") == 0) {
+        return (void *)ggml_backend_cuda_set_stream_priority;
+    }
+    if (strcmp(name, "ggml_backend_cuda_get_stream") == 0) {
+        return (void *)ggml_backend_cuda_get_stream;
     }
     return nullptr;
 }
