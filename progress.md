@@ -1,6 +1,6 @@
 # Progress — Unified_Audio.cpp (speech.cpp ggml fork) merge & improve
 
-Status snapshot: **Upstream audio.cpp main fully merged and synchronized at `fa5aaac9` — 0 behind (91 commits merged from upstream audio.cpp baseline). All conflicts cleanly resolved across external/ggml (vulkan shaders generator, ggml-vulkan, ggml.c, ggml-cpu ops), CMakeLists.txt (preserving dual parentage transcribe/audio versions, test link gates), README.md, and model specifications. ggml pinned invariant `36da5713` (v0.22.0) preserved with patches. MSVC `/utf-8` compile option enabled. 100% CTest test suite pass rate (104 passed, 2 clean fixture skips, 0 failed out of 106 tests on `build-cpu-core`).** Date: 2026-09-10
+Status snapshot: **Upstream audio.cpp main fully merged and synchronized at `78d47706` — 0 behind (8 commits merged from baseline `3174e6b2`). All conflicts cleanly resolved across README.md (preserving speech.cpp FUSION Roadmap blueprint notice and WebUI text), CMakeLists.txt (defining audiocpp_test_link_model_objects for sortformer_v2 unittests under AUDIOCPP_MODEL_SET=core), and external/ggml (vulkan fill 2D dispatch). Pinned ggml v0.22.0 (36da5713) preserved. 100% CTest test suite pass rate (108 passed, 2 clean fixture skips, 0 failed out of 110 tests on `build-cpu-core`).** Date: 2026-09-11
 
 ## Repo layout (important, non-obvious)
 `Unified_Audio.cpp/` is a **plain container directory with no git repo of its
@@ -43,12 +43,31 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | ABI offline + streaming surface | Verified, real CTest gates | 100% |
 | End-to-end ASR **offline text** (WER gate) | Done — 1.45% corpus WER (arch path); engine path now also 1/69 edits | 100% |
 | **End-to-end ASR streaming text** | **Done — streamed 4.35% == offline 4.35%, divergence 0** | **100%** |
-| Test suite status | **111/111 total (107 passed, 4 clean skips on unpinned weights) 100% green** on `build-cpu-core`; custom C-ABI tree (`qwen3_asr,voxtral_realtime,sortformer_diar`) gates green | **100%** |
-| **Completed increment** | **Upstream `c79e588` (0 behind), ggml 0.22.0 (CPU+CUDA certified), Phase 11 W1a + W1b + W2a** | **DONE** |
+| Test suite status | **110/110 total (108 passed, 2 clean skips on unpinned weights) 100% green** on `build-cpu-core`; custom C-ABI tree (`qwen3_asr,voxtral_realtime,sortformer_diar`) gates green | **100%** |
+| **Completed increment** | **Upstream `78d47706` (0 behind), ggml 0.22.0 (CPU+CUDA certified), Phase 11 W1a + W1b + W2a** | **DONE** |
 | **Phase 10.5, family 3 of 5: `sortformer_diar` step 2 (feature-merge)** | **Done 2026-08-27** — chunked AOSC/FIFO scheduler + presets + typed RUN ext in the engine; the catalogue's default (NeMo-layout) v2 package opens in the engine (neither parent could); chunked == whole-window to 1.8e-7; 0/600 decision flips vs the arch on identical weights; **111/111** core, C-ABI ext gate OK. Report: `docs/reports/sortformer_diar_engine_port.md` | 100% |
 | **Next increment** | **Phase 10.5, family 3 of 5: `sortformer_diar`, step 3 (retirement)** — retire the *standalone* family from the transcribe dispatcher (drop `sortformer::arch` from `transcribe-arch.cpp`, which routes the v2 package to the engine through the C ABI; delete the standalone hooks + offline dump forward from `arch/sortformer/model.cpp`; move `transcribe_sortformer_stream_ext_init` to `transcribe-family-ext.cpp`; re-point `sortformer_diar_ext_abi_test` at v2; delete the never-run `sortformer_stream_ext_unit.cpp`; ledger B15). The embedded-diarizer core stays: the parakeet multitalker arch includes it and parakeet's arch is canonical. Then `sense_asr`, `fun_asr_nano`; then 11a | Ready |
 
 ## DONE this session
+
+### Upstream audio.cpp reconciliation — `78d47706`, 0 behind (2026-09-11)
+Synchronized 8 commits from upstream `0xShug0/audio.cpp:main` (from baseline `3174e6b2` up to `78d47706`).
+- **Commit Ledger**:
+  - `014bd372`: Added Colab WebUI notebook (`Notebooks/colab_audio_cpp.ipynb`) and release workflow for CUDA T4 prebuilts. Added Colab badge under `## WebUI` in `README.md`.
+  - `4a2c403c`: Updated `README.md` latest model news (Yue2 3B song generation dev testing; consolidated VibeVoice ASR Streaming 7B and Irodori-TTS v4.1 Anime announcement).
+  - `183b0c98` & `efb04233`: Integrated NVIDIA Sortformer v2.1 streaming diarization community model (`sortformer_diar_v2`) under `src/community_models/sortformer_diar/`, `include/engine/community_models/sortformer_diar/`, `model_specs/sortformer_diar_v2.json`, and converter `tools/community_models/convert_sortformer_v2_1.py`. Completely non-conflicting with native engine `src/models/sortformer_diar/`.
+  - `cd2fe109`: Fixed warmbench `voxtral_realtime` streaming flag resolution by reading from `warmup_case.get("streaming", False)`.
+  - `43833e87`: Applied Vulkan fill dispatch fix in `external/ggml/src/ggml-vulkan/ggml-vulkan.cpp` and `fill.comp` splitting task distribution into a 2D grid to respect `maxComputeWorkGroupCount`. Fully compatible with pinned ggml `36da5713` (v0.22.0).
+  - `eb1a569a`: Added shared eSpeak-ng phonemizer (`src/framework/audio/espeak_*`), data packing/caching, CMake static eSpeak option, updated `sanotts` and `inflect_v2` frontends, and added unit tests (`espeak_data_test`, `espeak_phonemizer_test`, `espeak_frontend_probe`).
+  - `78d47706`: Kept Fish Audio Fast-AR inputs on HIP stream (`src/models/fish_audio/ar.cpp`, `hip_fast_sampler.*`).
+- **Conflict & Build Resolution**:
+  - `README.md`: Reconciled news header and WebUI sections preserving `speech.cpp`'s FUSION Roadmap blueprint alert and custom embedded WebUI documentation.
+  - `CMakeLists.txt`: Moved `audiocpp_test_link_model_objects` higher up so `sortformer_v2_aosc_test` and `sortformer_v2_schedule_test` link `engine_model_sortformer_diar_v2` objects cleanly even when `AUDIOCPP_MODEL_SET=core`.
+- **Verification**:
+  - MSVC x64 Release build clean (290 targets).
+  - CTest suite: 110 tests total, 108 Passed, 2 Skipped (expected fixture skips), 0 Failed (100% pass rate).
+  - New tests verified individually: `sortformer_v2_aosc_test` (PASS), `sortformer_v2_schedule_test` (PASS), `espeak_data_test` (PASS), `espeak_phonemizer_test` (PASS).
+  - `git rev-list --left-right --count HEAD...upstream/main` reads `92 0` (0 behind).
 
 ### Upstream audio.cpp reconciliation — `fa5aaac9`, 0 behind (2026-09-10)
 Synchronized 91 commits from upstream `0xShug0/audio.cpp:main` (from baseline `6d530f4` up to `fa5aaac9`).
