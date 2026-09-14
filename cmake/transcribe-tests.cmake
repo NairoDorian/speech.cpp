@@ -89,11 +89,13 @@ if (SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES)
     endif()
 
     # test_batch_dispatch links audiocpp, transcribe, engine_runtime
+    # capi/include precedes include/ so "audiocpp.h" resolves to the Universal
+    # C ABI header; upstream's include/audiocpp.h facade (opt-in) must not shadow it.
     add_executable(test_batch_dispatch tests/unittests/test_batch_dispatch.cpp)
     target_include_directories(test_batch_dispatch PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/capi/include
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe
-        ${CMAKE_CURRENT_SOURCE_DIR}/capi/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/src/runtime
     )
