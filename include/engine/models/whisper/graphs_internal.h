@@ -30,6 +30,7 @@
 // Internal graph-layer header for the native Whisper engine package. Not part
 // of any installed public API surface.
 
+#include "engine/framework/asr/enc_dec_kv_cache.h"
 #include "ggml-backend.h"
 #include "ggml.h"
 
@@ -39,6 +40,10 @@
 
 struct ggml_context;
 struct ggml_cgraph;
+
+namespace engine::asr {
+struct EncDecKVCache;
+}
 
 namespace engine::models::whisper {
 
@@ -187,31 +192,12 @@ struct WhisperWeights {
 };
 
 // ---------------------------------------------------------------------------
-// KV cache: self over [d_model, n_ctx] per layer (grows per decode step),
-// cross over [d_model, T_enc] per layer (precomputed once per window).
+// KV cache: shared EncDecKVCache (B30 migration). The per-family struct
+// was byte-for-byte identical; now aliased to the shared type in
+// engine/framework/asr/enc_dec_kv_cache.h.
 // ---------------------------------------------------------------------------
 
-struct WhisperKvCache {
-  ggml_tensor *self_k = nullptr;
-  ggml_tensor *self_v = nullptr;
-  ggml_tensor *cross_k = nullptr;
-  ggml_tensor *cross_v = nullptr;
-
-  ggml_context *ctx = nullptr;
-  ggml_backend_buffer_t buffer = nullptr;
-
-  int n_ctx = 0;
-  int n = 0;
-  int head = 0;
-  int T_enc = 0;
-
-  bool cross_populated = false;
-
-  void free();
-};
-
-bool kv_cache_init(WhisperKvCache &cache, ggml_backend_t backend, int n_ctx,
-                   int T_enc, int d_model, int n_layer, ggml_type kv_type);
+using WhisperKvCache = engine::asr::EncDecKVCache;
 
 // ---------------------------------------------------------------------------
 // Graph builders

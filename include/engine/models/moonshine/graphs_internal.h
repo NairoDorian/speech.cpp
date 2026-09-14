@@ -23,6 +23,7 @@
 // Internal graph-layer header for the native Moonshine engine package.
 // Not part of any installed public API surface.
 
+#include "engine/framework/asr/enc_dec_kv_cache.h"
 #include "ggml-backend.h"
 #include "ggml.h"
 
@@ -32,6 +33,10 @@
 
 struct ggml_context;
 struct ggml_cgraph;
+
+namespace engine::asr {
+struct EncDecKVCache;
+}
 
 namespace engine::models::moonshine {
 
@@ -182,32 +187,12 @@ struct MoonshineWeights {
 };
 
 // ---------------------------------------------------------------------------
-// KV cache: dual slab layout shared with the arch implementation -
-//   self_k/self_v   [d_model, n_ctx] per layer (grows per decode step)
-//   cross_k/cross_v [d_model, T_enc] per layer (precomputed once)
+// KV cache: shared EncDecKVCache (B30 migration). The per-family struct
+// was byte-for-byte identical; now aliased to the shared type in
+// engine/framework/asr/enc_dec_kv_cache.h.
 // ---------------------------------------------------------------------------
 
-struct MoonshineKvCache {
-  ggml_tensor *self_k = nullptr;
-  ggml_tensor *self_v = nullptr;
-  ggml_tensor *cross_k = nullptr;
-  ggml_tensor *cross_v = nullptr;
-
-  ggml_context *ctx = nullptr;
-  ggml_backend_buffer_t buffer = nullptr;
-
-  int n_ctx = 0;
-  int n = 0;
-  int head = 0;
-  int T_enc = 0;
-
-  bool cross_populated = false;
-
-  void free();
-};
-
-bool kv_cache_init(MoonshineKvCache &cache, ggml_backend_t backend, int n_ctx,
-                   int T_enc, int d_model, int n_layer, ggml_type kv_type);
+using MoonshineKvCache = engine::asr::EncDecKVCache;
 
 // ---------------------------------------------------------------------------
 // Graph builders

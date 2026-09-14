@@ -371,7 +371,7 @@ MoonshineRuntime::transcribe(const runtime::AudioBuffer &audio,
       const int n_ctx = hp.dec_max_position_embeddings > 0
                             ? hp.dec_max_position_embeddings
                             : 512;
-      if (!kv_cache_init(kv_cache_, backend_, n_ctx, enc_T_, hp.dec_d_model,
+      if (!engine::asr::kv_cache_init(kv_cache_, backend_, n_ctx, enc_T_, hp.dec_d_model,
                          hp.dec_n_layers, GGML_TYPE_F32)) {
         throw std::runtime_error(std::string(kTag) +
                                  ": KV cache allocation failed");

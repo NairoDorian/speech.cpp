@@ -605,7 +605,7 @@ void MoonshineStreamingRuntime::ensure_kv_cache_for_T(int T_enc) {
   if (kv_cache_.buffer == nullptr) {
     const int n_ctx =
         hp.dec_max_position_embeddings > 0 ? hp.dec_max_position_embeddings : 512;
-    if (!kv_cache_init(kv_cache_, backend_, n_ctx, T_enc, hp.dec_d_model,
+    if (!engine::asr::kv_cache_init(kv_cache_, backend_, n_ctx, T_enc, hp.dec_d_model,
                        hp.dec_n_layers, GGML_TYPE_F32)) {
       fail("KV cache allocation failed");
     }
