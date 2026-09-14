@@ -46,9 +46,19 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | Test suite status | **110/110 total (108 passed, 2 clean skips on unpinned weights) 100% green** on `build-cpu-core`; custom C-ABI tree (`qwen3_asr,voxtral_realtime,sortformer_diar`) gates green | **100%** |
 | **Completed increment** | **Upstream `78d47706` (0 behind), ggml 0.22.0 (CPU+CUDA certified), Phase 11 W1a + W1b + W2a** | **DONE** |
 | **Phase 10.5, family 3 of 5: `sortformer_diar` step 2 (feature-merge)** | **Done 2026-08-27** — chunked AOSC/FIFO scheduler + presets + typed RUN ext in the engine; the catalogue's default (NeMo-layout) v2 package opens in the engine (neither parent could); chunked == whole-window to 1.8e-7; 0/600 decision flips vs the arch on identical weights; **111/111** core, C-ABI ext gate OK. Report: `docs/reports/sortformer_diar_engine_port.md` | 100% |
-| **Next increment** | **Phase 10.5, family 3 of 5: `sortformer_diar`, step 3 (retirement)** — retire the *standalone* family from the transcribe dispatcher (drop `sortformer::arch` from `transcribe-arch.cpp`, which routes the v2 package to the engine through the C ABI; delete the standalone hooks + offline dump forward from `arch/sortformer/model.cpp`; move `transcribe_sortformer_stream_ext_init` to `transcribe-family-ext.cpp`; re-point `sortformer_diar_ext_abi_test` at v2; delete the never-run `sortformer_stream_ext_unit.cpp`; ledger B15). The embedded-diarizer core stays: the parakeet multitalker arch includes it and parakeet's arch is canonical. Then `sense_asr`, `fun_asr_nano`; then 11a | Ready |
+| **Next increment** | **Phase 10.5 complete — all 5 overlapping families retired (B11–B15: 9cc5457 / fdaa9a5 / e3e7eac1 / 1be9ac40 / a8b7a03b). Next: Phase 11a (ASR runtime layer: `EncDecKVCache`, `DecodeDriver`, `AsrResult`/`AsrLimits`, 3-port re-base)** | Ready |
 
 ## DONE this session
+
+### Phase 10.5, family 4 of 5 — `fun_asr_nano` retirement (2026-08-27, commit 1be9ac40)
+Completed the final retirement of the Phase 10.5 family wave, dropping the parallel `transcribe.cpp` arch in favor of the engine `fun_asr_nano` family.
+
+- **`src/runtime/arch/funasr_nano/`**: deleted entirely (~3,372 LOC across 11 files). The engine `fun_asr_nano` frontend already ships its own LFR + KaldiFbank + CMVN + frontend ports (via `engine/framework/audio/kaldi_fbank.h`); nothing else in the arch tree included from this dir.
+- **`src/runtime/transcribe-arch.cpp`**: dropped `&funasr_nano::arch` + the namespace declaration from the builtin dispatch table.
+- **`src/runtime/transcribe-kaldi-fbank.{cpp,h}`**: removed `.cpp` from the `engine_transcribe_runtime` OBJECT library (the last two arch consumers — funasr_nano and sensevoice — are retired); updated the dangling "still used by arch/funasr_nano" comment.
+- **`CMakeLists.txt`**: added `asr_e2e_fun_asr_nano_wer_test` WER gate against the pinned `models/fun-asr-nano-2512-f16.gguf` (gated on `fun_asr_nano` linked + file present → SKIP otherwise).
+- **`tests/transcribe/loader_smoke.cpp` + `tests/fixtures/make_gguf_fixtures.py`**: the synthetic `arch_funasr_nano.gguf` (still carries `general.architecture = "funasr_nano"`) now sniffs through the family-registry alias map to the engine `fun_asr_nano` family, whose loader rejects the missing-tensor payload → `TRANSCRIBE_ERR_UNSUPPORTED_ARCH` (same path as B13's sensevoice).
+- **Verification**: `cpu-core` build clean (engine_transcribe_runtime, asr_e2e_wer_test, test_adapter_sniff_dispatch compile + link); `test_adapter_sniff_dispatch` passes (adapter routes "funasr_nano" GGUF → fun_asr_nano family correctly). `cpu-full` has a pre-existing firered_audio ggml API mismatch (upstream `3eccab50` / v0.22.0) unrelated to this change.
 
 ### Client compact minimized build profile (2026-09-14)
 New build posture for client-side desktop GUI embedding without the HTTP server, WebUI assets, or unused model families.

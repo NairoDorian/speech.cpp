@@ -211,6 +211,10 @@ Dates are the work-session dates recorded in the plan.
   (`src/runtime/arch/*/model.cpp`), eliminating GPU memory and KV cache accumulation on Windows
   during repeated model inference runs.
 
+### Removed
+
+- **Phase 10.5, family 4 of 5: `fun_asr_nano` arch retired (commit 1be9ac40)** — the engine `fun_asr_nano` family now owns the name; the parallel transcribe.cpp arch is deleted (~3,372 LOC across 11 files in `src/runtime/arch/funasr_nano/`). The orphaned `transcribe-kaldi-fbank.cpp` (last consumer was the funasr_nano arch; sensevoice's arch was retired in B13) is removed from the `engine_transcribe_runtime` OBJECT library. A new `asr_e2e_fun_asr_nano_wer_test` gate is registered against the pinned `fun-asr-nano-2512-f16.gguf`. The synthetic `arch_funasr_nano.gguf` fixture (still carrying `general.architecture = "funasr_nano"`) now routes through the family-registry alias map to the engine family, which rejects the missing-tensor payload with `TRANSCRIBE_ERR_UNSUPPORTED_ARCH`. Phase 10.5 is complete: all five overlapping families retired (B11–B15).
+
 ### Fixed
 
 - **Phase 7 Defect D1 Remediation: GGUF Sniff Architecture Precedence Collision**:
