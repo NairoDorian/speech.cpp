@@ -1,5 +1,6 @@
 #include "engine/framework/assets/tensor_source.h"
 
+#include "engine/framework/assets/whisper_bin.h"
 #include "engine/framework/io/binary.h"
 #include "engine/framework/io/filesystem.h"
 #include "engine/framework/io/json.h"
@@ -1504,6 +1505,18 @@ std::shared_ptr<const TensorSource> open_tensor_source(const std::filesystem::pa
     }
     if (extension == ".gguf") {
         return std::make_shared<GgufTensorSource>(path);
+    }
+    if (extension == ".bin") {
+        // ggml-magic .bin = legacy whisper.cpp checkpoint.
+        if (looks_like_ggml_whisper_bin(path)) {
+            return open_whisper_bin_tensor_source(path);
+        }
+        // Otherwise try the PyTorch .bin (ZIP) format.
+        try {
+            return open_torch_bin_tensor_source(path);
+        } catch (const std::exception &) {
+            // fall through to the error below.
+        }
     }
     throw std::runtime_error("unsupported tensor source format: " + path.string());
 }
