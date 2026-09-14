@@ -686,6 +686,7 @@ add_library(engine_core OBJECT
     src/framework/audio/utility_api.cpp
     src/framework/audio/waveform_ops.cpp
     src/framework/audio/wav_reader.cpp
+    src/framework/asr/enc_dec_kv_cache.cpp
     src/framework/audio/wav_writer.cpp
     src/framework/audio/zipenhancer.cpp
     src/framework/runtime/flow_kv_cache.cpp
