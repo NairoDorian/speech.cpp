@@ -1,6 +1,6 @@
 # Progress — Unified_Audio.cpp (speech.cpp ggml fork) merge & improve
 
-Status snapshot: **Upstream audio.cpp main fully merged and synchronized at `78d47706` — 0 behind (8 commits merged from baseline `3174e6b2`). All conflicts cleanly resolved across README.md (preserving speech.cpp FUSION Roadmap blueprint notice and WebUI text), CMakeLists.txt (defining audiocpp_test_link_model_objects for sortformer_v2 unittests under AUDIOCPP_MODEL_SET=core), and external/ggml (vulkan fill 2D dispatch). Pinned ggml v0.22.0 (36da5713) preserved. 100% CTest test suite pass rate (108 passed, 2 clean fixture skips, 0 failed out of 110 tests on `build-cpu-core`).** Date: 2026-09-11
+Status snapshot: **Upstream audio.cpp main fully merged and synchronized at `3eccab50` — 0 behind (30 commits merged from baseline `78d47706`). All conflicts resolved across CMakeLists.txt (fused client build toggles with upstream's opt-in `AUDIOCPP_BUILD_C_API` facade, mutually exclusive with the Universal C ABI `AUDIOCPP_BUILD_CAPI` — both define target `audiocpp`; upstream server frontend module wired into the gated `AUDIOCPP_BUILD_SERVER` block) and README.md (news fused). New in-tree header shadow resolved: upstream `include/audiocpp.h` facade vs Universal `capi/include/audiocpp.h` — `test_batch_dispatch` include order fixed. 100% CTest pass rate (110 passed, 2 clean fixture skips, 0 failed out of 112 on `build-cpu-core`). Client compact minimized preset re-verified post-merge.** Date: 2026-09-14
 
 ## Repo layout (important, non-obvious)
 `Unified_Audio.cpp/` is a **plain container directory with no git repo of its
@@ -49,6 +49,28 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | **Next increment** | **Phase 10.5, family 3 of 5: `sortformer_diar`, step 3 (retirement)** — retire the *standalone* family from the transcribe dispatcher (drop `sortformer::arch` from `transcribe-arch.cpp`, which routes the v2 package to the engine through the C ABI; delete the standalone hooks + offline dump forward from `arch/sortformer/model.cpp`; move `transcribe_sortformer_stream_ext_init` to `transcribe-family-ext.cpp`; re-point `sortformer_diar_ext_abi_test` at v2; delete the never-run `sortformer_stream_ext_unit.cpp`; ledger B15). The embedded-diarizer core stays: the parakeet multitalker arch includes it and parakeet's arch is canonical. Then `sense_asr`, `fun_asr_nano`; then 11a | Ready |
 
 ## DONE this session
+
+### Client compact minimized build profile (2026-09-14)
+New build posture for client-side desktop GUI embedding without the HTTP server, WebUI assets, or unused model families.
+- **CMake toggles**: `AUDIOCPP_BUILD_SERVER` / `AUDIOCPP_BUILD_CLI` / `AUDIOCPP_BUILD_GGUF_TOOL` (default ON), `AUDIOCPP_STRIP_DEAD_CODE` (Release `/Gy /Gw /GF` + `/OPT:REF /OPT:ICF` on MSVC; `-ffunction-sections/-fdata-sections` + `--gc-sections` elsewhere).
+- **Registry fix**: model registry include/loader generation moved after the dependency scan — registry content now covers `AUDIOCPP_LINKED_MODELS` (dependency closure, e.g. `qwen3_forced_aligner` auto-linked for `qwen3_asr`), not just the user-selected set.
+- **Test gating**: unified-ABI bridge/unit tests, `capi_test`, and `model_perf` now gated behind `ENGINE_BUILD_TESTS`. `speech`/`speechcpp` alias targets added for the `audiocpp` C API library.
+- **Presets**: `client-compact-minimized-cpu` / `-cuda` (server OFF, curated set: supertonic, nemotron_asr, granite5asr, qwen3_asr, parakeet_tdt). Docs: `docs/build/client_minimized_build.md` + README section.
+
+### Upstream audio.cpp reconciliation — `3eccab50`, 0 behind (2026-09-14)
+Synchronized 30 commits from upstream `0xShug0/audio.cpp:main` (from baseline `78d47706` up to `3eccab50`). Highlights: opt-in C ABI for in-process embedding (#530), optional server frontend module (#330 series: HTTPS listener, pipeline decoupling), Moonshine ASR GGUF (#510/#531), Kokoro refactoring + multilingual GGUF CPU (#515/#496), Niagara ASR family (#517), Parakeet TDT path-sized encoder graph (#536), VibeVoice ASR flash suffix attention (#526), vocoder 32-bit overflow fixes (#512), model config size_t overflow fix (#513), portable Linux release artifacts (#529), v0.7.4 release, WebUI sentence splitting (#539).
+- **Conflict & Fusion Resolution**:
+  - `CMakeLists.txt` conflict 1 (options): fused speech.cpp's four client toggles + unified-ABI options with upstream's `AUDIOCPP_BUILD_C_API` option and `AUDIOCPP_C_API_MODEL_ROOT` cache.
+  - `CMakeLists.txt` conflict 2 (C ABI / CLI region): kept speech.cpp's build-info setup; dropped upstream's *unguarded* `audiocpp_cli` and WebUI hex-embedding blocks (speech.cpp's gated versions already exist) — the gating IS the client-build feature.
+  - `CMakeLists.txt` conflict 3 (C ABI block / server region): kept speech.cpp's Universal C ABI block (`.def`/`.map` export control, aliases, tests) verbatim; re-homed upstream's new C API block **after** it with a `FATAL_ERROR` mutual-exclusion guard (both define target `audiocpp` and export `audiocpp_*` symbols; Universal ABI wins by default, facade opt-in requires `AUDIOCPP_BUILD_CAPI=OFF`).
+  - Server frontend: fused upstream's `app/server/frontend.cpp` source and `audiocpp_configure_server_frontends(audiocpp_server)` call into speech.cpp's gated `AUDIOCPP_BUILD_SERVER` block; `server_frontends.cmake` include auto-merged (module system defaults OFF, self-contained; `external/audio.cpp-server-frontends` submodule is opt-in only).
+  - `README.md`: fused news — upstream 0.7.4 entry + speech.cpp 09-10 sync note + 0.7.2 entry, chronological.
+  - Header shadow: upstream's new `include/audiocpp.h` facade shadowed the Universal `capi/include/audiocpp.h` for any target with `include/` first on the path — `test_batch_dispatch` include order fixed in `cmake/transcribe-tests.cmake` (`capi/include` precedes `include/`). Verified the Universal `audiocpp` target itself and the `capi_*` tests resolve `capi/include` first via their own explicit dirs.
+- **Verification**:
+  - MSVC x64 Release: `cpu-core` preset configure + build clean (134 ninja targets, ccache-warm); `client-compact-minimized-cpu` configure clean post-merge with correct dependency closure.
+  - CTest: **112 tests — 110 passed, 2 skipped (known unpinned-weight fixture skips: `transcribe_sortformer_stream_ext_unit`, `transcribe_stream_committed_pointer_stability`), 0 failed.** New upstream tests all green: `transformer_kv_ring_test`, `transpose_module_test`, `unicode_normalization_test`, `tdt_decoder_duration_loop_test`, `asr_standalone_gguf_test`, `kokoro_cpu_kernel_test`, `i8_s_fused_ops_test`, `i2_s_mul_mat_test`.
+  - `git rev-list --count main..upstream/main` reads `0` after merge.
+- **Follow-up (future increment)**: converge the two C ABI surfaces — upstream's thin `src/capi` facade (`include/audiocpp.h`, engine::runtime facade, 69 exports) and speech.cpp's Universal C ABI (`capi/`, 14 tasks, 50+ symbols) share the `audiocpp` target name and `audiocpp_*` symbol prefix but are separate APIs. Currently mutually exclusive by guard; true single-surface convergence is open.
 
 ### Upstream audio.cpp reconciliation — `78d47706`, 0 behind (2026-09-11)
 Synchronized 8 commits from upstream `0xShug0/audio.cpp:main` (from baseline `3174e6b2` up to `78d47706`).
