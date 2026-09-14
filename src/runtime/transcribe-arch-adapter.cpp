@@ -470,8 +470,15 @@ static void apply_run_params(TaskRequest & request, const transcribe_run_params 
     request.options["timestamps"] = std::to_string(static_cast<int>(params->timestamps));
     request.options["pnc"] = std::to_string(static_cast<int>(params->pnc));
     request.options["itn"] = std::to_string(static_cast<int>(params->itn));
+    // Engine families expose these knobs under their model-spec names, which
+    // differ from the transcribe ABI spellings: sense_asr / fun_asr_nano
+    // declare "enable_itn", sense_asr declares "keep_tags". Set both
+    // spellings — prune_request_options_to_contract drops whichever the
+    // family's contract does not declare.
+    request.options["enable_itn"] = std::to_string(static_cast<int>(params->itn));
     request.options["diarize"] = std::to_string(static_cast<int>(params->diarize));
     request.options["keep_special_tags"] = params->keep_special_tags ? "true" : "false";
+    request.options["keep_tags"] = params->keep_special_tags ? "true" : "false";
     request.options["spec_k_drafts"] = std::to_string(params->spec_k_drafts);
 }
 

@@ -2439,6 +2439,26 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
                 set_tests_properties(asr_e2e_qwen3_asr_wer_test PROPERTIES SKIP_RETURN_CODE 2)
             endif()
 
+            # SenseVoice-Small through the engine sense_asr family (the C ABI
+            # route that survives the B13 retirement of the standalone arch).
+            # The package is an audio.cpp GGUF with an embedded model spec, so
+            # it resolves via the model-spec KV, not the arch name. Baseline
+            # (CPU, 4 fixtures): 2.9% corpus WER (2/69; both edits are the
+            # ITN contraction I AM -> I'M), streamed == offline, divergence 0.
+            if ("sense_asr" IN_LIST AUDIOCPP_LINKED_MODELS)
+                add_test(NAME asr_e2e_sense_asr_wer_test
+                         COMMAND asr_e2e_wer_test
+                             "${CMAKE_CURRENT_SOURCE_DIR}/models/sensevoice-small-q8-audiocpp-v1.gguf"
+                             "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
+                set_tests_properties(asr_e2e_sense_asr_wer_test PROPERTIES SKIP_RETURN_CODE 2)
+
+                add_test(NAME asr_stream_text_sense_asr_wer_test
+                         COMMAND asr_stream_text_wer_test
+                             "${CMAKE_CURRENT_SOURCE_DIR}/models/sensevoice-small-q8-audiocpp-v1.gguf"
+                             "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
+                set_tests_properties(asr_stream_text_sense_asr_wer_test PROPERTIES SKIP_RETURN_CODE 2)
+            endif()
+
             # The extension surface resolves only where the product links the
             # family, for the same reason: the GGUF reaches the engine through
             # the framework registry, never a transcribe arch.

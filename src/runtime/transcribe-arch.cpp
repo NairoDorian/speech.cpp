@@ -49,10 +49,6 @@ namespace moonshine_streaming {
 extern const Arch arch;
 }
 
-namespace sensevoice {
-extern const Arch arch;
-}
-
 namespace funasr_nano {
 extern const Arch arch;
 }
@@ -78,14 +74,16 @@ const Arch * find_arch(const char * name) {
         return nullptr;
     }
 
-    // The standalone `sortformer` arch was retired (ledger B15): the engine
-    // family `sortformer_diar` serves both its packages through the
-    // ArchAdapter, and the parakeet multitalker bundle keeps the embedded
-    // diarizer core under src/runtime/arch/sortformer.
+    // Retired standalone arches (Phase 10.5): the engine families now own
+    // their GGUF architecture names through the ArchAdapter —
+    //   B15 sortformer  -> sortformer_diar (parakeet keeps the embedded
+    //      diarizer core under src/runtime/arch/sortformer)
+    //   B13 sensevoice  -> sense_asr
+    // and the parakeet multitalker bundle keeps the embedded diarizer core.
     static const Arch * const k_archs[] = {
         &parakeet::arch,         &cohere::arch,      &canary::arch,     &voxtral::arch,
         &canary_qwen::arch,      &whisper::arch,     &moonshine::arch,  &moonshine_streaming::arch,
-        &sensevoice::arch,       &funasr_nano::arch, &gigaam::arch,     &granite::arch,   &granite_nar::arch,
+        &funasr_nano::arch,      &gigaam::arch,      &granite::arch,    &granite_nar::arch,
         &medasr::arch,           &moss::arch,
     };
     constexpr size_t k_n = sizeof(k_archs) / sizeof(k_archs[0]);

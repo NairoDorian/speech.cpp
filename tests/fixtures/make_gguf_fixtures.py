@@ -1291,8 +1291,9 @@ def emit_fixtures(out_dir: Path) -> None:
     )
 
     # Recognized SenseVoice arch; no tokenizer / hparam payload. The
-    # SenseVoice handler is reached, then rejects with
-    # TRANSCRIBE_ERR_GGUF because the rest of the contract is missing.
+    # standalone sensevoice arch was retired (B13); the GGUF now sniffs to
+    # the engine sense_asr family, whose loader rejects the missing tensor
+    # payload (surfacing as TRANSCRIBE_ERR_UNSUPPORTED_ARCH).
     _write(
         out_dir / "arch_sensevoice.gguf",
         _build_header(

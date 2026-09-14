@@ -5,8 +5,9 @@
 // with the parameters FunASR's WavFrontend passes (window=hamming,
 // dither=0, energy_floor=0, snip_edges=True, num_mel_bins=80,
 // frame_length=25ms, frame_shift=10ms), plus FunASR's LFR stack and the
-// optional per-feature CMVN. Used by `arch/sensevoice` (apply_cmvn=true)
-// and `arch/funasr_nano` (apply_cmvn=false).
+// optional per-feature CMVN. Still used by `arch/funasr_nano`
+// (apply_cmvn=false); the retired `arch/sensevoice` consumer (apply_cmvn=true)
+// is served by the engine sense_asr frontend's own port of the same math.
 //
 // Key behaviors:
 //   * Hamming window (kaldi's symmetric "hamming": 0.54 - 0.46·cos(2πn/(N-1))).
