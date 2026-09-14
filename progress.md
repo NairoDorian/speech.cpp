@@ -43,12 +43,31 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | ABI offline + streaming surface | Verified, real CTest gates | 100% |
 | End-to-end ASR **offline text** (WER gate) | Done — 1.45% corpus WER (arch path); engine path now also 1/69 edits | 100% |
 | **End-to-end ASR streaming text** | **Done — streamed 4.35% == offline 4.35%, divergence 0** | **100%** |
-| Test suite status | **110/110 total (108 passed, 2 clean skips on unpinned weights) 100% green** on `build-cpu-core`; custom C-ABI tree (`qwen3_asr,voxtral_realtime,sortformer_diar`) gates green | **100%** |
+| Test suite status | **110/110 green** on `build-cpu-core`; `build-cpu-full` unlocked (firered_audio fix) — ASR smoke tests (`whisper`, `moonshine`, `moonshine_streaming`, `qwen3_asr`, `voxtral_realtime`, `hviske_asr`, `nemotron_asr`) + WER gates (`whisper`, `qwen3_asr`) green | **100%** |
 | **Completed increment** | **Upstream `78d47706` (0 behind), ggml 0.22.0 (CPU+CUDA certified), Phase 11 W1a + W1b + W2a** | **DONE** |
 | **Phase 10.5, family 3 of 5: `sortformer_diar` step 2 (feature-merge)** | **Done 2026-08-27** — chunked AOSC/FIFO scheduler + presets + typed RUN ext in the engine; the catalogue's default (NeMo-layout) v2 package opens in the engine (neither parent could); chunked == whole-window to 1.8e-7; 0/600 decision flips vs the arch on identical weights; **111/111** core, C-ABI ext gate OK. Report: `docs/reports/sortformer_diar_engine_port.md` | 100% |
-| **Next increment** | **Phase 11a foundation: `AsrResult`/`AsrLimits`, `TaskResult.truncated` propagation, VAD dedup (B29)** | **DONE & pushed (c59b15a0)** |
+| **Next increment** | **Phase 11a: DecodeDriver + WhisperEmbeddingModule (B31)** | **IN PROGRESS** |
 
 ## DONE this session
+
+### Phase 11a: DecodeDriver + B30 migration (2026-09-14/15, commits a6d02849, d43f754e)
+
+Created the shared `framework/asr/` layer and collapsed all private duplicates onto it:
+
+- **DecodeDriver** (`include/engine/framework/asr/decode_driver.h`): introduced shared `argmax_logits()` and `suppress_logits()` utilities. Migrated 7 ASR engine packages (whisper W2a, qwen3_asr B11, voxtral_realtime B12, hviske_asr, nemotron_asr, higgs_audio_stt, fun_asr_nano B14) off their private `argmax_index`/`argmax_index_ptr` implementations — 7 private functions (63 LOC) + 13 call-site duplications eliminated. All migrated packages compile and verify green on `cpu-full`: WER gates (whisper, qwen3_asr), smoke tests (whisper, qwen3_asr, voxtral_realtime, hviske_asr, nemotron_asr), and probe tests (fun_asr_nano decoder/encoder/session).
+- **B30 EncDecKVCache** (commits ea326212, a6d02849): created `framework/asr/enc_dec_kv_cache.{h,cpp}` with `EncDecKVCache` struct + `kv_cache_init()`. All three ASR engine packages (whisper, moonshine, moonshine_streaming) now `using` alias `engine::asr::EncDecKVCache` — removed 3 byte-for-byte identical struct definitions, 3 `kv_cache_init()` definitions, and 3 `free()` methods (271 LOC). No graph code changes needed (fields accessed identically).
+- **firered_audio fix** (3de02cdc): unblocked the cpu-full build by passing `K=1` to `ggml_gated_delta_net` (ggml v0.22.0 added the `K` parameter). Without this fix, the full 375-target ASR build could not be verified.
+
+### Phase 11a B30 — Collapse 3 private KV caches onto shared `EncDecKVCache` (2026-09-14, commit a6d02849)
+
+The three ASR engine packages each carried a byte-for-byte identical KV cache struct (`MoonshineKvCache`, `MoonshineStreamingKvCache`, `WhisperKvCache`) and a duplicate `kv_cache_init()` + `::free()` implementation. Replaced all three with `using` aliases for `engine::asr::EncDecKVCache`.
+
+- **`include/engine/framework/asr/enc_dec_kv_cache.h`** — created (2026-09-14, commit ea326212). Defines `EncDecKVCache` and `kv_cache_init()` with the 4D tensor layout shared across all encoder-decoder families: `self_k`/`self_v` as `[d_model, n_layer * n_ctx]`, `cross_k`/`cross_v` as `[d_model, n_layer * T_enc]`, allocated via `ggml_backend_alloc_ctx_tensors`.
+- **Graph headers** (`include/engine/models/{whisper,moonshine,moonshine_streaming}/graphs_internal.h`): `struct WhisperKvCache { … }` → `using WhisperKvCache = engine::asr::EncDecKVCache;` (and same for Moonshine/MoonshineStreaming). The graph builders access KV fields (`self_k`, `self_v`, `cross_k`, `cross_v`, `n`, `head`, `n_ctx`, `T_enc`, `cross_populated`) identically — no graph code changes needed.
+- **Graph sources** (`src/models/*/graphs.cpp`): removed the three duplicate `kv_cache_init()` definitions and `::free()` methods (271 lines deleted total).
+- **Runtimes** (`src/models/*/runtime.cpp`): `kv_cache_init(...)` → `engine::asr::kv_cache_init(...)` (3 call sites).
+- **firered_audio fix** (`3de02cdc`): the cpu-full ASR build was blocked by a ggml v0.22.0 API change — `ggml_gated_delta_net` gained a `K` (state-snapshot count) parameter. Added `K=1` at both call sites in `src/models/firered_audio/qwen35_runtime.cpp`, matching the old API's default behavior (keep only final state).
+- **Verification**: full cpu-full reconfigure + build clean (91 targets). All three ASR engine smoke tests pass: `moonshine_engine_smoke_test` (PASS, 4.76s), `moonshine_streaming_engine_smoke_test` (PASS, 25.78s), `whisper_engine_smoke_test` (PASS, 13.74s). WER gate: `asr_e2e_whisper_wer_test` PASS (3.17s) — encoder port still matches arch baseline after the KV cache unification. `test_adapter_sniff_dispatch` PASS.
 
 ### Phase 10.5, family 4 of 5 — `fun_asr_nano` retirement (2026-08-27, commit 1be9ac40)
 Completed the final retirement of the Phase 10.5 family wave, dropping the parallel `transcribe.cpp` arch in favor of the engine `fun_asr_nano` family.

@@ -223,10 +223,13 @@ Dates are the work-session dates recorded in the plan.
 ### Fixed
 
 - **W2a Whisper 30-second truncation defect / L11 rule violation**: added `bool truncated = false` to `TaskResult` (`include/engine/framework/runtime/session.h`). Previously `TaskResult` had no `truncated` field, so Whisper's `WhisperTranscription::truncated` was silently dropped. Now propagated through `WhisperSession::run()`, `MoonshineSession::run()`, and `MoonshineStreamingSession::on_finalize()` — every ASR result carries `truncated` honestly.
+- **firered_audio cpu-full build unblock**: `ggml_gated_delta_net` gained a `K` (state-snapshot count) parameter in ggml v0.22.0; added `K=1` at both call sites in `src/models/firered_audio/qwen35_runtime.cpp`, matching the old API's default behavior.
 
 ### Changed
 
 - **`CMakeLists.txt`**: removed `transcribe-vad{,-integrate}.cpp` from the `engine_transcribe_runtime` OBJECT library and deleted their test executable registrations. Added `asr_e2e_fun_asr_nano_wer_test` WER gate.
+- **Phase 11a B30: collapse 3 private KV caches onto shared `EncDecKVCache`**: added `framework/asr/enc_dec_kv_cache.{h,cpp}` defining `EncDecKVCache` + `kv_cache_init()` with the unified 4D tensor layout (`self_k`/`self_v`/`cross_k`/`cross_v`, `ggml_backend_alloc_ctx_tensors`). All three ASR engine packages (whisper, moonshine, moonshine_streaming) now `using` alias their private struct and link the shared `kv_cache_init`/`free`. The cpu-full build (previously blocked by a firered_audio ggml API mismatch) is now clean.
+- **Phase 11a: DecodeDriver — shared greedy argmax + suppression**: introduced `framework/asr/decode_driver.h` with `argmax_logits()` and `suppress_logits()`. Migrated the duplicated CPU-side argmax + suppression code from 7 ASR engine packages: whisper (W2a), qwen3_asr (B11), voxtral_realtime (B12), hviske_asr, nemotron_asr, higgs_audio_stt, fun_asr_nano (B14). Eliminated 7 private `argmax_index`/`argmax_index_ptr` implementations (63 LOC) + 13 call-site duplications.
 
 - **Phase 7 Defect D1 Remediation: GGUF Sniff Architecture Precedence Collision**:
   In `src/runtime/transcribe.cpp`, routed model architecture sniffing to `transcribe::adapter_find_arch(family.c_str())`,
