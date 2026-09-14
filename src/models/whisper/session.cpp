@@ -167,6 +167,7 @@ runtime::TaskResult WhisperSession::run(const runtime::TaskRequest &request) {
   result.text_output = runtime::Transcript{
       transcription.text,
       request.text_input.has_value() ? request.text_input->language : ""};
+  result.truncated = transcription.truncated;
   engine::debug::timing_log_scalar("session.wall_ms",
                                    engine::debug::elapsed_ms(wall_start));
   return result;

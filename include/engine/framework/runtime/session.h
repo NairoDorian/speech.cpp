@@ -213,6 +213,11 @@ struct TaskResult {
     std::vector<DecodeTelemetry> decode_telemetry;
     std::optional<VoiceArtifact> artifact_output = std::nullopt;
     std::vector<VoiceArtifact> output_artifacts;
+
+    // ASR: set true when the generated token sequence (or, for encoder-decoder
+    // models, the input audio window) hit the model's context or audio limit
+    // before an EOS was produced. Carries the L11 "truncated honestly" rule.
+    bool truncated = false;
 };
 
 struct StreamEvent {

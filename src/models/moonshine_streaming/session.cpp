@@ -251,6 +251,7 @@ runtime::TaskResult MoonshineStreamingSession::on_finalize() {
 
   runtime::TaskResult result;
   result.text_output = runtime::Transcript{full_text(), stream_language_};
+  result.truncated = transcription.truncated;
   return result;
 }
 

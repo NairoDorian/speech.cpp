@@ -28,8 +28,10 @@
 #include "transcribe-path.h"
 #include "transcribe-session.h"
 #include "transcribe-tokenizer.h"
-#include "transcribe-vad.h"
-#include "transcribe-vad-integrate.h"
+#include "engine/framework/audio/activity.h"
+#include "engine/framework/audio/chunking.h"
+#include "engine/framework/runtime/model.h"
+#include "engine/models/silero_vad/session.h"
 #include "transcribe/whisper.h"
 
 #if defined(TRANSCRIBE_GGML_BACKEND_DL) && defined(_WIN32)
@@ -2154,6 +2156,338 @@ extern "C" transcribe_status transcribe_stream_get_text(const struct transcribe_
     copy_out_prefix(out, &staged, caller_size, sizeof(staged));
     return TRANSCRIBE_OK;
 }
+
+// ---------------------------------------------------------------------------
+// VAD chunking (transcribe-vad* code consolidated into transcribe.cpp, §5.7)
+//
+// The standalone transcribe-vad.{h,cpp} and transcribe-vad-integrate.{h,cpp}
+// files were verbatim ports of audio/chunking.cpp's plan_vad_audio_chunks and
+// append_chunk_speech_metadata. They are folded in here as the arch-level
+// VAD runner: detect_speech() stays (engine sniffer VAD is an arch concern),
+// the plan() clone is replaced by engine::audio::plan_vad_audio_chunks, and
+// the merge helpers are retained because they operate on transcribe_session
+// (arch-level) rather than runtime::TaskResult (engine-level).
+// ---------------------------------------------------------------------------
+
+namespace transcribe::vad {
+
+namespace {
+
+int64_t ms_to_samples(int64_t ms, int sample_rate) {
+  return ms * sample_rate / 1000;
+}
+int64_t samples_to_ms(int64_t s, int sample_rate) {
+  return s * 1000 / sample_rate;
+}
+
+}  // namespace
+
+struct time_span {
+    int64_t start_ms   = 0;
+    int64_t end_ms     = 0;
+    float   confidence = 0.0f;
+};
+
+struct chunk_plan {
+    time_span source_span;
+    time_span keep_span;
+};
+
+struct chunk_baseline {
+    size_t n_segments = 0;
+    size_t n_words    = 0;
+    size_t n_tokens   = 0;
+};
+
+bool params_present(const struct transcribe_run_params * run_params) {
+    if (run_params == nullptr) {
+        return false;
+    }
+    const size_t vad_off = offsetof(struct transcribe_run_params, vad);
+    return run_params->struct_size >= vad_off + sizeof(struct transcribe_vad_params);
+}
+
+transcribe_vad_mode effective_mode(const struct transcribe_run_params * run_params) {
+    if (!params_present(run_params)) {
+        return TRANSCRIBE_VAD_OFF;
+    }
+    return run_params->vad.mode;
+}
+
+chunk_baseline snapshot(const struct transcribe_session & s) {
+    return chunk_baseline{ s.segments.size(), s.words.size(), s.tokens.size() };
+}
+
+void offset_chunk_results(struct transcribe_session & s, const chunk_baseline & base, const chunk_plan & chunk) {
+    const int64_t dt = chunk.keep_span.start_ms;
+    for (size_t i = base.n_tokens; i < s.tokens.size(); ++i) {
+        s.tokens[i].t0_ms += dt;
+        s.tokens[i].t1_ms += dt;
+        s.tokens[i].seg_index += static_cast<int>(base.n_segments);
+    }
+    for (size_t i = base.n_words; i < s.words.size(); ++i) {
+        s.words[i].t0_ms += dt;
+        s.words[i].t1_ms += dt;
+        s.words[i].seg_index += static_cast<int>(base.n_segments);
+        s.words[i].first_token += static_cast<int>(base.n_tokens);
+    }
+    for (size_t i = base.n_segments; i < s.segments.size(); ++i) {
+        s.segments[i].t0_ms += dt;
+        s.segments[i].t1_ms += dt;
+        s.segments[i].first_word += static_cast<int>(base.n_words);
+        s.segments[i].first_token += static_cast<int>(base.n_tokens);
+    }
+}
+
+void rollback_to(struct transcribe_session & s, const chunk_baseline & base) {
+    if (s.segments.size() > base.n_segments) {
+        s.segments.resize(base.n_segments);
+    }
+    if (s.words.size() > base.n_words) {
+        s.words.resize(base.n_words);
+    }
+    if (s.tokens.size() > base.n_tokens) {
+        s.tokens.resize(base.n_tokens);
+    }
+}
+
+void rebuild_full_text(struct transcribe_session & s) {
+    s.full_text.clear();
+    for (size_t i = 0; i < s.segments.size(); ++i) {
+        if (i > 0 && !s.full_text.empty() && s.full_text.back() != ' ') {
+            s.full_text.push_back(' ');
+        }
+        s.full_text += s.segments[i].text;
+    }
+    s.raw_text = s.full_text;
+}
+
+std::vector<time_span> detect_speech(const float * pcm, int n_samples, int sample_rate, const struct transcribe_vad_params & vp) {
+    std::vector<time_span> out;
+    if (pcm == nullptr || n_samples <= 0 || sample_rate <= 0) {
+        return out;
+    }
+
+    if (vp.mode == TRANSCRIBE_VAD_ENERGY) {
+        engine::audio::QuietEnergyAudioChunkOptions opts;
+        opts.chunk_samples = static_cast<int64_t>(30.0 * sample_rate);
+        opts.boundary_context_samples = static_cast<int64_t>(2.0 * sample_rate);
+        opts.min_energy_window_samples = static_cast<int64_t>(0.1 * sample_rate);
+        if (opts.chunk_samples <= 0) opts.chunk_samples = sample_rate;
+
+        std::vector<float> mono(pcm, pcm + static_cast<size_t>(n_samples));
+        const auto spans = engine::audio::plan_quiet_energy_audio_chunks(mono, opts);
+        out.reserve(spans.size());
+        for (const auto & sp : spans) {
+            time_span ts;
+            ts.start_ms = static_cast<int64_t>(sp.start_sample * 1000.0 / sample_rate);
+            ts.end_ms = static_cast<int64_t>(sp.end_sample * 1000.0 / sample_rate);
+            ts.confidence = 1.0f;
+            out.push_back(ts);
+        }
+        return out;
+    }
+
+    if (vp.mode == TRANSCRIBE_VAD_SILERO) {
+        static std::mutex s_vad_mutex;
+        static std::shared_ptr<engine::runtime::ILoadedVoiceModel> s_silero_model;
+
+        std::lock_guard<std::mutex> lock(s_vad_mutex);
+        if (!s_silero_model) {
+            engine::runtime::ModelLoadRequest req;
+            req.model_path = std::filesystem::path(vp.weight_path ? std::string(vp.weight_path) : "assets/framework/models/silero_vad");
+            req.family_hint = "silero_vad";
+            try {
+                auto loader = engine::models::silero_vad::make_silero_vad_loader();
+                if (loader && loader->can_load(req)) {
+                    s_silero_model = loader->load(req);
+                }
+            } catch (...) {
+            }
+            if (!s_silero_model) {
+                try {
+                    s_silero_model = engine::models::silero_vad::load_silero_vad_model(req);
+                } catch (...) {
+                }
+            }
+        }
+
+        if (s_silero_model) {
+            engine::runtime::TaskSpec task{engine::runtime::VoiceTaskKind::Vad, engine::runtime::RunMode::Offline};
+            engine::runtime::SessionOptions session_opts;
+            auto vad_session = s_silero_model->create_task_session(task, session_opts);
+            if (vad_session) {
+                engine::runtime::TaskRequest treq;
+                treq.audio_input = engine::runtime::AudioBuffer{};
+                treq.audio_input->sample_rate = sample_rate;
+                treq.audio_input->channels = 1;
+                treq.audio_input->samples.assign(pcm, pcm + n_samples);
+
+                if (vp.silero_threshold > 0.0f) {
+                    treq.options["threshold"] = std::to_string(vp.silero_threshold);
+                }
+                if (vp.silero_min_speech_ms > 0) {
+                    treq.options["min_speech_duration_ms"] = std::to_string(vp.silero_min_speech_ms);
+                }
+                if (vp.silero_min_silence_ms > 0) {
+                    treq.options["min_silence_duration_ms"] = std::to_string(vp.silero_min_silence_ms);
+                }
+
+                vad_session->prepare(engine::runtime::build_preparation_request(treq));
+                auto * offline_sess = dynamic_cast<engine::runtime::IOfflineVoiceTaskSession *>(vad_session.get());
+                if (offline_sess) {
+                    auto result = offline_sess->run(treq);
+                    out.reserve(result.speech_segments.size());
+                    for (const auto & seg : result.speech_segments) {
+                        time_span ts;
+                        ts.start_ms = static_cast<int64_t>(seg.span.start_sample * 1000.0 / sample_rate);
+                        ts.end_ms = static_cast<int64_t>(seg.span.end_sample * 1000.0 / sample_rate);
+                        ts.confidence = seg.confidence;
+                        out.push_back(ts);
+                    }
+                }
+            }
+        }
+    }
+
+    return out;
+}
+
+transcribe_status run_with_vad(struct transcribe_session *          session,
+                               const float *                        pcm,
+                               int                                  n_samples,
+                               const struct transcribe_run_params * params,
+                               bool &                               degraded) {
+    degraded = false;
+
+    const transcribe_vad_mode mode = effective_mode(params);
+    if (mode == TRANSCRIBE_VAD_OFF) {
+        degraded = true;
+        return TRANSCRIBE_OK;
+    }
+
+    const auto & vp = params->vad;
+    const int sample_rate = 16000;
+    std::vector<time_span> speech;
+    try {
+        speech = detect_speech(pcm, n_samples, sample_rate, vp);
+    } catch (const std::exception & e) {
+        transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_WARN, "VAD: detection failed (%s); falling back to full-buffer decode",
+                            e.what());
+        degraded = true;
+        return TRANSCRIBE_OK;
+    }
+
+    if (speech.empty() && mode == TRANSCRIBE_VAD_SILERO) {
+        const int64_t total_ms = static_cast<int64_t>(n_samples) * 1000 / sample_rate;
+        if (total_ms > 3000) {
+            degraded = true;
+            return TRANSCRIBE_OK;
+        }
+    }
+
+    if (speech.empty()) {
+        session->has_result = true;
+        session->full_text.clear();
+        session->raw_text.clear();
+        return TRANSCRIBE_OK;
+    }
+
+    const int64_t total_ms = static_cast<int64_t>(n_samples) * 1000 / sample_rate;
+    int64_t max_chunk = vp.max_chunk_ms;
+    if (max_chunk <= 0) {
+        transcribe_session_limits lim{};
+        transcribe_session_limits_init(&lim);
+        if (transcribe_session_get_limits(session, &lim) == TRANSCRIBE_OK && lim.effective_max_audio_ms > 0) {
+            max_chunk = lim.effective_max_audio_ms;
+        } else {
+            max_chunk = 30000;
+        }
+    }
+    const int64_t merge_gap = vp.merge_gap_ms != 0 ? vp.merge_gap_ms : 500;
+    const int64_t padding   = vp.padding_ms >= 0 ? vp.padding_ms : 250;
+
+    // Re-point plan() -> plan_vad_audio_chunks (§5.7): convert ms-based
+    // speech segments to sample-based runtime::SpeechSegment, call the shared
+    // chunker, then convert back to chunk_plan for the arch-level merge helpers.
+    std::vector<engine::runtime::SpeechSegment> speech_segs;
+    speech_segs.reserve(speech.size());
+    for (const auto & ts : speech) {
+        engine::runtime::SpeechSegment seg;
+        seg.span.start_sample = ms_to_samples(ts.start_ms, sample_rate);
+        seg.span.end_sample = ms_to_samples(ts.end_ms, sample_rate);
+        seg.confidence = ts.confidence;
+        speech_segs.push_back(seg);
+    }
+
+    engine::audio::VadAudioChunkOptions vad_opts;
+    vad_opts.max_chunk_samples = ms_to_samples(max_chunk, sample_rate);
+    vad_opts.merge_gap_samples = ms_to_samples(merge_gap, sample_rate);
+    vad_opts.padding_samples = ms_to_samples(padding, sample_rate);
+
+    std::vector<engine::runtime::TimeSpan> chunk_spans;
+    try {
+        chunk_spans = engine::audio::plan_vad_audio_chunks(
+            speech_segs, n_samples, vad_opts);
+    } catch (const std::exception & e) {
+        transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_WARN, "VAD: chunking failed (%s); falling back to full-buffer decode",
+                            e.what());
+        degraded = true;
+        return TRANSCRIBE_OK;
+    }
+    if (chunk_spans.empty()) {
+        session->has_result = true;
+        session->full_text.clear();
+        session->raw_text.clear();
+        return TRANSCRIBE_OK;
+    }
+
+    const auto * arch = session->model->arch;
+    for (size_t i = 0; i < chunk_spans.size(); ++i) {
+        const int64_t start_samp = std::clamp(chunk_spans[i].start_sample, int64_t{0}, int64_t{n_samples});
+        const int64_t end_samp   = std::clamp(chunk_spans[i].end_sample, int64_t{0}, int64_t{n_samples});
+        const int     chunk_len  = static_cast<int>(end_samp - start_samp);
+        if (chunk_len <= 0) {
+            continue;
+        }
+
+        const float * chunk_pcm = pcm + start_samp;
+        const chunk_baseline base = snapshot(*session);
+
+        // Build chunk_plan for the merge helpers from sample-based spans.
+        chunk_plan chunk;
+        chunk.source_span.start_ms = samples_to_ms(chunk_spans[i].start_sample, sample_rate);
+        chunk.source_span.end_ms   = samples_to_ms(chunk_spans[i].end_sample, sample_rate);
+        chunk.source_span.confidence = 1.0f;
+        chunk.keep_span.start_ms = std::max<int64_t>(chunk.source_span.start_ms + padding, 0LL);
+        chunk.keep_span.end_ms   = std::min<int64_t>(chunk.source_span.end_ms - padding, total_ms);
+        if (chunk.keep_span.end_ms <= chunk.keep_span.start_ms) {
+            chunk.keep_span.start_ms = chunk.source_span.start_ms;
+            chunk.keep_span.end_ms   = chunk.source_span.end_ms;
+        }
+        chunk.keep_span.confidence = 1.0f;
+
+        transcribe_status status = arch->run(session, chunk_pcm, chunk_len, params);
+        if (status != TRANSCRIBE_OK) {
+            rollback_to(*session, base);
+            rebuild_full_text(*session);
+            return status;
+        }
+
+        offset_chunk_results(*session, base, chunk);
+
+        if (session->poll_abort()) {
+            rebuild_full_text(*session);
+            return TRANSCRIBE_ERR_ABORTED;
+        }
+    }
+
+    rebuild_full_text(*session);
+    session->has_result = true;
+    return TRANSCRIBE_OK;
+}
+
+}  // namespace transcribe::vad
 
 // Shared one-utterance run body. Does NOT touch session->batch_results, so
 // the batch dispatcher can call it once per utterance inside a loop without
