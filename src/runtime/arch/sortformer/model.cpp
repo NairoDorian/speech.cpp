@@ -1,10 +1,16 @@
-// arch/sortformer/model.cpp - Sortformer (encoder-diarizer) load / run /
-// Arch instance. The 17-layer NEST FastConformer encoder is the same NeMo
+// arch/sortformer/model.cpp - Sortformer (encoder-diarizer) embedded-diarizer
+// core. The 17-layer NEST FastConformer encoder is the same NeMo
 // ConformerEncoder Parakeet ports, so it reuses parakeet::build_encoder_graph
 // verbatim (constructed from a ParakeetWeights populated with only the
 // pre_encode + block slots). This file adds the Sortformer-specific graph:
 // encoder_proj (512->192) -> 18x post-LN Transformer -> diar sigmoid head,
 // producing a T x 4 speaker-activity matrix.
+//
+// The standalone family (own GGUF load/run through the Arch trait) was
+// retired: the engine `sortformer_diar` family serves both packages via the
+// ArchAdapter (ledger B15). What remains here is the surface the parakeet
+// multitalker bundle drives: init_embedded_diarizer / fuse_embedded_diar_bn /
+// run_diar_streaming_core / probs_to_speaker_segments.
 
 #include "../parakeet/encoder.h"
 #include "../parakeet/weights.h"
@@ -12,16 +18,11 @@
 #include "ggml.h"
 #include "gguf.h"
 #include "sortformer.h"
-#include "transcribe-arch.h"
 #include "transcribe-backend.h"
 #include "transcribe-batch-util.h"
 #include "transcribe-debug.h"
 #include "transcribe-flash-policy.h"
-#include "transcribe-load-common.h"
-#include "transcribe-loader.h"
 #include "transcribe-log.h"
-#include "transcribe-mel.h"
-#include "transcribe-meta.h"
 
 #include <algorithm>
 #include <cmath>
@@ -36,44 +37,12 @@
 
 namespace transcribe::sortformer {
 
-extern const Arch arch;
-
 namespace pk   = transcribe::parakeet;
 namespace conf = transcribe::conformer;
 
-static constexpr float kBnEps              = 1e-5f;
-static constexpr char  k_default_variant[] = "diar_streaming_sortformer_4spk-v2.1";
-
-SortformerModel::~SortformerModel() {
-    if (bn_fused_ctx != nullptr) {
-        ggml_free(bn_fused_ctx);
-    }
-    if (bn_fused_buffer != nullptr) {
-        transcribe::safe_buffer_free(bn_fused_buffer);
-    }
-    if (ctx_meta != nullptr) {
-        ggml_free(ctx_meta);
-    }
-    if (backend_buffer != nullptr) {
-        transcribe::safe_buffer_free(backend_buffer);
-    }
-    for (auto it = plan.scheduler_list.rbegin(); it != plan.scheduler_list.rend(); ++it) {
-        transcribe::safe_backend_free(*it);
-    }
-    plan.scheduler_list.clear();
-    plan.primary = nullptr;
-}
+static constexpr float kBnEps = 1e-5f;
 
 DiarStreamScratch::~DiarStreamScratch() {
-    if (compute_ctx != nullptr) {
-        ggml_free(compute_ctx);
-    }
-}
-
-SortformerSession::~SortformerSession() {
-    if (sched != nullptr) {
-        transcribe::safe_sched_free(sched);
-    }
     if (compute_ctx != nullptr) {
         ggml_free(compute_ctx);
     }
@@ -255,11 +224,6 @@ transcribe_status fuse_conformer_bn_core(std::vector<pk::ParakeetBlock> & blocks
         ggml_backend_tensor_set(b.conv_bn_fused_bias, fused_b.data(), 0, tensor_bytes);
     }
     return TRANSCRIBE_OK;
-}
-
-transcribe_status fuse_conformer_bn(SortformerModel & m) {
-    return fuse_conformer_bn_core(m.conformer.blocks, m.conformer_hp.enc_d_model, m.plan.scheduler_list.back(),
-                                  &m.bn_fused_ctx, &m.bn_fused_buffer);
 }
 
 // ---- diar-head graph helpers ----
@@ -537,105 +501,6 @@ StreamInferBuild build_stream_infer_graph(ggml_context *              ctx,
 
 }  // namespace
 
-transcribe_status load(Loader & loader, const transcribe_model_load_params * params, transcribe_model ** out_model) {
-    const int64_t t_load_start = ggml_time_us();
-
-    auto m       = std::make_unique<SortformerModel>();
-    m->arch      = &arch;
-    m->t_load_us = 0;
-
-    m->variant = loader.variant().empty() ? k_default_variant : loader.variant();
-    m->backend.clear();
-
-    apply_family_invariants(*m);
-    m->caps.n_languages = 0;
-    m->caps.languages   = nullptr;
-
-    if (const transcribe_status st = read_capability_kv(loader.gguf(), m->caps); st != TRANSCRIBE_OK) {
-        return st;
-    }
-    if (const transcribe_status st = read_languages_kv(loader.gguf(), *m); st != TRANSCRIBE_OK) {
-        return st;
-    }
-    if (const transcribe_status st = read_sortformer_hparams(loader.gguf(), m->hparams); st != TRANSCRIBE_OK) {
-        return st;
-    }
-    fill_conformer_hp(m->hparams, m->conformer_hp);
-
-    // Mel front-end (NeMo AudioToMelSpectrogramPreprocessor; normalize=none).
-    {
-        transcribe::MelConfig cfg{};
-        cfg.sample_rate       = m->hparams.fe_sample_rate;
-        cfg.num_mels          = m->hparams.fe_num_mels;
-        cfg.n_fft             = m->hparams.fe_n_fft;
-        cfg.win_length        = m->hparams.fe_win_length;
-        cfg.hop_length        = m->hparams.fe_hop_length;
-        cfg.pre_emphasis      = m->hparams.fe_pre_emphasis;
-        cfg.normalize         = m->hparams.fe_normalize;
-        cfg.pad_mode          = "constant";
-        // NeMo AudioToMelSpectrogramPreprocessor uses ceil(n/hop) framing;
-        // the mel tensor is pad_to=16 padded but forward() trims it back to
-        // the real length before the encoder, so feeding the ceil length is
-        // the faithful path (see forward-map Frontend note).
-        cfg.nemo_seq_len_ceil = true;
-        m->mel.emplace(cfg);
-    }
-
-    gguf_init_params init_params{};
-    init_params.no_alloc     = true;
-    init_params.ctx          = &m->ctx_meta;
-    gguf_context * gguf_data = gguf_init_from_file(loader.path().c_str(), init_params);
-    if (gguf_data == nullptr) {
-        return TRANSCRIBE_ERR_GGUF;
-    }
-
-    if (const transcribe_status st = load_conformer_weights(m->ctx_meta, m->conformer_hp, m->conformer);
-        st != TRANSCRIBE_OK) {
-        gguf_free(gguf_data);
-        return st;
-    }
-    if (const transcribe_status st = build_sortformer_weights(m->ctx_meta, m->hparams, m->weights);
-        st != TRANSCRIBE_OK) {
-        gguf_free(gguf_data);
-        return st;
-    }
-
-    const transcribe_backend_request backend_req = (params != nullptr) ? params->backend : TRANSCRIBE_BACKEND_AUTO;
-    if (const transcribe_status st = transcribe::load_common::init_backends(
-            backend_req, (params != nullptr) ? params->device : nullptr, "sortformer", m->plan);
-        st != TRANSCRIBE_OK) {
-        gguf_free(gguf_data);
-        return st;
-    }
-    m->backend         = ggml_backend_name(m->plan.primary);
-    m->primary_backend = m->plan.primary;
-
-    ggml_backend_buffer_t weights_buffer = ggml_backend_alloc_ctx_tensors(m->ctx_meta, m->plan.primary);
-    if (weights_buffer == nullptr) {
-        gguf_free(gguf_data);
-        log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "sortformer: ggml_backend_alloc_ctx_tensors failed");
-        return TRANSCRIBE_ERR_GGUF;
-    }
-    m->backend_buffer = weights_buffer;
-    ggml_backend_buffer_set_usage(weights_buffer, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
-
-    if (const transcribe_status st =
-            transcribe::load_common::stream_tensor_data(loader.path(), gguf_data, m->ctx_meta, "sortformer");
-        st != TRANSCRIBE_OK) {
-        gguf_free(gguf_data);
-        return st;
-    }
-    gguf_free(gguf_data);
-
-    if (const transcribe_status st = fuse_conformer_bn(*m); st != TRANSCRIBE_OK) {
-        return st;
-    }
-
-    m->t_load_us = ggml_time_us() - t_load_start;
-    *out_model   = m.release();
-    return TRANSCRIBE_OK;
-}
-
 // ---- Embedded-diarizer surface (multitalker bundle; see sortformer.h) ----
 
 transcribe_status init_embedded_diarizer(const gguf_context * gguf,
@@ -661,20 +526,6 @@ transcribe_status fuse_embedded_diar_bn(SortformerEmbedded &    e,
                                         ggml_context **         out_ctx,
                                         ggml_backend_buffer_t * out_buffer) {
     return fuse_conformer_bn_core(e.conformer.blocks, e.conformer_hp.enc_d_model, backend, out_ctx, out_buffer);
-}
-
-transcribe_status init_context(transcribe_model *                model,
-                               const transcribe_session_params * params,
-                               transcribe_session **             out_ctx) {
-    if (model->arch != &arch) {
-        return TRANSCRIBE_ERR_INVALID_ARG;
-    }
-    auto pc       = std::make_unique<SortformerSession>();
-    pc->model     = model;
-    pc->n_threads = params->n_threads;
-    pc->kv_type   = params->kv_type;
-    *out_ctx      = pc.release();
-    return TRANSCRIBE_OK;
 }
 
 // Threshold-based probs -> speaker segments (simple offline segmentation;
@@ -705,99 +556,6 @@ void probs_to_speaker_segments(transcribe_session *       pc,
             }
         }
     }
-}
-
-// Lazily create the persistent multi-backend scheduler shared by the offline
-// and streaming graphs.
-static transcribe_status ensure_sched(SortformerSession * pc, SortformerModel * pm) {
-    if (pc->sched == nullptr) {
-        pc->sched = ggml_backend_sched_new(pm->plan.scheduler_list.data(), nullptr,
-                                           static_cast<int>(pm->plan.scheduler_list.size()),
-                                           /*graph_size=*/8192, /*parallel=*/false, /*op_offload=*/true);
-        if (pc->sched == nullptr) {
-            return TRANSCRIBE_ERR_GGUF;
-        }
-    }
-    return TRANSCRIBE_OK;
-}
-
-// Offline full-context forward. Builds the whole encoder + transformer + diar
-// head over the entire mel and dumps the Stage-4 parity tensors (enc.* +
-// diar.preds_offline). Invoked only when tensor dumping is active (the
-// streaming path is the product); keeps the offline tensor gate green.
-static transcribe_status run_offline_forward(SortformerSession * pc, SortformerModel * pm, int mel_n_frames) {
-    if (pc->compute_ctx != nullptr) {
-        ggml_free(pc->compute_ctx);
-        pc->compute_ctx = nullptr;
-    }
-    {
-        ggml_init_params ip{};
-        ip.mem_size     = 16 * 1024 * 1024;
-        ip.mem_buffer   = nullptr;
-        ip.no_alloc     = true;
-        pc->compute_ctx = ggml_init(ip);
-        if (pc->compute_ctx == nullptr) {
-            return TRANSCRIBE_ERR_GGUF;
-        }
-    }
-    ggml_context * ctx = pc->compute_ctx;
-
-    pk::EncoderBuild eb =
-        pk::build_encoder_graph(ctx, pm->conformer, pm->conformer_hp, mel_n_frames, GGML_TYPE_F32, pm->backend.c_str());
-    if (eb.mel_in == nullptr || eb.out == nullptr || eb.graph == nullptr) {
-        return TRANSCRIBE_ERR_GGUF;
-    }
-    const int T = static_cast<int>(eb.out->ne[1]);
-    const int d = pm->hparams.tf_d_model;
-
-    ggml_tensor * proj = linear(ctx, pm->weights.enc_proj_w, eb.out, pm->weights.enc_proj_b);
-    ggml_tensor * x    = proj;
-    for (int i = 0; i < pm->hparams.tf_n_layers; ++i) {
-        x = tf_block(ctx, pm->weights.tf_blocks[static_cast<size_t>(i)], x, d, pm->hparams.tf_n_heads, T);
-    }
-    ggml_tensor * tf_out = x;
-
-    ggml_tensor * h     = ggml_relu(ctx, tf_out);
-    h                   = linear(ctx, pm->weights.fc1_w, h, pm->weights.fc1_b);
-    h                   = ggml_relu(ctx, h);
-    ggml_tensor * s     = linear(ctx, pm->weights.single_spk_head_w, h, pm->weights.single_spk_head_b);
-    ggml_tensor * preds = ggml_sigmoid(ctx, s);
-
-    ggml_build_forward_expand(eb.graph, preds);
-    transcribe::debug::mark_tensor_for_dump(proj);
-    transcribe::debug::mark_tensor_for_dump(tf_out);
-    transcribe::debug::mark_tensor_for_dump(preds);
-
-    if (const transcribe_status st = ensure_sched(pc, pm); st != TRANSCRIBE_OK) {
-        return st;
-    }
-    ggml_backend_sched_reset(pc->sched);
-    if (!ggml_backend_sched_alloc_graph(pc->sched, eb.graph)) {
-        return TRANSCRIBE_ERR_GGUF;
-    }
-
-    ggml_backend_tensor_set(eb.mel_in, pc->mel_buf.data(), 0, pc->mel_buf.size() * sizeof(float));
-    transcribe::debug::dump_tensor("enc.mel.in", eb.mel_in, "frontend");
-
-    if (eb.pos_emb_in != nullptr) {
-        const int d_model = pm->conformer_hp.enc_d_model;
-        const int pos_len = static_cast<int>(eb.pos_emb_in->ne[1]);
-        fill_rel_pos_emb(pc->scratch.pos_buf, pc->scratch.pos_div_term, pos_len, d_model);
-        ggml_backend_tensor_set(eb.pos_emb_in, pc->scratch.pos_buf.data(), 0,
-                                pc->scratch.pos_buf.size() * sizeof(float));
-    }
-
-    transcribe::configure_sched_n_threads(pc->sched, pc->n_threads);
-    if (ggml_backend_sched_graph_compute(pc->sched, eb.graph) != GGML_STATUS_SUCCESS) {
-        log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "sortformer offline forward: graph_compute failed");
-        return TRANSCRIBE_ERR_GGUF;
-    }
-
-    transcribe::debug::dump_tensor("enc.fastconformer.out", eb.out, "encoder");
-    transcribe::debug::dump_tensor("enc.encoder_proj.out", proj, "encoder");
-    transcribe::debug::dump_tensor("enc.transformer.out", tf_out, "encoder");
-    transcribe::debug::dump_tensor("diar.preds_offline", preds, "encoder");
-    return TRANSCRIBE_OK;
 }
 
 // Streaming AOSC/FIFO forward core (the product path). Chunks the mel per
@@ -980,184 +738,4 @@ transcribe_status run_diar_streaming_core(DiarStreamScratch &            sc,
     return TRANSCRIBE_OK;
 }
 
-// Family wrapper: resolve the operating point, run the core, trim, dump,
-// and emit speaker segments on the session.
-static transcribe_status run_streaming(SortformerSession *          pc,
-                                       SortformerModel *            pm,
-                                       int                          mel_n_mels,
-                                       int                          mel_n_frames,
-                                       double                       ms_per_frame,
-                                       transcribe_sortformer_preset preset) {
-    const SortformerStreamParams P = resolve_stream_params(pm->hparams, preset);
-    if (const transcribe_status st = ensure_sched(pc, pm); st != TRANSCRIBE_OK) {
-        return st;
-    }
-
-    const int64_t           t_stream_start = ggml_time_us();
-    const transcribe_status st = run_diar_streaming_core(pc->scratch, pm->hparams, pm->conformer_hp, pm->conformer,
-                                                         pm->weights, pm->backend.c_str(), pc->sched, pc->n_threads, P,
-                                                         pc->mel_buf.data(), mel_n_mels, mel_n_frames, pc);
-    if (st != TRANSCRIBE_OK) {
-        return st;
-    }
-    pc->t_encode_us = ggml_time_us() - t_stream_start;
-
-    // Trim padding tail: NeMo total_preds[:, :ceil(feat_len/sub)].
-    const int sub      = pm->hparams.enc_subsampling_factor;
-    const int n_spk    = pm->hparams.max_speakers;
-    const int n_frames = (mel_n_frames + sub - 1) / sub;
-    const int used_n   = std::min(pc->scratch.stream.total_n, n_frames);
-
-    if (transcribe::debug::enabled()) {
-        const long long shape[2] = { used_n, n_spk };
-        transcribe::debug::dump_host_f32("diar.probs", pc->scratch.stream.total_preds.data(),
-                                         static_cast<long long>(used_n) * n_spk, shape, 2, "diarize");
-    }
-
-    probs_to_speaker_segments(pc, pc->scratch.stream.total_preds, used_n, n_spk, ms_per_frame, /*threshold=*/0.5f);
-    return TRANSCRIBE_OK;
-}
-
-transcribe_status run(transcribe_session *          session,
-                      const float *                 pcm,
-                      int                           n_samples,
-                      const transcribe_run_params * params) {
-    auto * pc = static_cast<SortformerSession *>(session);
-    auto * pm = static_cast<SortformerModel *>(session->model);
-
-    if (pc->poll_abort()) {
-        return TRANSCRIBE_ERR_ABORTED;
-    }
-
-    // Streaming operating-point run ext (kind/size/range already validated
-    // by the dispatcher + run_validate pre-clear; re-check is belt-and-braces).
-    transcribe_sortformer_preset preset = TRANSCRIBE_SORTFORMER_PRESET_DEFAULT;
-    if (params != nullptr && params->family != nullptr) {
-        if (const transcribe_status st = transcribe_ext_check(params->family, TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM,
-                                                              sizeof(struct transcribe_sortformer_stream_ext));
-            st != TRANSCRIBE_OK) {
-            return st;
-        }
-        preset = reinterpret_cast<const transcribe_sortformer_stream_ext *>(params->family)->preset;
-    }
-    pc->clear_result();
-    transcribe::debug::init();
-
-    if (!pm->mel.has_value()) {
-        return TRANSCRIBE_ERR_INVALID_ARG;
-    }
-    int mel_n_mels = 0, mel_n_frames = 0;
-    if (const transcribe_status mst =
-            pm->mel->compute(pcm, static_cast<size_t>(n_samples), pc->mel_buf, mel_n_mels, mel_n_frames);
-        mst != TRANSCRIBE_OK) {
-        return mst;
-    }
-
-    // Free GPU buffers (scheduler galloc) after each transcription to prevent
-    // memory accumulation across repeated runs. The session is reused across
-    // calls (e.g. Multi-STT extra models with multi_stt_keep_extra_models_loaded),
-    // so releasing here lets the caching allocator reuse freed blocks on the
-    // next run() rather than growing the cache (GPU memory leak on Windows).
-    auto cleanup_gpu = [&]() {
-        if (pc->sched != nullptr) {
-            safe_sched_free(pc->sched);
-            pc->sched = nullptr;
-        }
-    };
-
-    const double ms_per_frame =
-        1000.0 * static_cast<double>(pm->hparams.frame_hop) / static_cast<double>(pm->hparams.fe_sample_rate);
-
-    // Offline forward: parity dumps only. Gated behind an explicit env
-    // (set by validate.py cmd_cpp) because it runs full-context O(T^2)
-    // attention over the WHOLE clip — fine for the short oracle, but it would
-    // OOM on the many-minute audio the DER runner feeds (which also enables
-    // dumping, to read diar.probs). The streaming path is always the product.
-    if (transcribe::debug::enabled() && std::getenv("TRANSCRIBE_SORTFORMER_OFFLINE_DUMP") != nullptr) {
-        if (const transcribe_status st = run_offline_forward(pc, pm, mel_n_frames); st != TRANSCRIBE_OK) {
-            cleanup_gpu();
-            return st;
-        }
-    }
-
-    // Streaming AOSC/FIFO forward drives the product output + diar.probs.
-    if (const transcribe_status st = run_streaming(pc, pm, mel_n_mels, mel_n_frames, ms_per_frame, preset);
-        st != TRANSCRIBE_OK) {
-        cleanup_gpu();
-        return st;
-    }
-
-    pc->result_kind = TRANSCRIBE_TIMESTAMPS_NONE;
-    pc->has_result  = true;
-    cleanup_gpu();
-    return TRANSCRIBE_OK;
-}
-
-// Kind+slot probe. Sortformer ships one RUN-slot extension (the streaming
-// operating-point preset); there is no STREAM-slot surface (no push-audio
-// entry point yet — a future one registers a separate kind).
-static bool accepts_ext_kind(const transcribe_model * model, transcribe_ext_slot slot, uint32_t kind) {
-    if (model == nullptr) {
-        return false;
-    }
-    if (slot != TRANSCRIBE_EXT_SLOT_RUN) {
-        return false;
-    }
-    return kind == TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM;
-}
-
-// Pre-clear validation for the _RUN slot (see Arch::run_validate): reject a
-// malformed ext or an out-of-range preset before the previous result
-// snapshot is destroyed.
-static transcribe_status run_validate(const transcribe_session * /*ctx*/, const transcribe_run_params * params) {
-    if (params == nullptr || params->family == nullptr) {
-        return TRANSCRIBE_OK;  // NULL ext -> family defaults
-    }
-    if (const transcribe_status st = transcribe_ext_check(params->family, TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM,
-                                                          sizeof(struct transcribe_sortformer_stream_ext));
-        st != TRANSCRIBE_OK) {
-        return st;
-    }
-    const auto * ext = reinterpret_cast<const transcribe_sortformer_stream_ext *>(params->family);
-    switch (ext->preset) {
-        case TRANSCRIBE_SORTFORMER_PRESET_DEFAULT:
-        case TRANSCRIBE_SORTFORMER_PRESET_VERY_HIGH_LATENCY:
-        case TRANSCRIBE_SORTFORMER_PRESET_HIGH_LATENCY:
-        case TRANSCRIBE_SORTFORMER_PRESET_LOW_LATENCY:
-            return TRANSCRIBE_OK;
-    }
-    return TRANSCRIBE_ERR_INVALID_ARG;
-}
-
-extern const Arch arch = {
-    /* .name             = */ "sortformer",
-    /* .load             = */ load,
-    /* .init_context     = */ init_context,
-    /* .run              = */ run,
-    /* .run_batch        = */ nullptr,
-    /* .stream_validate  = */ nullptr,
-    /* .stream_begin     = */ nullptr,
-    /* .stream_feed      = */ nullptr,
-    /* .stream_finalize  = */ nullptr,
-    /* .stream_reset     = */ nullptr,
-    /* .accepts_ext_kind = */ accepts_ext_kind,
-    /* .run_validate     = */ run_validate,
-};
-
 }  // namespace transcribe::sortformer
-
-// ---------------------------------------------------------------------------
-// Public sortformer extension init function (global scope, C linkage).
-// Defined here so transcribe.cpp stays family-agnostic; stamps the
-// transcribe_ext header (size + kind) and the preset default.
-// ---------------------------------------------------------------------------
-
-extern "C" void transcribe_sortformer_stream_ext_init(struct transcribe_sortformer_stream_ext * p) {
-    if (p == nullptr) {
-        return;
-    }
-    std::memset(p, 0, sizeof(*p));
-    p->ext.size = sizeof(*p);
-    p->ext.kind = TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM;
-    p->preset   = TRANSCRIBE_SORTFORMER_PRESET_DEFAULT;
-}

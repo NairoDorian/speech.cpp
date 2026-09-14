@@ -1590,12 +1590,18 @@ static transcribe_status transcribe_model_load_file_impl(const char *           
     // Per-family dispatch. The architecture string came from the GGUF KV so
     // the loader guarantees it is non-null and NUL-terminated.
     const transcribe::Arch * arch = transcribe::find_arch(loader.arch().c_str());
-    if (arch == nullptr && loader.arch() == "audiocpp") {
-        // An audio.cpp-converted GGUF: general.architecture is the container
-        // name "audiocpp" and the family lives in audiocpp.model_spec.family.
-        // No transcribe arch can ever claim it, so ask the framework registry
-        // - the same path a safetensors directory takes above. Before Phase
-        // 10.5 this returned UNSUPPORTED_ARCH for every audio.cpp package.
+    if (arch == nullptr) {
+        // No builtin transcribe arch and no adapter-table name claims this
+        // GGUF architecture. Two shapes reach the engine here through the
+        // framework registry: audio.cpp packages (general.architecture is
+        // the container name "audiocpp" and the family lives in
+        // audiocpp.model_spec.family) and foreign conversions naming their
+        // family only in general.architecture (e.g. NVIDIA's "sortformer",
+        // which the family registry aliases to sortformer_diar — ledger
+        // B15 retired the standalone arch that used to own the name). The
+        // sniff only reports families the adapter table dispatches, so an
+        // unrelated GGUF still fails with UNSUPPORTED_ARCH below instead of
+        // being probed by every loader.
         const std::string family = transcribe::adapter_sniff_framework_family(path);
         if (family.empty()) {
             return TRANSCRIBE_ERR_UNSUPPORTED_ARCH;
@@ -1609,9 +1615,6 @@ static transcribe_status transcribe_model_load_file_impl(const char *           
             return TRANSCRIBE_ERR_UNSUPPORTED_ARCH;
         }
         return fw_arch->load(fw_loader, params, out_model);
-    }
-    if (arch == nullptr) {
-        return TRANSCRIBE_ERR_UNSUPPORTED_ARCH;
     }
 
     // A registered family with no load entry point yet is treated as

@@ -13,6 +13,7 @@
 // knobs themselves are served by the ArchAdapter, which translates the
 // extension into the framework session's request options.
 
+#include "transcribe/sortformer.h"
 #include "transcribe/voxtral_realtime.h"
 
 #include <cstring>
@@ -29,4 +30,19 @@ extern "C" void transcribe_voxtral_realtime_stream_ext_init(struct transcribe_vo
     p->ext.kind               = TRANSCRIBE_EXT_KIND_VOXTRAL_REALTIME_STREAM;
     p->num_delay_tokens       = -1;
     p->min_decode_interval_ms = -1;
+}
+
+// sortformer: arch retired in Phase 10.5 (ledger B15). The engine
+// `sortformer_diar` family serves both packages through the adapter, which
+// translates the preset into the stream_preset request option; the parakeet
+// multitalker bundle keeps the embedded-diarizer core. The init function
+// stamps the transcribe_ext header (size + kind) and the preset default.
+extern "C" void transcribe_sortformer_stream_ext_init(struct transcribe_sortformer_stream_ext * p) {
+    if (p == nullptr) {
+        return;
+    }
+    std::memset(p, 0, sizeof(*p));
+    p->ext.size = sizeof(*p);
+    p->ext.kind = TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM;
+    p->preset   = TRANSCRIBE_SORTFORMER_PRESET_DEFAULT;
 }

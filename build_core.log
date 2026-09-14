@@ -1,0 +1,31 @@
+[0/2] Re-checking globbed directories...
+[1/41] Building CXX object CMakeFiles\engine_transcribe_runtime.dir\src\runtime\transcribe.cpp.obj
+[2/41] Linking CXX static library transcribe_internal.lib
+[3/41] Linking CXX executable bin\transcribe_debug_dump_unit.exe
+[4/41] Linking CXX shared library bin\transcribe.dll
+[5/31] Linking CXX executable bin\transcribe_backend_init_throw_unit.exe
+[6/31] Linking CXX executable bin\transcribe_backend_classification_unit.exe
+[7/31] Linking CXX executable bin\transcribe_backend_probe_order_unit.exe
+[8/31] Linking CXX executable bin\transcribe_conv_pw_promote_unit.exe
+[9/31] Linking CXX executable bin\transcribe_backend_metal_simdgroup_gate_unit.exe
+[10/31] Linking CXX executable bin\transcribe_batch_mask_unit.exe
+[11/31] Linking CXX executable bin\transcribe_prefill_chunk_mask_unit.exe
+[12/31] Linking CXX executable bin\transcribe_log_unit.exe
+[13/31] Linking CXX executable bin\transcribe_parakeet_chunked_limited_with_rc_mask_unit.exe
+[14/31] Linking CXX executable bin\transcribe_stream_capability_unit.exe
+[15/31] Linking CXX executable bin\transcribe_stream_committed_pointer_stability.exe
+[16/31] Linking CXX executable bin\transcribe_teardown_safety_unit.exe
+[17/31] Linking CXX executable bin\transcribe_mel_unit.exe
+[18/31] Linking CXX executable bin\transcribe_granite_diarize_parser_unit.exe
+[19/31] Linking CXX executable bin\transcribe_run_dispatch_unit.exe
+[20/31] Linking CXX executable bin\transcribe_parakeet_stream_ext_reject_unit.exe
+[21/31] Linking CXX executable bin\transcribe_thread_default_unit.exe
+[22/31] Linking CXX executable bin\transcribe_backend_init_unit.exe
+[23/31] Linking CXX executable bin\transcribe_stream_dispatch_unit.exe
+[24/31] Linking CXX executable bin\transcribe_moss_diarize_parser_unit.exe
+[25/31] Linking CXX executable bin\transcribe_whisper_bin_parser_unit.exe
+[26/31] Linking CXX executable bin\transcribe_utf8_path_unit.exe
+[27/31] Linking CXX executable bin\transcribe_tokenizer_decode_only_unit.exe
+[28/31] Linking CXX executable bin\transcribe_whisper_bin_suppress_unit.exe
+[29/31] Linking CXX executable bin\test_batch_dispatch.exe
+[30/31] Linking CXX executable bin\test_adapter_sniff_dispatch.exe

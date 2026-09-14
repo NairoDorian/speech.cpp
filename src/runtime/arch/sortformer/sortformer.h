@@ -6,8 +6,10 @@
 // No tokenizer, no decoder, no text: the product is a T x 4 per-frame
 // speaker-activity probability matrix.
 //
-// The central dispatcher talks to the family only through the Arch trait
-// and the base classes.
+// The standalone family (own GGUF through the Arch trait) was retired — the
+// engine `sortformer_diar` family serves it via the ArchAdapter (ledger
+// B15). This header now exposes only the embedded-diarizer surface the
+// parakeet multitalker bundle consumes.
 
 #pragma once
 
@@ -21,7 +23,6 @@
 #include "weights.h"
 
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -37,46 +38,8 @@ typedef struct ggml_backend_sched *  ggml_backend_sched_t;
 
 namespace transcribe::sortformer {
 
-// Family defaults, applied before transcribe::read_capability_kv (KV
-// present overrides, KV absent keeps the default). Defined in
-// capabilities.cpp.
-void apply_family_invariants(transcribe_model & model);
-
-// Concrete model. Owns ctx_meta (every weight tensor's data buffer);
-// the destructor frees it, invalidating every borrowed ggml_tensor* in
-// `conformer` / `weights`.
-struct SortformerModel final : public transcribe_model {
-    SortformerHParams hparams;
-
-    // Conformer encoder reuse. `conformer_hp` carries only the encoder +
-    // frontend fields parakeet::build_encoder_graph reads; `conformer`
-    // holds only pre_encode + blocks (predictor/joint/etc. stay empty).
-    transcribe::parakeet::ParakeetHParams conformer_hp;
-    transcribe::parakeet::ParakeetWeights conformer;
-
-    // Sortformer-specific weights (encoder_proj + transformer + diar head).
-    SortformerWeights weights;
-
-    ggml_context *          ctx_meta = nullptr;
-    transcribe::BackendPlan plan;
-    ggml_backend_buffer_t   backend_buffer = nullptr;
-
-    // Fused conformer BN params (computed at load from the raw BN tensors).
-    ggml_context *        bn_fused_ctx    = nullptr;
-    ggml_backend_buffer_t bn_fused_buffer = nullptr;
-
-    // Mel front-end, constructed once at load() from hparams.
-    std::optional<transcribe::MelFrontend> mel;
-
-    SortformerModel() = default;
-    ~SortformerModel() override;
-
-    // No tokenizer for a diarizer.
-    const transcribe::Tokenizer * tokenizer() const override { return nullptr; }
-};
-
-// Streaming operating point (resolved from GGUF stream defaults; a later
-// change will expose the presets via a stream extension). All lengths are
+// Streaming operating point (resolved from GGUF stream defaults; selected
+// per run via the transcribe_sortformer_stream_ext preset). All lengths are
 // in 80 ms diar frames.
 struct SortformerStreamParams {
     int   chunk_len                   = 188;
@@ -167,8 +130,8 @@ void streaming_update_sync(SortformerStreamState &        st,
 void compress_spkcache(SortformerStreamState & st, const SortformerStreamParams & p, int n_spk, int emb_dim);
 
 // Scratch for one streaming diarization forward, owned by whichever session
-// drives it: the sortformer session (standalone family) or the parakeet
-// session (multitalker bundle). compute_ctx is (re)created per chunk by
+// drives it — today only the parakeet multitalker bundle (the standalone
+// sortformer family was retired). compute_ctx is (re)created per chunk by
 // run_diar_streaming_core and freed by the destructor.
 struct DiarStreamScratch {
     ggml_context *     compute_ctx = nullptr;
@@ -184,24 +147,6 @@ struct DiarStreamScratch {
 
     DiarStreamScratch() = default;
     ~DiarStreamScratch();
-};
-
-// Concrete context. Owns a per-call compute context and a persistent
-// multi-backend scheduler.
-struct SortformerSession final : public transcribe_session {
-    ggml_context *       compute_ctx = nullptr;  // offline-forward graph ctx
-    ggml_backend_sched_t sched       = nullptr;
-
-    // Per-context scratch reused across runs.
-    std::vector<float> mel_buf;
-    std::vector<float> probs_host;  // [n_spk * T], read back from diar.preds
-
-    // Streaming scratch (AOSC/FIFO path + rel-pos tables, shared with the
-    // offline forward's pos_emb fill).
-    DiarStreamScratch scratch;
-
-    SortformerSession() = default;
-    ~SortformerSession() override;
 };
 
 // ---- Embedded-diarizer surface (multitalker bundle) -------------------- //

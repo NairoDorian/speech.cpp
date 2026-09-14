@@ -2449,14 +2449,14 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
                 set_tests_properties(voxtral_realtime_ext_abi_test PROPERTIES SKIP_RETURN_CODE 2)
             endif()
 
-            # Same rule for the Sortformer run extension. The v1 package is an
-            # audio.cpp GGUF and reaches the engine through the adapter; the
-            # NeMo-layout v2 package still names the builtin arch while that
-            # arch exists, so this gate runs on v1 until the retirement lands.
+            # Same rule for the Sortformer run extension. With the standalone
+            # arch retired (ledger B15), the adapter owns the "sortformer" GGUF
+            # architecture name, so the NeMo-layout v2 package resolves to the
+            # engine `sortformer_diar` family like v1 always did.
             if ("sortformer_diar" IN_LIST AUDIOCPP_LINKED_MODELS)
                 add_test(NAME sortformer_diar_ext_abi_test
                          COMMAND sortformer_diar_ext_abi_test
-                             "${CMAKE_CURRENT_SOURCE_DIR}/models/sortformer-diar-4spk-v1-q8_0.gguf"
+                             "${CMAKE_CURRENT_SOURCE_DIR}/models/diar_streaming_sortformer_4spk-v2.q8_0.gguf"
                              "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech"
                          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
                 set_tests_properties(sortformer_diar_ext_abi_test PROPERTIES SKIP_RETURN_CODE 2)

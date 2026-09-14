@@ -73,20 +73,20 @@ namespace medasr {
 extern const Arch arch;
 }
 
-namespace sortformer {
-extern const Arch arch;
-}
-
 const Arch * find_arch(const char * name) {
     if (name == nullptr) {
         return nullptr;
     }
 
+    // The standalone `sortformer` arch was retired (ledger B15): the engine
+    // family `sortformer_diar` serves both its packages through the
+    // ArchAdapter, and the parakeet multitalker bundle keeps the embedded
+    // diarizer core under src/runtime/arch/sortformer.
     static const Arch * const k_archs[] = {
         &parakeet::arch,         &cohere::arch,      &canary::arch,     &voxtral::arch,
         &canary_qwen::arch,      &whisper::arch,     &moonshine::arch,  &moonshine_streaming::arch,
         &sensevoice::arch,       &funasr_nano::arch, &gigaam::arch,     &granite::arch,   &granite_nar::arch,
-        &medasr::arch,           &moss::arch,        &sortformer::arch,
+        &medasr::arch,           &moss::arch,
     };
     constexpr size_t k_n = sizeof(k_archs) / sizeof(k_archs[0]);
 
