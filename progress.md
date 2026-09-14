@@ -46,7 +46,7 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | Test suite status | **110/110 total (108 passed, 2 clean skips on unpinned weights) 100% green** on `build-cpu-core`; custom C-ABI tree (`qwen3_asr,voxtral_realtime,sortformer_diar`) gates green | **100%** |
 | **Completed increment** | **Upstream `78d47706` (0 behind), ggml 0.22.0 (CPU+CUDA certified), Phase 11 W1a + W1b + W2a** | **DONE** |
 | **Phase 10.5, family 3 of 5: `sortformer_diar` step 2 (feature-merge)** | **Done 2026-08-27** — chunked AOSC/FIFO scheduler + presets + typed RUN ext in the engine; the catalogue's default (NeMo-layout) v2 package opens in the engine (neither parent could); chunked == whole-window to 1.8e-7; 0/600 decision flips vs the arch on identical weights; **111/111** core, C-ABI ext gate OK. Report: `docs/reports/sortformer_diar_engine_port.md` | 100% |
-| **Next increment** | **Phase 10.5 complete — all 5 overlapping families retired (B11–B15: 9cc5457 / fdaa9a5 / e3e7eac1 / 1be9ac40 / a8b7a03b). Next: Phase 11a (ASR runtime layer: `EncDecKVCache`, `DecodeDriver`, `AsrResult`/`AsrLimits`, 3-port re-base)** | Ready |
+| **Next increment** | **Phase 11a foundation: `AsrResult`/`AsrLimits`, `TaskResult.truncated` propagation, VAD dedup (B29)** | **DONE & pushed (c59b15a0)** |
 
 ## DONE this session
 
@@ -59,6 +59,23 @@ Completed the final retirement of the Phase 10.5 family wave, dropping the paral
 - **`CMakeLists.txt`**: added `asr_e2e_fun_asr_nano_wer_test` WER gate against the pinned `models/fun-asr-nano-2512-f16.gguf` (gated on `fun_asr_nano` linked + file present → SKIP otherwise).
 - **`tests/transcribe/loader_smoke.cpp` + `tests/fixtures/make_gguf_fixtures.py`**: the synthetic `arch_funasr_nano.gguf` (still carries `general.architecture = "funasr_nano"`) now sniffs through the family-registry alias map to the engine `fun_asr_nano` family, whose loader rejects the missing-tensor payload → `TRANSCRIBE_ERR_UNSUPPORTED_ARCH` (same path as B13's sensevoice).
 - **Verification**: `cpu-core` build clean (engine_transcribe_runtime, asr_e2e_wer_test, test_adapter_sniff_dispatch compile + link); `test_adapter_sniff_dispatch` passes (adapter routes "funasr_nano" GGUF → fun_asr_nano family correctly). `cpu-full` has a pre-existing firered_audio ggml API mismatch (upstream `3eccab50` / v0.22.0) unrelated to this change.
+
+### Phase 11a foundation — AsrResult/AsrLimits, TaskResult.truncated, VAD dedup (B29) (2026-09-14, commit c59b15a0)
+
+Established the shared ASR runtime layer that all three engine ports (moonshine offline W1a, moonshine_streaming W1b, whisper offline W2a) will converge onto.
+
+- **L11 fix**: Added `bool truncated = false` to `TaskResult` (`include/engine/framework/runtime/session.h`). Previously `TaskResult` had no `truncated` field, violating the "every ASR result must carry truncated honestly" rule. Propagated through the three ASR sessions:
+  - `MoonshineSession::run()` — `result.truncated = transcription.truncated;`
+  - `MoonshineStreamingSession::on_finalize()` — `result.truncated = transcription.truncated;` (uses `MoonshineStreamingTranscription::truncated` + `stream_truncated_`)
+  - `WhisperSession::run()` — `result.truncated = transcription.truncated;`
+  This also fixes the W2a defect where Whisper > 30 s audio was silently truncated with no signal to the caller.
+
+- **Shared types**: Created `include/engine/framework/asr/asr_result.h` with `AsrResult { text, truncated }` and `AsrLimits { max_audio_ms, max_output_tokens, sample_rate }`. All three per-family transcription structs (WhisperTranscription, MoonshineTranscription, MoonshineStreamingTranscription) carry the same `{text, truncated}` shape — `AsrResult` is the canonical unification target.
+
+- **VAD dedup (B29)**: Deleted `src/runtime/transcribe-vad{,-integrate}.{h,cpp}` (~500 LOC), which were verbatim ports of `audio/chunking.cpp`'s `plan_vad_audio_chunks` and `append_chunk_speech_metadata`. Consolidated the arch-level VAD runner (`detect_speech`, `run_with_vad`, merge helpers) into `transcribe.cpp` as `namespace transcribe::vad`. The local `plan()` clone is now replaced by `engine::audio::plan_vad_audio_chunks()` — the shared sampler-based chunker. Merge helpers (`offset_chunk_results`, `rollback_to`, `rebuild_full_text`) retained since they operate on `transcribe_session` (arch-level), not `TaskResult` (engine-level). Removed orphaned `transcribe-kaldi-fbank.cpp` from the runtime OBJECT library (last arch consumers funasr_nano + sensevoice retired in Phase 10.5).
+
+- **Tests**: Deleted `vad_plan_unit.cpp` + `vad_merge_unit.cpp` (coverage subsumed by `test_audio_chunking`).
+- **Verification**: `cpu-core` build clean (engine_transcribe_runtime, transcribe.dll, test_adapter_sniff_dispatch compile + link); `test_adapter_sniff_dispatch` passes; `audio_chunking_test` passes. `cpu-full` has a pre-existing firered_audio ggml API mismatch (upstream v0.22.0) unrelated to this change.
 
 ### Client compact minimized build profile (2026-09-14)
 New build posture for client-side desktop GUI embedding without the HTTP server, WebUI assets, or unused model families.

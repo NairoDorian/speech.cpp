@@ -214,8 +214,19 @@ Dates are the work-session dates recorded in the plan.
 ### Removed
 
 - **Phase 10.5, family 4 of 5: `fun_asr_nano` arch retired (commit 1be9ac40)** — the engine `fun_asr_nano` family now owns the name; the parallel transcribe.cpp arch is deleted (~3,372 LOC across 11 files in `src/runtime/arch/funasr_nano/`). The orphaned `transcribe-kaldi-fbank.cpp` (last consumer was the funasr_nano arch; sensevoice's arch was retired in B13) is removed from the `engine_transcribe_runtime` OBJECT library. A new `asr_e2e_fun_asr_nano_wer_test` gate is registered against the pinned `fun-asr-nano-2512-f16.gguf`. The synthetic `arch_funasr_nano.gguf` fixture (still carrying `general.architecture = "funasr_nano"`) now routes through the family-registry alias map to the engine family, which rejects the missing-tensor payload with `TRANSCRIBE_ERR_UNSUPPORTED_ARCH`. Phase 10.5 is complete: all five overlapping families retired (B11–B15).
+- **Phase 11a: VAD code deduplication (B29, commit c59b15a0)** — deleted `src/runtime/transcribe-vad{,-integrate}.{h,cpp}` (~500 LOC), which were verbatim ports of `audio/chunking`'s `plan_vad_audio_chunks` and `append_chunk_speech_metadata`. Consolidated the arch-level VAD runner into `transcribe.cpp` (`namespace transcribe::vad`), now calling the shared `plan_vad_audio_chunks()` instead of the local `plan()` clone. Deleted `tests/unittests/vad_plan_unit.cpp` and `vad_merge_unit.cpp` (coverage subsumed by `test_audio_chunking`).
+
+### Added
+
+- **`include/engine/framework/asr/asr_result.h`**: added `AsrResult { text, truncated }` and `AsrLimits { max_audio_ms, max_output_tokens, sample_rate }` shared types for ASR engine packages (Phase 11a foundation).
 
 ### Fixed
+
+- **W2a Whisper 30-second truncation defect / L11 rule violation**: added `bool truncated = false` to `TaskResult` (`include/engine/framework/runtime/session.h`). Previously `TaskResult` had no `truncated` field, so Whisper's `WhisperTranscription::truncated` was silently dropped. Now propagated through `WhisperSession::run()`, `MoonshineSession::run()`, and `MoonshineStreamingSession::on_finalize()` — every ASR result carries `truncated` honestly.
+
+### Changed
+
+- **`CMakeLists.txt`**: removed `transcribe-vad{,-integrate}.cpp` from the `engine_transcribe_runtime` OBJECT library and deleted their test executable registrations. Added `asr_e2e_fun_asr_nano_wer_test` WER gate.
 
 - **Phase 7 Defect D1 Remediation: GGUF Sniff Architecture Precedence Collision**:
   In `src/runtime/transcribe.cpp`, routed model architecture sniffing to `transcribe::adapter_find_arch(family.c_str())`,
