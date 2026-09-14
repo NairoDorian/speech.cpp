@@ -186,11 +186,10 @@ int main() {
     // surfaces the missing payload as TRANSCRIBE_ERR_GGUF — the loader
     // dispatched correctly, the family handler then rejected the file.
     check_load("arch_parakeet.gguf", TRANSCRIBE_ERR_GGUF);
-    // Same shape for funasr_nano: the arch is in the dispatch table, the
-    // handler runs, then rejects on the missing hparam / tensor payload.
-    // Distinguishes "registered family but bad GGUF" from "unknown
-    // architecture".
-    check_load("arch_funasr_nano.gguf", TRANSCRIBE_ERR_GGUF);
+    // fun_asr_nano's builtin arch was retired (B14): the synthetic GGUF now
+    // sniffs to the engine fun_asr_nano family, whose loader rejects the
+    // missing-tensor payload -> UNSUPPORTED_ARCH (same as B13's sensevoice).
+    check_load("arch_funasr_nano.gguf", TRANSCRIBE_ERR_UNSUPPORTED_ARCH);
     // sensevoice no longer has a builtin arch (B13): the synthetic GGUF
     // sniffs to the engine sense_asr family, whose loader then rejects the
     // missing tensor payload — surfacing as UNSUPPORTED_ARCH through the

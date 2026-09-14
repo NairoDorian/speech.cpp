@@ -1307,7 +1307,9 @@ def emit_fixtures(out_dir: Path) -> None:
         ),
     )
 
-    # Same for FunASR-Nano (audio-llm arch).
+    # Fun-ASR-Nano's builtin arch was retired (B14); the GGUF now sniffs to
+    # the engine fun_asr_nano family, whose loader rejects the missing
+    # tensor payload -> TRANSCRIBE_ERR_UNSUPPORTED_ARCH.
     _write(
         out_dir / "arch_funasr_nano.gguf",
         _build_header(

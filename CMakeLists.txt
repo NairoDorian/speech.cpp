@@ -2168,7 +2168,6 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
         src/runtime/transcribe-env.cpp
         src/runtime/transcribe-family-ext.cpp
         src/runtime/transcribe-flash-policy.cpp
-        src/runtime/transcribe-kaldi-fbank.cpp
         src/runtime/transcribe-load-common.cpp
         src/runtime/transcribe-loader.cpp
         src/runtime/transcribe-mel.cpp
@@ -2457,6 +2456,17 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
                              "${CMAKE_CURRENT_SOURCE_DIR}/models/sensevoice-small-q8-audiocpp-v1.gguf"
                              "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
                 set_tests_properties(asr_stream_text_sense_asr_wer_test PROPERTIES SKIP_RETURN_CODE 2)
+            endif()
+
+            # FunASR-Nano through the engine fun_asr_nano family (B14). Offline
+            # only by spec, so a WER gate rather than a stream gate. Baseline
+            # measured from the C ABI against the pinned audio.cpp GGUF.
+            if ("fun_asr_nano" IN_LIST AUDIOCPP_LINKED_MODELS)
+                add_test(NAME asr_e2e_fun_asr_nano_wer_test
+                         COMMAND asr_e2e_wer_test
+                             "${CMAKE_CURRENT_SOURCE_DIR}/models/fun-asr-nano-2512-f16.gguf"
+                             "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
+                set_tests_properties(asr_e2e_fun_asr_nano_wer_test PROPERTIES SKIP_RETURN_CODE 2)
             endif()
 
             # The extension surface resolves only where the product links the
