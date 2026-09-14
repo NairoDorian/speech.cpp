@@ -562,7 +562,7 @@ LinearAttentionCachedOutput linear_attention_prefill(
     beta = core::reshape_tensor(ctx, beta, core::TensorShape::from_dims({1, steps, config.linear_num_value_heads, 1}));
     g = core::reshape_tensor(ctx, g, core::TensorShape::from_dims({1, steps, config.linear_num_value_heads, 1}));
     auto delta = core::wrap_tensor(
-        ggml_gated_delta_net(ctx.ggml, query.tensor, key.tensor, value.tensor, g.tensor, beta.tensor, state.tensor),
+        ggml_gated_delta_net(ctx.ggml, query.tensor, key.tensor, value.tensor, g.tensor, beta.tensor, state.tensor, /*K=*/1),
         core::TensorShape::from_dims({steps + config.linear_value_head_dim, value_dim}),
         GGML_TYPE_F32);
     auto current_delta = modules::SliceModule({0, 0, steps}).build(ctx, delta);
@@ -644,7 +644,7 @@ LinearAttentionCachedOutput linear_attention_cached(
     beta = core::reshape_tensor(ctx, beta, core::TensorShape::from_dims({1, 1, config.linear_num_value_heads, 1}));
     g = core::reshape_tensor(ctx, g, core::TensorShape::from_dims({1, 1, config.linear_num_value_heads, 1}));
     auto delta = core::wrap_tensor(
-        ggml_gated_delta_net(ctx.ggml, query.tensor, key.tensor, value.tensor, g.tensor, beta.tensor, recurrent_state.tensor),
+        ggml_gated_delta_net(ctx.ggml, query.tensor, key.tensor, value.tensor, g.tensor, beta.tensor, recurrent_state.tensor, /*K=*/1),
         core::TensorShape::from_dims({1 + config.linear_value_head_dim, value_dim}),
         GGML_TYPE_F32);
     auto current_delta = modules::SliceModule({0, 0, 1}).build(ctx, delta);
