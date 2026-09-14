@@ -11,6 +11,7 @@
 #include "engine/framework/modules/norm_modules.h"
 #include "engine/framework/modules/positional_modules.h"
 #include "engine/framework/modules/primitive_modules.h"
+#include "engine/framework/asr/decode_driver.h"
 #include "engine/framework/modules/structural_modules.h"
 #include "engine/framework/runtime/kv_cache.h"
 
@@ -187,32 +188,6 @@ TextDecoderWeights load_weights(
     weights.lm_head = weights.store->load_tensor(source, "audio_decoder_proj.text_lm_head.weight", storage_type, {config.output_size, config.hidden_size});
     weights.store->upload();
     return weights;
-}
-
-int32_t argmax_index(const std::vector<float> & values) {
-    if (values.empty()) {
-        throw std::runtime_error("Higgs Audio STT text_decoder cannot select from empty logits");
-    }
-    size_t best = 0;
-    for (size_t i = 1; i < values.size(); ++i) {
-        if (values[i] > values[best]) {
-            best = i;
-        }
-    }
-    return static_cast<int32_t>(best);
-}
-
-int32_t argmax_index_ptr(const float * values, size_t count) {
-    if (values == nullptr || count == 0) {
-        throw std::runtime_error("Higgs Audio STT text_decoder cannot select from empty logits");
-    }
-    size_t best = 0;
-    for (size_t i = 1; i < count; ++i) {
-        if (values[i] > values[best]) {
-            best = i;
-        }
-    }
-    return static_cast<int32_t>(best);
 }
 
 bool is_eos(const HiggsAudioSTTTextDecoderConfig & config, int32_t token) {
@@ -816,7 +791,7 @@ struct HiggsAudioSTTTextDecoderRuntime::Impl {
         std::vector<float> logits = std::move(prefill.logits);
         timing_start = Clock::now();
         for (int64_t step = 0; step < options.max_new_tokens; ++step) {
-            const int32_t token = argmax_index(logits);
+            const int32_t token = static_cast<int32_t>(engine::asr::argmax_logits(logits.data(), static_cast<int>(logits.size())));
             if (is_eos(config, token)) {
                 break;
             }
@@ -902,7 +877,7 @@ struct HiggsAudioSTTTextDecoderRuntime::Impl {
         std::vector<char> finished(n, 0);
         int64_t active = static_cast<int64_t>(n);
         for (size_t b = 0; b < n; ++b) {
-            const int32_t tok = argmax_index(first_logits[b]);
+            const int32_t tok = static_cast<int32_t>(engine::asr::argmax_logits(first_logits[b].data(), static_cast<int>(first_logits[b].size())));
             positions[b] = static_cast<int32_t>(prompt_steps[b]);
             slots[b] = static_cast<int32_t>(prompt_steps[b]);
             visible[b] = prompt_steps[b];
@@ -921,7 +896,7 @@ struct HiggsAudioSTTTextDecoderRuntime::Impl {
                     continue;
                 }
                 const float * row = logits_batch.data() + b * static_cast<size_t>(config.output_size);
-                const int32_t tok = argmax_index_ptr(row, static_cast<size_t>(config.output_size));
+                const int32_t tok = static_cast<int32_t>(engine::asr::argmax_logits(row, config.output_size));
                 if (is_eos(config, tok)) {
                     finished[b] = 1;
                     --active;

@@ -8,6 +8,7 @@
 #include "engine/framework/modules/norm_modules.h"
 #include "engine/framework/modules/primitive_modules.h"
 #include "engine/framework/modules/structural_modules.h"
+#include "engine/framework/asr/decode_driver.h"
 #include "engine/framework/runtime/kv_cache.h"
 
 #include "../../framework/modules/attention/attention_internal.h"
@@ -80,14 +81,6 @@ int64_t head_dim(const HviskeDecoderConfig & config) {
         throw std::runtime_error("Hviske decoder attention config is invalid");
     }
     return config.hidden_size / config.heads;
-}
-
-int32_t argmax_index(const std::vector<float> & values) {
-    if (values.empty()) {
-        throw std::runtime_error("Hviske decoder cannot select from empty logits");
-    }
-    return static_cast<int32_t>(
-        std::distance(values.begin(), std::max_element(values.begin(), values.end())));
 }
 
 bool is_eos(const HviskeDecoderConfig & config, int32_t token) {
@@ -1561,7 +1554,7 @@ HviskeDecoderResult HviskeDecoderRuntime::generate(
         }
         decode_graph_->import_state(*prefill_graph_, encoded);
         std::mt19937 rng(options.seed);
-        int32_t token = options.do_sample ? sample_token(prefill.logits, options, rng) : argmax_index(prefill.logits);
+        int32_t token = options.do_sample ? sample_token(prefill.logits, options, rng) : static_cast<int32_t>(engine::asr::argmax_logits(prefill.logits.data(), static_cast<int>(prefill.logits.size())));
         for (int64_t step = 0; step < max_new_tokens; ++step) {
             if (is_eos(config, token)) {
                 break;
@@ -1571,7 +1564,7 @@ HviskeDecoderResult HviskeDecoderRuntime::generate(
                 break;
             }
             const auto logits = decode_graph_->run_step(token);
-            token = options.do_sample ? sample_token(logits, options, rng) : argmax_index(logits);
+            token = options.do_sample ? sample_token(logits, options, rng) : static_cast<int32_t>(engine::asr::argmax_logits(logits.data(), static_cast<int>(logits.size())));
         }
     } else {
         const int64_t beam_count_i64 = options.num_beams;

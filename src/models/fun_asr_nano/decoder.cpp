@@ -11,6 +11,7 @@
 #include "engine/framework/modules/positional_modules.h"
 #include "engine/framework/modules/primitive_modules.h"
 #include "engine/framework/modules/structural_modules.h"
+#include "engine/framework/asr/decode_driver.h"
 #include "engine/framework/modules/transformers/qwen_causal_decoder.h"
 #include "engine/framework/runtime/kv_cache.h"
 
@@ -255,19 +256,6 @@ TextDecoderWeights load_weights(const FunAsrNanoAssets &assets,
   return weights;
 }
 
-int32_t argmax_index(const std::vector<float> &values) {
-  if (values.empty()) {
-    throw std::runtime_error(
-        "Fun-ASR-Nano decoder cannot select from empty logits");
-  }
-  size_t best = 0;
-  for (size_t i = 1; i < values.size(); ++i) {
-    if (values[i] > values[best]) {
-      best = i;
-    }
-  }
-  return static_cast<int32_t>(best);
-}
 
 bool is_eos(const FunAsrNanoTextConfig &config, int32_t token) {
   return token == config.eos_token_id;
@@ -742,7 +730,7 @@ struct FunAsrNanoDecoderRuntime::Impl {
       if (options.capture_logits) {
         out.step_logits.push_back(logits);
       }
-      const int32_t token = argmax_index(logits);
+      const int32_t token = static_cast<int32_t>(engine::asr::argmax_logits(logits.data(), static_cast<int>(logits.size())));
       if (is_eos(config, token)) {
         break;
       }

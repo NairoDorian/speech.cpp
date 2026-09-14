@@ -3,6 +3,7 @@
 #include "engine/framework/core/backend.h"
 #include "engine/framework/debug/profiler.h"
 #include "engine/framework/modules/activation_modules.h"
+#include "engine/framework/asr/decode_driver.h"
 #include "engine/framework/modules/linear_module.h"
 #include "engine/framework/modules/lookup_modules.h"
 #include "engine/framework/modules/primitive_modules.h"
@@ -29,14 +30,6 @@ struct GgmlContextDeleter {
         }
     }
 };
-
-int32_t argmax_index(const std::vector<float> & values) {
-    if (values.empty()) {
-        throw std::runtime_error("Nemotron ASR decoder cannot select from empty logits");
-    }
-    return static_cast<int32_t>(
-        std::distance(values.begin(), std::max_element(values.begin(), values.end())));
-}
 
 std::string replace_all(std::string text, const std::string & needle, const std::string & replacement) {
     if (needle.empty()) {
@@ -330,7 +323,7 @@ int32_t NemotronDecoderRuntime::run_joint_step(const float * encoder_frame) {
     }
 
     engine::core::read_tensor_f32_into(graph.logits.tensor, logits_scratch_);
-    return argmax_index(logits_scratch_);
+    return static_cast<int32_t>(engine::asr::argmax_logits(logits_scratch_.data(), static_cast<int>(logits_scratch_.size())));
 }
 
 int32_t NemotronDecoderRuntime::run_step(
@@ -385,7 +378,7 @@ int32_t NemotronDecoderRuntime::run_step(
             std::copy(cell_read_scratch_.begin(), cell_read_scratch_.end(), cell_scratch_.begin() + static_cast<std::ptrdiff_t>(offset));
         }
     }
-    return argmax_index(logits_scratch_);
+    return static_cast<int32_t>(engine::asr::argmax_logits(logits_scratch_.data(), static_cast<int>(logits_scratch_.size())));
 }
 
 std::string NemotronDecoderRuntime::decode_text(const std::vector<int32_t> & token_ids, bool keep_language_tags) const {
