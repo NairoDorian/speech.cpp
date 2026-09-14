@@ -15,6 +15,7 @@
 
 #include "engine/models/whisper/graphs_internal.h"
 
+#include "engine/framework/asr/decode_driver.h"
 #include "engine/framework/audio/conversion.h"
 #include "engine/framework/core/backend.h"
 
@@ -580,22 +581,16 @@ WhisperRuntime::transcribe(const runtime::AudioBuffer &audio,
   };
 
   auto apply_suppression = [&](bool first_generated_step) {
-    for (const int32_t id : suppress_tokens_) {
-      if (id >= 0 && id < vocab) {
-        logits[static_cast<size_t>(id)] =
-            -std::numeric_limits<float>::infinity();
-      }
-    }
-    if (first_generated_step) {
-      for (const int32_t id : begin_suppress_tokens_) {
-        if (id >= 0 && id < vocab) {
-          logits[static_cast<size_t>(id)] =
-              -std::numeric_limits<float>::infinity();
-        }
-      }
-    }
+    engine::asr::suppress_logits(
+        logits.data(), vocab,
+        suppress_tokens_.data(),
+        static_cast<int>(suppress_tokens_.size()),
+        first_generated_step,
+        begin_suppress_tokens_.data(),
+        static_cast<int>(begin_suppress_tokens_.size()));
     // W2a decodes without timestamps: everything at or above the first
-    // timestamp token is out of play.
+    // timestamp token is out of play. (Range suppression is Whisper-specific;
+    // kept inline rather than generalising suppress_logits to a range type.)
     const int timestamp_begin = hp.no_timestamps_token_id + 1;
     for (int id = timestamp_begin; id < vocab; ++id) {
       logits[static_cast<size_t>(id)] =
@@ -603,22 +598,10 @@ WhisperRuntime::transcribe(const runtime::AudioBuffer &audio,
     }
   };
 
-  auto argmax_logits = [&]() {
-    int best = 0;
-    float best_v = -std::numeric_limits<float>::infinity();
-    for (int i = 0; i < vocab; ++i) {
-      if (logits[static_cast<size_t>(i)] > best_v) {
-        best_v = logits[static_cast<size_t>(i)];
-        best = i;
-      }
-    }
-    return best;
-  };
-
   // Prompt pass.
   run_pass(prompt_ids, /*n_past=*/0);
   apply_suppression(/*first_generated_step=*/true);
-  int next_token = argmax_logits();
+  int next_token = engine::asr::argmax_logits(logits.data(), vocab);
 
   std::vector<int32_t> generated_ids;
   if (next_token != eot) {
@@ -630,7 +613,7 @@ WhisperRuntime::transcribe(const runtime::AudioBuffer &audio,
     control.emit_progress("decode", n_past, max_pos);
     run_pass({next_token}, n_past);
     apply_suppression(/*first_generated_step=*/false);
-    next_token = argmax_logits();
+    next_token = engine::asr::argmax_logits(logits.data(), vocab);
     if (next_token != eot) {
       generated_ids.push_back(next_token);
     }
