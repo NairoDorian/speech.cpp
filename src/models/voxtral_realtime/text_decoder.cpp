@@ -1,5 +1,6 @@
 #include "engine/models/voxtral_realtime/text_decoder.h"
 
+#include "engine/framework/asr/decode_driver.h"
 #include "engine/framework/core/backend.h"
 #include "engine/framework/core/backend_weight_store.h"
 #include "engine/framework/debug/profiler.h"
@@ -179,13 +180,6 @@ std::vector<float> time_embedding(int64_t num_delay_tokens, int64_t hidden_size)
     return values;
 }
 
-int32_t argmax_index(const float * values, size_t count) {
-    if (count == 0) {
-        throw std::runtime_error("VoxTral text decoder cannot select from empty logits");
-    }
-    return static_cast<int32_t>(std::distance(values, std::max_element(values, values + count)));
-}
-
 // Decode-step cancellation point; a no-op without a RunControl.
 void poll_run_control(const VoxtralRealtimeGenerationOptions & options, int64_t completed, int64_t total) {
     if (options.run_control != nullptr) {
@@ -210,7 +204,7 @@ public:
             throw std::runtime_error("VoxTral text decoder cannot select from empty logits");
         }
         if (!options.do_sample || options.top_k == 1) {
-            return argmax_index(logits.data(), logits.size());
+            return static_cast<int32_t>(engine::asr::argmax_logits(logits.data(), static_cast<int>(logits.size())));
         }
         build_candidates(logits, options);
         std::sort(candidates_.begin(), candidates_.end(), by_token_asc);

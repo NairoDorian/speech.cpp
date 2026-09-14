@@ -14,6 +14,7 @@
 #include "engine/framework/modules/primitive_modules.h"
 #include "engine/framework/modules/structural_modules.h"
 #include "engine/framework/runtime/errors.h"
+#include "engine/framework/asr/decode_driver.h"
 #include "engine/framework/runtime/kv_cache.h"
 #include "engine/framework/sampling/decode_modules.h"
 
@@ -212,32 +213,6 @@ ThinkerWeights load_weights(
     }
     weights.store->upload();
     return weights;
-}
-
-int32_t argmax_index(const std::vector<float> & values) {
-    if (values.empty()) {
-        throw std::runtime_error("Qwen3 ASR thinker cannot select from empty logits");
-    }
-    size_t best = 0;
-    for (size_t i = 1; i < values.size(); ++i) {
-        if (values[i] > values[best]) {
-            best = i;
-        }
-    }
-    return static_cast<int32_t>(best);
-}
-
-int32_t argmax_index_ptr(const float * values, size_t count) {
-    if (values == nullptr || count == 0) {
-        throw std::runtime_error("Qwen3 ASR thinker cannot select from empty logits");
-    }
-    size_t best = 0;
-    for (size_t i = 1; i < count; ++i) {
-        if (values[i] > values[best]) {
-            best = i;
-        }
-    }
-    return static_cast<int32_t>(best);
 }
 
 bool is_eos(const Qwen3ASRTextDecoderConfig & config, int32_t token) {
@@ -900,9 +875,9 @@ public:
         ggml_backend_tensor_get(logits_, logits_values_.data(), 0, logits_values_.size() * sizeof(float));
         std::vector<int32_t> predicted(static_cast<size_t>(verify_steps_), 0);
         for (int64_t c = 0; c < verify_steps_; ++c) {
-            predicted[static_cast<size_t>(c)] = argmax_index_ptr(
+            predicted[static_cast<size_t>(c)] = static_cast<int32_t>(engine::asr::argmax_logits(
                 logits_values_.data() + static_cast<size_t>(c) * static_cast<size_t>(config.output_size),
-                static_cast<size_t>(config.output_size));
+                config.output_size));
         }
         return predicted;
     }
@@ -1224,7 +1199,7 @@ struct Qwen3ASRThinkerRuntime::Impl {
         timing_start = Clock::now();
         for (int64_t step = 0; step < options.max_new_tokens; ++step) {
             poll_run_control(options, step, options.max_new_tokens);
-            const int32_t token = argmax_index(logits);
+            const int32_t token = static_cast<int32_t>(engine::asr::argmax_logits(logits.data(), static_cast<int>(logits.size())));
             if (is_eos(config, token)) {
                 break;
             }
@@ -1264,7 +1239,7 @@ struct Qwen3ASRThinkerRuntime::Impl {
         Qwen3ASRGeneratedTokens out;
         const auto timing_start = Clock::now();
         int64_t graph_runs = 0;
-        int32_t next_token = argmax_index(prefill.logits);
+        int32_t next_token = static_cast<int32_t>(engine::asr::argmax_logits(prefill.logits.data(), static_cast<int>(prefill.logits.size())));
         if (!is_eos(config, next_token)) {
             out.token_ids.push_back(next_token);
             modules::transformers::NgramLookupDrafter drafter(
@@ -1419,7 +1394,7 @@ struct Qwen3ASRThinkerRuntime::Impl {
         std::vector<char> finished(n, 0);
         int64_t active = static_cast<int64_t>(n);
         for (size_t b = 0; b < n; ++b) {
-            const int32_t tok = argmax_index(first_logits[b]);
+            const int32_t tok = static_cast<int32_t>(engine::asr::argmax_logits(first_logits[b].data(), static_cast<int>(first_logits[b].size())));
             positions[b] = static_cast<int32_t>(prompt_steps[b]);
             slots[b] = static_cast<int32_t>(prompt_steps[b]);
             visible[b] = prompt_steps[b];
@@ -1439,7 +1414,7 @@ struct Qwen3ASRThinkerRuntime::Impl {
                     continue;
                 }
                 const float * row = logits_batch.data() + b * static_cast<size_t>(config.output_size);
-                const int32_t tok = argmax_index_ptr(row, static_cast<size_t>(config.output_size));
+                const int32_t tok = static_cast<int32_t>(engine::asr::argmax_logits(row, config.output_size));
                 if (is_eos(config, tok)) {
                     finished[b] = 1;
                     --active;
