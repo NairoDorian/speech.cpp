@@ -45,12 +45,57 @@
         "AUDIOCPP_MODEL_SET": "core",
         "ENGINE_ENABLE_CUDA": "ON"
       }
+    },
+    {
+      "name": "client-base",
+      "hidden": true,
+      "displayName": "Common client build posture",
+      "description": "Ninja + Release for client apps. Excludes server/WebUI and unselected models, enables C APIs.",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "AUDIOCPP_MODEL_SET": "custom",
+        "AUDIOCPP_MODELS": "supertonic,nemotron_asr,granite5asr,qwen3_asr,parakeet_tdt",
+        "AUDIOCPP_BUILD_SERVER": "OFF",
+        "AUDIOCPP_BUILD_CLI": "ON",
+        "AUDIOCPP_BUILD_CAPI": "ON",
+        "AUDIOCPP_BUILD_GGUF_TOOL": "ON",
+        "SPEECHCPP_ENABLE_UNIFIED_ABI": "OFF",
+        "SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES": "OFF",
+        "ENGINE_BUILD_TESTS": "OFF"
+      }
+    },
+    {
+      "name": "client-compact-minimized-cpu",
+      "inherits": "client-base",
+      "displayName": "Client compact minimized CPU build",
+      "description": "Lightweight client build profile with curated STT+TTS models (Supertonic, Nemotron ASR, Granite Speech 2B, Qwen3 ASR, Parakeet TDT). WebUI server and unused models excluded.",
+      "binaryDir": "${sourceDir}/build-client-compact-minimized-cpu"
+    },
+    {
+      "name": "client-compact-minimized-cuda",
+      "inherits": "client-base",
+      "displayName": "Client compact minimized CUDA build",
+      "description": "Lightweight client build profile with curated STT+TTS models and CUDA acceleration.",
+      "binaryDir": "${sourceDir}/build-client-compact-minimized-cuda",
+      "cacheVariables": {
+        "ENGINE_ENABLE_CUDA": "ON"
+      }
+    },
+    {
+      "name": "client-compact-minimized-build",
+      "inherits": "client-compact-minimized-cpu",
+      "displayName": "Client compact minimized build (alias)",
+      "description": "Convenience alias for client-compact-minimized-cpu."
     }
   ],
   "buildPresets": [
     { "name": "cpu-full", "configurePreset": "cpu-full" },
     { "name": "cpu-core", "configurePreset": "cpu-core" },
-    { "name": "cuda", "configurePreset": "cuda" }
+    { "name": "cuda", "configurePreset": "cuda" },
+    { "name": "client-compact-minimized-cpu", "configurePreset": "client-compact-minimized-cpu" },
+    { "name": "client-compact-minimized-cuda", "configurePreset": "client-compact-minimized-cuda" },
+    { "name": "client-compact-minimized-build", "configurePreset": "client-compact-minimized-build" }
   ],
   "testPresets": [
     {

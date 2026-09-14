@@ -559,6 +559,22 @@ For native WebUI model downloads, enable the native model manager:
 For requirements, CPU profiles, CUDA packaging, and release zips, see
 [docs/build/windows.md](docs/build/windows.md).
 
+### Client Compact Minimized Build
+
+For client-side desktop GUI applications embedding speech recognition and synthesis without the HTTP server, WebUI assets, or unused models:
+
+```powershell
+# Curated lightweight profile (Supertonic TTS, Nemotron ASR, Granite Speech 2B, Qwen3 ASR, Parakeet TDT)
+cmake --preset client-compact-minimized-cpu
+cmake --build --preset client-compact-minimized-cpu
+
+# Or for CUDA GPU acceleration:
+cmake --preset client-compact-minimized-cuda
+cmake --build --preset client-compact-minimized-cuda
+```
+
+See [docs/build/client_minimized_build.md](docs/build/client_minimized_build.md) for custom model selection and client integration details.
+
 ### macOS CPU Build
 
 Apple builds enable Metal by default. To build a CPU-only binary, disable Metal

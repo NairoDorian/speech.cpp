@@ -186,6 +186,10 @@ option(ENGINE_BUILD_TESTS "Build framework unit tests" OFF)
 option(ENGINE_BUILD_EXTENDED_TESTS "Build extended non-model tests and probes" OFF)
 option(ENGINE_BUILD_MODEL_TESTS "Build model-specific tests and probes" OFF)
 option(ENGINE_BUILD_WARMBENCH "Build warmbench helper binaries" OFF)
+option(AUDIOCPP_BUILD_SERVER "Build audiocpp_server and embed WebUI assets" ON)
+option(AUDIOCPP_BUILD_CLI "Build audiocpp_cli binary" ON)
+option(AUDIOCPP_BUILD_GGUF_TOOL "Build audiocpp_gguf tool" ON)
+option(AUDIOCPP_STRIP_DEAD_CODE "Enable function-level linking and linker dead-code elimination in Release builds" ON)
 # Unified ABI runtime (transcribe.cpp port). Default OFF until Phase 5 (V6 plan J.2).
 option(SPEECHCPP_ENABLE_UNIFIED_ABI
     "Build the unified C ABI runtime (engine_transcribe_runtime + transcribe_shared)"
@@ -455,6 +459,30 @@ add_compile_options(
     $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-pedantic-errors>
     $<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/permissive->
 )
+
+if (AUDIOCPP_STRIP_DEAD_CODE)
+    if (MSVC)
+        add_compile_options(
+            $<$<CONFIG:Release>:/Gy>
+            $<$<CONFIG:Release>:/Gw>
+            $<$<CONFIG:Release>:/GF>
+        )
+        add_link_options(
+            $<$<CONFIG:Release>:/OPT:REF>
+            $<$<CONFIG:Release>:/OPT:ICF>
+        )
+    else()
+        add_compile_options(
+            $<$<CONFIG:Release>:-ffunction-sections>
+            $<$<CONFIG:Release>:-fdata-sections>
+        )
+        if (NOT APPLE)
+            add_link_options(
+                $<$<CONFIG:Release>:-Wl,--gc-sections>
+            )
+        endif()
+    endif()
+endif()
 
 set(AUDIOCPP_MODEL_SET "full" CACHE STRING "Model composite to build: full, core, asr, asr+full, or custom")
 set_property(CACHE AUDIOCPP_MODEL_SET PROPERTY STRINGS full core asr "asr+full" custom)
@@ -1996,17 +2024,6 @@ else()
 endif()
 list(REMOVE_DUPLICATES AUDIOCPP_ENABLED_MODELS)
 
-set(AUDIOCPP_REGISTRY_INCLUDE_CONTENT "")
-set(AUDIOCPP_REGISTRY_LOADER_CONTENT "")
-foreach(model_name IN LISTS AUDIOCPP_ENABLED_MODELS)
-    foreach(include_name IN LISTS AUDIOCPP_MODEL_${model_name}_INCLUDES)
-        string(APPEND AUDIOCPP_REGISTRY_INCLUDE_CONTENT "#include \"${include_name}\"\n")
-    endforeach()
-    foreach(loader_name IN LISTS AUDIOCPP_MODEL_${model_name}_LOADERS)
-        string(APPEND AUDIOCPP_REGISTRY_LOADER_CONTENT "        ${loader_name}(),\n")
-    endforeach()
-endforeach()
-
 set(AUDIOCPP_LINKED_MODELS ${AUDIOCPP_ENABLED_MODELS})
 set(AUDIOCPP_DEPENDENCY_SCAN_INDEX 0)
 list(LENGTH AUDIOCPP_LINKED_MODELS AUDIOCPP_LINKED_MODEL_COUNT)
@@ -2023,6 +2040,17 @@ while(AUDIOCPP_DEPENDENCY_SCAN_INDEX LESS AUDIOCPP_LINKED_MODEL_COUNT)
     math(EXPR AUDIOCPP_DEPENDENCY_SCAN_INDEX "${AUDIOCPP_DEPENDENCY_SCAN_INDEX} + 1")
     list(LENGTH AUDIOCPP_LINKED_MODELS AUDIOCPP_LINKED_MODEL_COUNT)
 endwhile()
+
+set(AUDIOCPP_REGISTRY_INCLUDE_CONTENT "")
+set(AUDIOCPP_REGISTRY_LOADER_CONTENT "")
+foreach(model_name IN LISTS AUDIOCPP_LINKED_MODELS)
+    foreach(include_name IN LISTS AUDIOCPP_MODEL_${model_name}_INCLUDES)
+        string(APPEND AUDIOCPP_REGISTRY_INCLUDE_CONTENT "#include \"${include_name}\"\n")
+    endforeach()
+    foreach(loader_name IN LISTS AUDIOCPP_MODEL_${model_name}_LOADERS)
+        string(APPEND AUDIOCPP_REGISTRY_LOADER_CONTENT "        ${loader_name}(),\n")
+    endforeach()
+endforeach()
 file(GENERATE
     OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/model_registry_includes.inc"
     CONTENT "${AUDIOCPP_REGISTRY_INCLUDE_CONTENT}")
@@ -2185,72 +2213,72 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src/runtime
     )
-    target_link_libraries(transcribe_internal PRIVATE ggml ggml-cpu sentencepiece engine_runtime)
-
-    # Phase 0.M: hello-world bridge test. Loads a GGUF through the C ABI,
-    # runs 16 kHz mono PCM, asserts transcribe_full_text() is non-NULL.
-    # Requires a model path at runtime (argv[1] or TRANSCRIBE_BRIDGE_TEST_MODEL);
-    # exits 2 (skipped) without one so it is CTest-safe without model assets.
-    add_executable(abi_bridge_hello tests/abi_bridge_hello.cpp)
-    target_link_libraries(abi_bridge_hello PRIVATE transcribe)
-
-    # Streaming counterpart: begin/feed/finalize with deliberately misaligned
-    # feed sizes, checking the adapter's re-blocking, cursor algebra and
-    # segment folding, plus streaming-vs-offline agreement. Links only the C
-    # ABI, like a language binding. Same skip-without-a-model contract as
-    # abi_bridge_hello (exit 2).
-    add_executable(abi_stream_hello tests/abi_stream_hello.cpp)
-    target_link_libraries(abi_stream_hello PRIVATE transcribe)
-
-    # End-to-end WER gate. Builds in every unified-ABI configuration (it links
-    # only the C ABI, like the hello tests); its CTest registration below is
-    # gated on the arch families being compiled in.
-    add_executable(asr_e2e_wer_test tests/asr_e2e_wer_test.cpp)
-    target_link_libraries(asr_e2e_wer_test PRIVATE transcribe)
-
-    # Phase 10.5: the Voxtral-Realtime typed stream extension, now served by
-    # the ArchAdapter rather than the retired arch. Links only the C ABI.
-    add_executable(voxtral_realtime_ext_abi_test tests/voxtral_realtime_ext_abi_test.cpp)
-    target_link_libraries(voxtral_realtime_ext_abi_test PRIVATE transcribe)
-    # include/ so the test can spell the family header the way a public caller
-    # does: #include "transcribe/voxtral_realtime.h".
-    target_include_directories(voxtral_realtime_ext_abi_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-
-    # Phase 10.5: the Sortformer streaming operating-point run extension,
-    # served by the ArchAdapter over the engine package. Links only the C ABI.
-    add_executable(sortformer_diar_ext_abi_test tests/sortformer_diar_ext_abi_test.cpp)
-    target_link_libraries(sortformer_diar_ext_abi_test PRIVATE transcribe)
-    target_include_directories(sortformer_diar_ext_abi_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-
-    # Streaming-text counterpart: streams the same fixtures through
-    # begin/feed/finalize and scores the STREAMED text (plus the streaming
-    # model's offline text and their divergence).
-    add_executable(asr_stream_text_wer_test tests/asr_stream_text_wer_test.cpp)
-    target_link_libraries(asr_stream_text_wer_test PRIVATE transcribe)
-
-    add_executable(vad_plan_unit
-        tests/unittests/vad_plan_unit.cpp
-    )
-    target_include_directories(vad_plan_unit PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/runtime
-    )
-    target_link_libraries(vad_plan_unit PRIVATE transcribe)
-
-    add_executable(vad_merge_unit
-        tests/unittests/vad_merge_unit.cpp
-    )
-    target_include_directories(vad_merge_unit PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/runtime
-    )
-    target_link_libraries(vad_merge_unit PRIVATE transcribe)
+    target_link_libraries(transcribe_internal PUBLIC ggml ggml-cpu sentencepiece engine_runtime)
 
     if (ENGINE_BUILD_TESTS)
+        # Phase 0.M: hello-world bridge test. Loads a GGUF through the C ABI,
+        # runs 16 kHz mono PCM, asserts transcribe_full_text() is non-NULL.
+        # Requires a model path at runtime (argv[1] or TRANSCRIBE_BRIDGE_TEST_MODEL);
+        # exits 2 (skipped) without one so it is CTest-safe without model assets.
+        add_executable(abi_bridge_hello tests/abi_bridge_hello.cpp)
+        target_link_libraries(abi_bridge_hello PRIVATE transcribe)
+
+        # Streaming counterpart: begin/feed/finalize with deliberately misaligned
+        # feed sizes, checking the adapter's re-blocking, cursor algebra and
+        # segment folding, plus streaming-vs-offline agreement. Links only the C
+        # ABI, like a language binding. Same skip-without-a-model contract as
+        # abi_bridge_hello (exit 2).
+        add_executable(abi_stream_hello tests/abi_stream_hello.cpp)
+        target_link_libraries(abi_stream_hello PRIVATE transcribe)
+
+        # End-to-end WER gate. Builds in every unified-ABI configuration (it links
+        # only the C ABI, like the hello tests); its CTest registration below is
+        # gated on the arch families being compiled in.
+        add_executable(asr_e2e_wer_test tests/asr_e2e_wer_test.cpp)
+        target_link_libraries(asr_e2e_wer_test PRIVATE transcribe)
+
+        # Phase 10.5: the Voxtral-Realtime typed stream extension, now served by
+        # the ArchAdapter rather than the retired arch. Links only the C ABI.
+        add_executable(voxtral_realtime_ext_abi_test tests/voxtral_realtime_ext_abi_test.cpp)
+        target_link_libraries(voxtral_realtime_ext_abi_test PRIVATE transcribe)
+        # include/ so the test can spell the family header the way a public caller
+        # does: #include "transcribe/voxtral_realtime.h".
+        target_include_directories(voxtral_realtime_ext_abi_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+        # Phase 10.5: the Sortformer streaming operating-point run extension,
+        # served by the ArchAdapter over the engine package. Links only the C ABI.
+        add_executable(sortformer_diar_ext_abi_test tests/sortformer_diar_ext_abi_test.cpp)
+        target_link_libraries(sortformer_diar_ext_abi_test PRIVATE transcribe)
+        target_include_directories(sortformer_diar_ext_abi_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+
+        # Streaming-text counterpart: streams the same fixtures through
+        # begin/feed/finalize and scores the STREAMED text (plus the streaming
+        # model's offline text and their divergence).
+        add_executable(asr_stream_text_wer_test tests/asr_stream_text_wer_test.cpp)
+        target_link_libraries(asr_stream_text_wer_test PRIVATE transcribe)
+
+        add_executable(vad_plan_unit
+            tests/unittests/vad_plan_unit.cpp
+        )
+        target_include_directories(vad_plan_unit PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/runtime
+        )
+        target_link_libraries(vad_plan_unit PRIVATE transcribe)
+
+        add_executable(vad_merge_unit
+            tests/unittests/vad_merge_unit.cpp
+        )
+        target_include_directories(vad_merge_unit PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/runtime
+        )
+        target_link_libraries(vad_merge_unit PRIVATE transcribe)
+
         add_test(NAME vad_plan_unit COMMAND vad_plan_unit)
         add_test(NAME vad_merge_unit COMMAND vad_merge_unit)
 
@@ -2625,20 +2653,22 @@ if (AUDIOCPP_BUILD_CAPI)
         )
     endif()
 
-    add_executable(capi_test tests/test_capi_load.c capi/src/audiocpp_capi.cpp)
-    set_target_properties(capi_test PROPERTIES CXX_VISIBILITY_PRESET default)
-    target_compile_definitions(capi_test PRIVATE AUDIOCPP_EXPORTS)
-    target_include_directories(capi_test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/capi/include"
-        "${CMAKE_CURRENT_SOURCE_DIR}/external/cJSON"
-        "${CMAKE_CURRENT_BINARY_DIR}/generated"
-    )
-    target_link_libraries(capi_test PRIVATE engine_runtime ggml cjson_vendor)
-    if (ENGINE_ENABLE_OPENMP)
-        target_link_libraries(capi_test PRIVATE OpenMP::OpenMP_CXX)
-    endif()
+    add_library(speech ALIAS audiocpp)
+    add_library(speechcpp ALIAS audiocpp)
 
     if (ENGINE_BUILD_TESTS)
+        add_executable(capi_test tests/test_capi_load.c capi/src/audiocpp_capi.cpp)
+        set_target_properties(capi_test PROPERTIES CXX_VISIBILITY_PRESET default)
+        target_compile_definitions(capi_test PRIVATE AUDIOCPP_EXPORTS)
+        target_include_directories(capi_test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/capi/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}/external/cJSON"
+            "${CMAKE_CURRENT_BINARY_DIR}/generated"
+        )
+        target_link_libraries(capi_test PRIVATE engine_runtime ggml cjson_vendor)
+        if (ENGINE_ENABLE_OPENMP)
+            target_link_libraries(capi_test PRIVATE OpenMP::OpenMP_CXX)
+        endif()
         add_executable(capi_option_number_test
             tests/unittests/test_capi_option_number.cpp
             capi/src/audiocpp_capi.cpp
@@ -2729,127 +2759,133 @@ if (AUDIOCPP_BUILD_CAPI)
     endif()
 endif()
 
-add_executable(audiocpp_cli
-    app/common/build_info.cpp
-    app/cli/main.cpp
-    app/cli/args.cpp
-    app/cli/batch.cpp
-    app/cli/request.cpp
-    app/streaming/pcm_source.cpp
-    app/streaming/streaming.cpp
-    app/workflow/execution.cpp
-    app/workflow/file_sink.cpp
-    app/workflow/pipeline.cpp
-    app/workflow/workflow.cpp
-)
+if (AUDIOCPP_BUILD_CLI)
+    add_executable(audiocpp_cli
+        app/common/build_info.cpp
+        app/cli/main.cpp
+        app/cli/args.cpp
+        app/cli/batch.cpp
+        app/cli/request.cpp
+        app/streaming/pcm_source.cpp
+        app/streaming/streaming.cpp
+        app/workflow/execution.cpp
+        app/workflow/file_sink.cpp
+        app/workflow/pipeline.cpp
+        app/workflow/workflow.cpp
+    )
 
-target_link_libraries(audiocpp_cli PRIVATE engine_runtime ggml)
-if(AUDIOCPP_STATIC_ESPEAK)
-    audiocpp_stage_espeak(audiocpp_cli)
+    target_link_libraries(audiocpp_cli PRIVATE engine_runtime ggml)
+    if(AUDIOCPP_STATIC_ESPEAK)
+        audiocpp_stage_espeak(audiocpp_cli)
+    endif()
+    target_include_directories(audiocpp_cli PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    # MinGW selects the wmain() entry point only when linked with -municode;
+    # without it the CLI fails to link (undefined reference / ld error 5).
+    # MSVC detects wmain natively, so this is MinGW-only. Link option only:
+    # -municode also defines UNICODE at compile time, so passing it link-only
+    # keeps the source compiled with no macro side effects.
+    if (MINGW)
+        target_link_options(audiocpp_cli PRIVATE -municode)
+    endif()
+    if (ENGINE_ENABLE_OPENMP)
+        target_link_libraries(audiocpp_cli PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+    add_executable(speech_cli ALIAS audiocpp_cli)
+    add_executable(speechcpp_cli ALIAS audiocpp_cli)
 endif()
-target_include_directories(audiocpp_cli PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
-# MinGW selects the wmain() entry point only when linked with -municode;
-# without it the CLI fails to link (undefined reference / ld error 5).
-# MSVC detects wmain natively, so this is MinGW-only. Link option only:
-# -municode also defines UNICODE at compile time, so passing it link-only
-# keeps the source compiled with no macro side effects.
-if (MINGW)
-    target_link_options(audiocpp_cli PRIVATE -municode)
-endif()
-if (ENGINE_ENABLE_OPENMP)
-    target_link_libraries(audiocpp_cli PRIVATE OpenMP::OpenMP_CXX)
-endif()
-add_executable(speech_cli ALIAS audiocpp_cli)
-add_executable(speechcpp_cli ALIAS audiocpp_cli)
 
-set(AUDIOCPP_UI_DIST "${CMAKE_CURRENT_SOURCE_DIR}/webui/native/dist/index.html")
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${AUDIOCPP_UI_DIST}")
-if (EXISTS "${AUDIOCPP_UI_DIST}")
-    file(READ "${AUDIOCPP_UI_DIST}" AUDIOCPP_UI_HEX HEX)
-else()
-    string(HEX "<!doctype html><title>speech.cpp</title><p>Embedded WebUI assets are unavailable.</p>" AUDIOCPP_UI_HEX)
-endif()
-string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," AUDIOCPP_UI_BYTES "${AUDIOCPP_UI_HEX}")
-string(REPLACE "," ",\n" AUDIOCPP_UI_BYTES "${AUDIOCPP_UI_BYTES}")
-configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/app/server/audiocpp_ui_asset.h.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/generated/audiocpp_ui_asset.h"
-    @ONLY
-)
+if (AUDIOCPP_BUILD_SERVER)
+    set(AUDIOCPP_UI_DIST "${CMAKE_CURRENT_SOURCE_DIR}/webui/native/dist/index.html")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${AUDIOCPP_UI_DIST}")
+    if (EXISTS "${AUDIOCPP_UI_DIST}")
+        file(READ "${AUDIOCPP_UI_DIST}" AUDIOCPP_UI_HEX HEX)
+    else()
+        string(HEX "<!doctype html><title>speech.cpp</title><p>Embedded WebUI assets are unavailable.</p>" AUDIOCPP_UI_HEX)
+    endif()
+    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," AUDIOCPP_UI_BYTES "${AUDIOCPP_UI_HEX}")
+    string(REPLACE "," ",\n" AUDIOCPP_UI_BYTES "${AUDIOCPP_UI_BYTES}")
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/app/server/audiocpp_ui_asset.h.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/audiocpp_ui_asset.h"
+        @ONLY
+    )
 
-set(AUDIOCPP_DEMO_VOICE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/webui/native/demo_voices")
-macro(audiocpp_embed_demo_voice_file INPUT_FILE OUTPUT_VARIABLE)
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${INPUT_FILE}")
-    file(READ "${INPUT_FILE}" _audiocpp_demo_voice_hex HEX)
-    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," ${OUTPUT_VARIABLE} "${_audiocpp_demo_voice_hex}")
-    string(REPLACE "," ",\n" ${OUTPUT_VARIABLE} "${${OUTPUT_VARIABLE}}")
-endmacro()
-audiocpp_embed_demo_voice_file(
-    "${AUDIOCPP_DEMO_VOICE_DIR}/demo_1_man.wav"
-    AUDIOCPP_DEMO_1_MAN_BYTES)
-audiocpp_embed_demo_voice_file(
-    "${AUDIOCPP_DEMO_VOICE_DIR}/demo_2_man.wav"
-    AUDIOCPP_DEMO_2_MAN_BYTES)
-audiocpp_embed_demo_voice_file(
-    "${AUDIOCPP_DEMO_VOICE_DIR}/demo_3_woman.wav"
-    AUDIOCPP_DEMO_3_WOMAN_BYTES)
-audiocpp_embed_demo_voice_file(
-    "${AUDIOCPP_DEMO_VOICE_DIR}/demo_4_woman.wav"
-    AUDIOCPP_DEMO_4_WOMAN_BYTES)
-audiocpp_embed_demo_voice_file(
-    "${AUDIOCPP_DEMO_VOICE_DIR}/prompt_text"
-    AUDIOCPP_DEMO_PROMPT_TEXT_BYTES)
-configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/app/server/audiocpp_demo_voice_assets.h.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/generated/audiocpp_demo_voice_assets.h"
-    @ONLY
-)
+    set(AUDIOCPP_DEMO_VOICE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/webui/native/demo_voices")
+    macro(audiocpp_embed_demo_voice_file INPUT_FILE OUTPUT_VARIABLE)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${INPUT_FILE}")
+        file(READ "${INPUT_FILE}" _audiocpp_demo_voice_hex HEX)
+        string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," ${OUTPUT_VARIABLE} "${_audiocpp_demo_voice_hex}")
+        string(REPLACE "," ",\n" ${OUTPUT_VARIABLE} "${${OUTPUT_VARIABLE}}")
+    endmacro()
+    audiocpp_embed_demo_voice_file(
+        "${AUDIOCPP_DEMO_VOICE_DIR}/demo_1_man.wav"
+        AUDIOCPP_DEMO_1_MAN_BYTES)
+    audiocpp_embed_demo_voice_file(
+        "${AUDIOCPP_DEMO_VOICE_DIR}/demo_2_man.wav"
+        AUDIOCPP_DEMO_2_MAN_BYTES)
+    audiocpp_embed_demo_voice_file(
+        "${AUDIOCPP_DEMO_VOICE_DIR}/demo_3_woman.wav"
+        AUDIOCPP_DEMO_3_WOMAN_BYTES)
+    audiocpp_embed_demo_voice_file(
+        "${AUDIOCPP_DEMO_VOICE_DIR}/demo_4_woman.wav"
+        AUDIOCPP_DEMO_4_WOMAN_BYTES)
+    audiocpp_embed_demo_voice_file(
+        "${AUDIOCPP_DEMO_VOICE_DIR}/prompt_text"
+        AUDIOCPP_DEMO_PROMPT_TEXT_BYTES)
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/app/server/audiocpp_demo_voice_assets.h.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/audiocpp_demo_voice_assets.h"
+        @ONLY
+    )
 
-add_executable(audiocpp_server
-    app/common/build_info.cpp
-    app/server/main.cpp
-    app/server/base64.cpp
-    app/server/config.cpp
-    app/server/http.cpp
-    app/server/model_memory.cpp
-    app/server/multipart.cpp
-    app/server/runtime.cpp
-    app/server/ui_assets.cpp
-    app/cli/args.cpp
-    app/cli/request.cpp
-    app/streaming/pcm_source.cpp
-    app/streaming/streaming.cpp
-)
+    add_executable(audiocpp_server
+        app/common/build_info.cpp
+        app/server/main.cpp
+        app/server/base64.cpp
+        app/server/config.cpp
+        app/server/http.cpp
+        app/server/model_memory.cpp
+        app/server/multipart.cpp
+        app/server/runtime.cpp
+        app/server/ui_assets.cpp
+        app/cli/args.cpp
+        app/cli/request.cpp
+        app/streaming/pcm_source.cpp
+        app/streaming/streaming.cpp
+    )
 
-target_link_libraries(audiocpp_server PRIVATE engine_runtime ggml)
-if(AUDIOCPP_STATIC_ESPEAK)
-    audiocpp_stage_espeak(audiocpp_server)
+    target_link_libraries(audiocpp_server PRIVATE engine_runtime ggml)
+    if(AUDIOCPP_STATIC_ESPEAK)
+        audiocpp_stage_espeak(audiocpp_server)
+    endif()
+    if (AUDIOCPP_BUILD_NATIVE_MODEL_MANAGER)
+        target_sources(audiocpp_server PRIVATE app/server/model_installer.cpp)
+        target_link_libraries(audiocpp_server PRIVATE audiocpp_package_manager)
+        target_compile_definitions(audiocpp_server PRIVATE AUDIOCPP_HAS_NATIVE_MODEL_MANAGER=1)
+    endif()
+    target_include_directories(audiocpp_server PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    if (WIN32)
+        target_link_libraries(audiocpp_server PRIVATE ws2_32)
+    endif()
+    if (ENGINE_ENABLE_OPENMP)
+        target_link_libraries(audiocpp_server PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+    add_executable(speech_server ALIAS audiocpp_server)
+    add_executable(speechcpp_server ALIAS audiocpp_server)
 endif()
-if (AUDIOCPP_BUILD_NATIVE_MODEL_MANAGER)
-    target_sources(audiocpp_server PRIVATE app/server/model_installer.cpp)
-    target_link_libraries(audiocpp_server PRIVATE audiocpp_package_manager)
-    target_compile_definitions(audiocpp_server PRIVATE AUDIOCPP_HAS_NATIVE_MODEL_MANAGER=1)
-endif()
-target_include_directories(audiocpp_server PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
-if (WIN32)
-    target_link_libraries(audiocpp_server PRIVATE ws2_32)
-endif()
-if (ENGINE_ENABLE_OPENMP)
-    target_link_libraries(audiocpp_server PRIVATE OpenMP::OpenMP_CXX)
-endif()
-add_executable(speech_server ALIAS audiocpp_server)
-add_executable(speechcpp_server ALIAS audiocpp_server)
 
-add_executable(audiocpp_gguf
-    app/gguf/main.cpp
-)
-target_link_libraries(audiocpp_gguf PRIVATE engine_runtime ggml)
-target_include_directories(audiocpp_gguf PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
-if (ENGINE_ENABLE_OPENMP)
-    target_link_libraries(audiocpp_gguf PRIVATE OpenMP::OpenMP_CXX)
+if (AUDIOCPP_BUILD_GGUF_TOOL)
+    add_executable(audiocpp_gguf
+        app/gguf/main.cpp
+    )
+    target_link_libraries(audiocpp_gguf PRIVATE engine_runtime ggml)
+    target_include_directories(audiocpp_gguf PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    if (ENGINE_ENABLE_OPENMP)
+        target_link_libraries(audiocpp_gguf PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+    add_executable(speech_gguf ALIAS audiocpp_gguf)
+    add_executable(speechcpp_gguf ALIAS audiocpp_gguf)
 endif()
-add_executable(speech_gguf ALIAS audiocpp_gguf)
-add_executable(speechcpp_gguf ALIAS audiocpp_gguf)
 
 if (AUDIOCPP_BUILD_NATIVE_MODEL_MANAGER)
     add_executable(audiocpp_model_manager
@@ -2858,15 +2894,17 @@ if (AUDIOCPP_BUILD_NATIVE_MODEL_MANAGER)
     target_link_libraries(audiocpp_model_manager PRIVATE audiocpp_package_manager)
 endif()
 
-add_executable(model_perf
-    tests/perf/model_perf.cpp
-    app/cli/args.cpp
-    app/cli/request.cpp
-)
-target_link_libraries(model_perf PRIVATE engine_runtime ggml)
-target_include_directories(model_perf PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-if (ENGINE_ENABLE_OPENMP)
-    target_link_libraries(model_perf PRIVATE OpenMP::OpenMP_CXX)
+if (ENGINE_BUILD_TESTS)
+    add_executable(model_perf
+        tests/perf/model_perf.cpp
+        app/cli/args.cpp
+        app/cli/request.cpp
+    )
+    target_link_libraries(model_perf PRIVATE engine_runtime ggml)
+    target_include_directories(model_perf PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if (ENGINE_ENABLE_OPENMP)
+        target_link_libraries(model_perf PRIVATE OpenMP::OpenMP_CXX)
+    endif()
 endif()
 
 if (ENGINE_BUILD_WARMBENCH)
