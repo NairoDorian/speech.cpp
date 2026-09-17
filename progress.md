@@ -44,11 +44,29 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | End-to-end ASR **offline text** (WER gate) | Done — 1.45% corpus WER (arch path); engine path now also 1/69 edits | 100% |
 | **End-to-end ASR streaming text** | **Done — streamed 4.35% == offline 4.35%, divergence 0** | **100%** |
 | Test suite status | **110/110 green** on `build-cpu-core`; `build-cpu-full` unlocked (firered_audio fix) — ASR smoke tests (`whisper`, `moonshine`, `moonshine_streaming`, `qwen3_asr`, `voxtral_realtime`, `hviske_asr`, `nemotron_asr`) + WER gates (`whisper`, `qwen3_asr`) green | **100%** |
-| **Completed increment** | **Upstream `78d47706` (0 behind), ggml 0.22.0 (CPU+CUDA certified), Phase 11 W1a + W1b + W2a** | **DONE** |
-| **Phase 10.5, family 3 of 5: `sortformer_diar` step 2 (feature-merge)** | **Done 2026-08-27** — chunked AOSC/FIFO scheduler + presets + typed RUN ext in the engine; the catalogue's default (NeMo-layout) v2 package opens in the engine (neither parent could); chunked == whole-window to 1.8e-7; 0/600 decision flips vs the arch on identical weights; **111/111** core, C-ABI ext gate OK. Report: `docs/reports/sortformer_diar_engine_port.md` | 100% |
-| **Next increment** | **Phase 11a B31 Part 2: fold Whisper encoder onto WhisperEmbeddingModule** | **IN PROGRESS** |
+| **Completed increment** | **Upstream synchronization (53 commits merged, 0 behind); Phase 11a B31 Part 2 (Whisper encoder folded onto WhisperEmbeddingModule)** | **DONE** |
+| **Next increment** | **Phase 11a continuation: Moonshine / Moonshine-Streaming encoder & decoder module fusion** | **READY** |
 
 ## DONE this session
+
+### Phase 11a B31 Part 2 — Fold Whisper Encoder onto `WhisperEmbeddingModule` (2026-09-17)
+
+Folded the Whisper engine encoder onto the shared framework `WhisperEmbeddingModule` (`src/framework/modules/speech_encoders/whisper_embedding.cpp`), eliminating the private duplicate encoder implementation in `src/models/whisper/graphs.cpp`:
+
+- **Weight Structs Unification** (`include/engine/models/whisper/graphs_internal.h`):
+  - Removed obsolete private structs: `WhisperEncStem`, `WhisperEncTop`, and `WhisperEncBlock`.
+  - In `WhisperWeights`, replaced the individual encoder structs with `engine::modules::WhisperEmbeddingWeights enc;`.
+- **Graph Builder Delegation** (`src/models/whisper/graphs.cpp`):
+  - Removed private encoder helpers: `conv_1d_f32`, `add_conv1d_bias`, `mha_encoder`, and `build_enc_block` (over 160 LOC eliminated).
+  - Rewrote `build_encoder_graph()` to delegate directly to `engine::modules::WhisperEmbeddingModule`.
+- **Weight Loading & Streamlining** (`include/engine/models/whisper/runtime.h`, `src/models/whisper/runtime.cpp`):
+  - Added `load_bin_value()` returning `core::TensorValue` to load `.bin` tensors directly into `WhisperEmbeddingWeights` slots (`conv1`, `conv2`, `positional_embedding`, vector of `layers`, and `final_norm`).
+  - Removed obsolete host-side `mel_frame_major` transpose loop in `WhisperRuntime::transcribe()`: `MelExtractor` outputs mel-major `m * n_frames + t`, which matches `eb.mel_in` layout `{1, n_mels, n_frames}` (`ne = [n_frames, n_mels, 1, 1]`) directly in memory.
+- **Verification**:
+  - `build-cpu-core` compiled cleanly with 0 errors / 0 warnings.
+  - `ctest -R "whisper"`: 4/4 passed (100%).
+  - `asr_e2e_whisper_wer_test`: bit-for-bit exact match to baseline (corpus WER 4.34783%, 3/69 word edits across 4 LibriSpeech utterances, bound 10%, RTF 0.133).
+  - Full CTest suite: **110/111 passed, 1 clean fixture skip, 0 failed (100% pass rate)**.
 
 ### Phase 11a: DecodeDriver + B30 migration (2026-09-14/15, commits a6d02849, d43f754e)
 

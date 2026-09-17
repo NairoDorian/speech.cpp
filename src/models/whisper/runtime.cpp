@@ -69,8 +69,8 @@ void WhisperRuntime::GraphRun::free() {
 // Weight streaming
 // ---------------------------------------------------------------------------
 
-ggml_tensor *WhisperRuntime::load_bin_tensor(const char *legacy_name,
-                                             bool squeeze_leading) {
+core::TensorValue WhisperRuntime::load_bin_value(const char *legacy_name,
+                                                 bool squeeze_leading) {
   static thread_local std::unordered_map<std::string, const WhisperBinTensor *>
       unused; // silence unused-warning tooling on some compilers
   (void)unused;
@@ -122,8 +122,12 @@ ggml_tensor *WhisperRuntime::load_bin_tensor(const char *legacy_name,
     }
   }
 
-  return store_->make_tensor(shape, entry->type, bytes.data(), bytes.size())
-      .tensor;
+  return store_->make_tensor(shape, entry->type, bytes.data(), bytes.size());
+}
+
+ggml_tensor *WhisperRuntime::load_bin_tensor(const char *legacy_name,
+                                             bool squeeze_leading) {
+  return load_bin_value(legacy_name, squeeze_leading).tensor;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,54 +153,69 @@ WhisperRuntime::WhisperRuntime(std::shared_ptr<const WhisperAssets> model_assets
 
   const auto &hp = assets_->hparams;
 
-  // ----- encoder stem / top -----
-  weights_.enc_stem.conv0_w = load_bin_tensor("encoder.conv1.weight", false);
-  weights_.enc_stem.conv0_b = load_bin_tensor("encoder.conv1.bias", true);
-  weights_.enc_stem.conv1_w = load_bin_tensor("encoder.conv2.weight", false);
-  weights_.enc_stem.conv1_b = load_bin_tensor("encoder.conv2.bias", true);
+  // ----- encoder -----
+  weights_.enc.conv1.weight = load_bin_value("encoder.conv1.weight", false);
+  weights_.enc.conv1.bias = load_bin_value("encoder.conv1.bias", true);
+  weights_.enc.conv2.weight = load_bin_value("encoder.conv2.weight", false);
+  weights_.enc.conv2.bias = load_bin_value("encoder.conv2.bias", true);
 
-  weights_.enc_top.pos_emb_w =
-      load_bin_tensor("encoder.positional_embedding", false);
-  weights_.enc_top.final_norm_w =
-      load_bin_tensor("encoder.ln_post.weight", false);
-  weights_.enc_top.final_norm_b = load_bin_tensor("encoder.ln_post.bias", false);
+  weights_.enc.positional_embedding =
+      load_bin_value("encoder.positional_embedding", false);
+  weights_.enc.final_norm.weight =
+      load_bin_value("encoder.ln_post.weight", false);
+  weights_.enc.final_norm.bias = load_bin_value("encoder.ln_post.bias", false);
 
-  weights_.enc_blocks.resize(static_cast<size_t>(hp.enc_n_layers));
+  weights_.enc.layers.resize(static_cast<size_t>(hp.enc_n_layers));
   for (int i = 0; i < hp.enc_n_layers; ++i) {
-    auto &b = weights_.enc_blocks[static_cast<size_t>(i)];
-    b.norm_attn_w =
-        load_bin_tensor(lname("encoder.blocks.%d.attn_ln.weight", i).c_str(),
-                        false);
-    b.norm_attn_b = load_bin_tensor(
-        lname("encoder.blocks.%d.attn_ln.bias", i).c_str(), false);
-    b.attn_q_w = load_bin_tensor(
-        lname("encoder.blocks.%d.attn.query.weight", i).c_str(), false);
-    b.attn_q_b = load_bin_tensor(
-        lname("encoder.blocks.%d.attn.query.bias", i).c_str(), false);
+    auto &layer = weights_.enc.layers[static_cast<size_t>(i)];
+    layer.attention_norm.weight =
+        load_bin_value(lname("encoder.blocks.%d.attn_ln.weight", i).c_str(),
+                       false);
+    layer.attention_norm.bias =
+        load_bin_value(lname("encoder.blocks.%d.attn_ln.bias", i).c_str(),
+                       false);
+    layer.attention.query.weight =
+        load_bin_value(lname("encoder.blocks.%d.attn.query.weight", i).c_str(),
+                       false);
+    layer.attention.query.bias =
+        load_bin_value(lname("encoder.blocks.%d.attn.query.bias", i).c_str(),
+                       false);
     // k has NO bias.
-    b.attn_k_w = load_bin_tensor(
-        lname("encoder.blocks.%d.attn.key.weight", i).c_str(), false);
-    b.attn_v_w = load_bin_tensor(
-        lname("encoder.blocks.%d.attn.value.weight", i).c_str(), false);
-    b.attn_v_b = load_bin_tensor(
-        lname("encoder.blocks.%d.attn.value.bias", i).c_str(), false);
-    b.attn_out_w = load_bin_tensor(
-        lname("encoder.blocks.%d.attn.out.weight", i).c_str(), false);
-    b.attn_out_b = load_bin_tensor(
-        lname("encoder.blocks.%d.attn.out.bias", i).c_str(), false);
+    layer.attention.key.weight =
+        load_bin_value(lname("encoder.blocks.%d.attn.key.weight", i).c_str(),
+                       false);
+    layer.attention.key.bias = std::nullopt;
+    layer.attention.value.weight =
+        load_bin_value(lname("encoder.blocks.%d.attn.value.weight", i).c_str(),
+                       false);
+    layer.attention.value.bias =
+        load_bin_value(lname("encoder.blocks.%d.attn.value.bias", i).c_str(),
+                       false);
+    layer.attention.out.weight =
+        load_bin_value(lname("encoder.blocks.%d.attn.out.weight", i).c_str(),
+                       false);
+    layer.attention.out.bias =
+        load_bin_value(lname("encoder.blocks.%d.attn.out.bias", i).c_str(),
+                       false);
 
-    b.norm_ffn_w = load_bin_tensor(
-        lname("encoder.blocks.%d.mlp_ln.weight", i).c_str(), false);
-    b.norm_ffn_b = load_bin_tensor(
-        lname("encoder.blocks.%d.mlp_ln.bias", i).c_str(), false);
-    b.ffn_fc1_w = load_bin_tensor(
-        lname("encoder.blocks.%d.mlp.0.weight", i).c_str(), false);
-    b.ffn_fc1_b = load_bin_tensor(
-        lname("encoder.blocks.%d.mlp.0.bias", i).c_str(), false);
-    b.ffn_fc2_w = load_bin_tensor(
-        lname("encoder.blocks.%d.mlp.2.weight", i).c_str(), false);
-    b.ffn_fc2_b = load_bin_tensor(
-        lname("encoder.blocks.%d.mlp.2.bias", i).c_str(), false);
+    layer.mlp_norm.weight =
+        load_bin_value(lname("encoder.blocks.%d.mlp_ln.weight", i).c_str(),
+                       false);
+    layer.mlp_norm.bias =
+        load_bin_value(lname("encoder.blocks.%d.mlp_ln.bias", i).c_str(),
+                       false);
+    layer.mlp.fc1_weight =
+        load_bin_value(lname("encoder.blocks.%d.mlp.0.weight", i).c_str(),
+                       false);
+    layer.mlp.fc1_bias =
+        load_bin_value(lname("encoder.blocks.%d.mlp.0.bias", i).c_str(),
+                       false);
+    layer.mlp.fc2_weight =
+        load_bin_value(lname("encoder.blocks.%d.mlp.2.weight", i).c_str(),
+                       false);
+    layer.mlp.fc2_bias =
+        load_bin_value(lname("encoder.blocks.%d.mlp.2.bias", i).c_str(),
+                       false);
   }
 
   // ----- decoder top -----
@@ -370,21 +389,9 @@ WhisperRuntime::transcribe(const runtime::AudioBuffer &audio,
   }
 
   // LAYOUT: MelExtractor writes MEL-MAJOR (element (m, t) at m*n_frames + t),
-  // but the graph's mel_in has ggml ne = [n_mels, n_frames], whose fastest
-  // axis is n_mels - i.e. it expects FRAME-MAJOR (t*n_mels + m). Transpose on
-  // the host before upload; feeding the extractor's buffer straight through
-  // silently produces a transposed spectrogram, which the encoder happily
-  // consumes and the decoder turns into confident, unrelated text.
-  {
-    std::vector<float> mel_frame_major(mel.size());
-    for (int m = 0; m < n_mels; ++m) {
-      for (int t = 0; t < n_frames; ++t) {
-        mel_frame_major[static_cast<size_t>(t) * n_mels + m] =
-            mel[static_cast<size_t>(m) * n_frames + t];
-      }
-    }
-    mel.swap(mel_frame_major);
-  }
+  // which directly matches the logical [1, n_mels, n_frames] layout of mel_in
+  // (ggml ne = [n_frames, n_mels, 1, 1], where the fastest contiguous axis is
+  // n_frames). No host-side transposition is needed.
 
   control.emit_progress("encode", 0, 1);
 

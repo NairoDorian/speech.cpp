@@ -11,6 +11,17 @@ Dates are the work-session dates recorded in the plan.
 
 ### Added
 
+- **Phase 11a B31 Part 2 — Fold Whisper Encoder onto `WhisperEmbeddingModule` (2026-09-17)**:
+  - Folded the native Whisper engine encoder onto `engine::modules::WhisperEmbeddingModule`, removing duplicate encoder implementations (`conv_1d_f32`, `add_conv1d_bias`, `mha_encoder`, `build_enc_block`) from `src/models/whisper/graphs.cpp`.
+  - Replaced private weight structs `WhisperEncStem`, `WhisperEncTop`, and `WhisperEncBlock` with shared `WhisperEmbeddingWeights` in `WhisperWeights`.
+  - Added `load_bin_value()` in `WhisperRuntime` for direct loading of `.bin` weights into framework tensor slots.
+  - Eliminated the host-side mel transposition loop in `WhisperRuntime::transcribe()`: `MelExtractor` output directly matches the memory layout of `mel_in` (`[1, n_mels, n_frames]` with ggml `ne = [n_frames, n_mels, 1, 1]`).
+  - Verified exact numeric parity: `asr_e2e_whisper_wer_test` matches baseline 4.34783% WER (3/69 edits across 4 LibriSpeech utterances); 100% CTest pass rate (110 passed, 1 skipped fixture, 0 failed).
+
+- **Upstream Synchronization (`0xShug0/audio.cpp:main@c0b26a50`) — 0 behind, 53 upstream commits integrated (2026-09-17)**:
+  - Resolved merge conflicts in `ggml-vulkan.cpp` (COL2IM_1D op), `tensor_source.cpp` (embedded sidecars with contents), `metadata.cpp` (cancellation & speech segments), `qwen_decoder.cpp` (batched static RoPE & steps), and `README.md`.
+  - Repaired `whisper_bin.cpp` and `model_specs/whisper.json` validation to ensure clean compilation across all build configurations.
+
 - **Upstream Synchronization (`0xShug0/audio.cpp:main@6d530f4`) — 0 behind, 35 upstream commits integrated (2026-08-28)**:
   - **New Model Families & Modules**:
     - `AudioSR`: Audio super-resolution model with DDIM sampler, UNet, and HiFi-GAN vocoder (`src/models/audiosr/`).

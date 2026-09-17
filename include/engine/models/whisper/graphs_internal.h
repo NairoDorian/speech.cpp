@@ -31,6 +31,7 @@
 // of any installed public API surface.
 
 #include "engine/framework/asr/enc_dec_kv_cache.h"
+#include "engine/framework/modules/speech_encoders/whisper_embedding.h"
 #include "ggml-backend.h"
 #include "ggml.h"
 
@@ -111,40 +112,6 @@ struct WhisperHParams {
 // Weight slots
 // ---------------------------------------------------------------------------
 
-// Encoder conv stem: two 1D convolutions, kernel=3, strides {1, 2}.
-struct WhisperEncStem {
-  ggml_tensor *conv0_w = nullptr; // [d_model, num_mel_bins, 3]
-  ggml_tensor *conv0_b = nullptr; // [d_model]
-  ggml_tensor *conv1_w = nullptr; // [d_model, d_model, 3]
-  ggml_tensor *conv1_b = nullptr; // [d_model]
-};
-
-// Learned positional embedding + final LayerNorm (LN carries a bias here,
-// unlike the moonshine families).
-struct WhisperEncTop {
-  ggml_tensor *pos_emb_w = nullptr; // [d_model, max_source_positions]
-  ggml_tensor *final_norm_w = nullptr;
-  ggml_tensor *final_norm_b = nullptr;
-};
-
-struct WhisperEncBlock {
-  ggml_tensor *norm_attn_w = nullptr;
-  ggml_tensor *norm_attn_b = nullptr;
-  ggml_tensor *attn_q_w = nullptr;
-  ggml_tensor *attn_q_b = nullptr;
-  ggml_tensor *attn_k_w = nullptr; // NO bias
-  ggml_tensor *attn_v_w = nullptr;
-  ggml_tensor *attn_v_b = nullptr;
-  ggml_tensor *attn_out_w = nullptr;
-  ggml_tensor *attn_out_b = nullptr;
-  ggml_tensor *norm_ffn_w = nullptr;
-  ggml_tensor *norm_ffn_b = nullptr;
-  ggml_tensor *ffn_fc1_w = nullptr;
-  ggml_tensor *ffn_fc1_b = nullptr;
-  ggml_tensor *ffn_fc2_w = nullptr;
-  ggml_tensor *ffn_fc2_b = nullptr;
-};
-
 // Decoder token + position embedding and final LN. token_embd doubles as the
 // (tied) lm_head weight.
 struct WhisperDecTop {
@@ -184,9 +151,7 @@ struct WhisperDecBlock {
 };
 
 struct WhisperWeights {
-  WhisperEncStem enc_stem;
-  WhisperEncTop enc_top;
-  std::vector<WhisperEncBlock> enc_blocks;
+  engine::modules::WhisperEmbeddingWeights enc;
   WhisperDecTop dec_top;
   std::vector<WhisperDecBlock> dec_blocks;
 };

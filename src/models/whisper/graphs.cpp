@@ -22,6 +22,9 @@
 
 #include "engine/models/whisper/graphs_internal.h"
 
+#include "engine/framework/core/module.h"
+#include "engine/framework/modules/speech_encoders/whisper_embedding.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -51,53 +54,7 @@ ggml_tensor *layer_norm(ggml_context *ctx, ggml_tensor *x, ggml_tensor *gamma,
   return y;
 }
 
-// im2col + mul_mat Conv1d on [T, C] layout data. Whisper's conv kernels are
-// F32 and ggml_conv_1d's im2col hard-codes an F16 dst whose CPU kernel asserts
-// src0 == F16, so the arch uses this helper instead - carried over for the
-// same reason.
-ggml_tensor *conv_1d_f32(ggml_context *ctx, ggml_tensor *kernel,
-                         ggml_tensor *data, int stride, int padding,
-                         int dilation) {
-  ggml_tensor *im2col = ggml_im2col(
-      ctx, kernel, data, stride, /*s1=*/0, padding, /*p1=*/0, dilation,
-      /*d1=*/0, /*is_2D=*/false, /*dst_type=*/kernel->type);
 
-  const int64_t N = im2col->ne[2];
-  ggml_tensor *kernel_2d = ggml_reshape_2d(
-      ctx, kernel, kernel->ne[0] * kernel->ne[1], kernel->ne[2]);
-
-  const bool kernel_needs_f32_acc = (kernel->type == GGML_TYPE_F16);
-
-  if (N == 1) {
-    ggml_tensor *result = ggml_mul_mat(
-        ctx, ggml_reshape_2d(ctx, im2col, im2col->ne[0], im2col->ne[1]),
-        kernel_2d);
-    if (kernel_needs_f32_acc) {
-      ggml_mul_mat_set_prec(result, GGML_PREC_F32);
-    }
-    result = ggml_reshape_3d(ctx, result, im2col->ne[1], kernel->ne[2], 1);
-    return result;
-  }
-
-  ggml_tensor *result = ggml_mul_mat(ctx, kernel_2d, im2col);
-  if (kernel_needs_f32_acc) {
-    ggml_mul_mat_set_prec(result, GGML_PREC_F32);
-  }
-  result = ggml_cont(ctx, ggml_permute(ctx, result, 1, 0, 2, 3));
-  return result;
-}
-
-// Reshape a 1D conv bias [Cout] to [1, Cout, 1, 1] so it broadcasts across T
-// against a conv_1d output [T_out, Cout, 1, 1].
-ggml_tensor *add_conv1d_bias(ggml_context *ctx, ggml_tensor *conv_out,
-                             ggml_tensor *bias_1d) {
-  if (bias_1d == nullptr) {
-    return conv_out;
-  }
-  const int64_t channels = bias_1d->ne[0];
-  ggml_tensor *bias_4d = ggml_reshape_4d(ctx, bias_1d, 1, channels, 1, 1);
-  return ggml_add(ctx, conv_out, bias_4d);
-}
 
 // FFN: fc2(GELU_erf(fc1(x))); pre-LN wrapped outside. Both carry bias.
 ggml_tensor *ffn(ggml_context *ctx, ggml_tensor *x, ggml_tensor *fc1_w,
@@ -114,79 +71,7 @@ ggml_tensor *ffn(ggml_context *ctx, ggml_tensor *x, ggml_tensor *fc1_w,
   return o;
 }
 
-// ---------------------------------------------------------------------------
-// Encoder attention / blocks
-// ---------------------------------------------------------------------------
 
-// Bidirectional MHSA, no relative position, no causal mask.
-ggml_tensor *mha_encoder(ggml_context *ctx, ggml_tensor *x, ggml_tensor *q_w,
-                         ggml_tensor *q_b, ggml_tensor *k_w, ggml_tensor *v_w,
-                         ggml_tensor *v_b, ggml_tensor *out_w,
-                         ggml_tensor *out_b, int n_heads, int d_model,
-                         bool use_flash) {
-  const int head_dim = d_model / n_heads;
-  const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-  const int64_t T = x->ne[1];
-
-  ggml_tensor *q = ggml_mul_mat(ctx, q_w, x);
-  if (q_b != nullptr) {
-    q = ggml_add(ctx, q, q_b);
-  }
-  ggml_tensor *k = ggml_mul_mat(ctx, k_w, x); // k has NO bias
-  ggml_tensor *v = ggml_mul_mat(ctx, v_w, x);
-  if (v_b != nullptr) {
-    v = ggml_add(ctx, v, v_b);
-  }
-
-  q = ggml_permute(ctx, ggml_reshape_3d(ctx, q, head_dim, n_heads, T), 0, 2, 1,
-                   3);
-  k = ggml_permute(ctx, ggml_reshape_3d(ctx, k, head_dim, n_heads, T), 0, 2, 1,
-                   3);
-  v = ggml_permute(ctx, ggml_reshape_3d(ctx, v, head_dim, n_heads, T), 0, 2, 1,
-                   3);
-
-  ggml_tensor *o;
-  if (use_flash) {
-    ggml_tensor *q_c = ggml_cont(ctx, q);
-    ggml_tensor *k_c = ggml_cont(ctx, k);
-    ggml_tensor *v_c = ggml_cont(ctx, v);
-    o = ggml_flash_attn_ext(ctx, q_c, k_c, v_c, nullptr, scale, 0.0f, 0.0f);
-    o = ggml_reshape_2d(ctx, o, d_model, T);
-  } else {
-    ggml_tensor *kq =
-        ggml_mul_mat(ctx, ggml_cont(ctx, k), ggml_cont(ctx, q));
-    ggml_tensor *kq_soft = ggml_soft_max_ext(ctx, kq, nullptr, scale, 0.0f);
-    ggml_tensor *v_t = ggml_cont(ctx, ggml_permute(ctx, v, 1, 0, 2, 3));
-    o = ggml_mul_mat(ctx, v_t, kq_soft);
-    o = ggml_permute(ctx, o, 0, 2, 1, 3);
-    o = ggml_cont(ctx, o);
-    o = ggml_reshape_2d(ctx, o, d_model, T);
-  }
-
-  o = ggml_mul_mat(ctx, out_w, o);
-  if (out_b != nullptr) {
-    o = ggml_add(ctx, o, out_b);
-  }
-  return o;
-}
-
-ggml_tensor *build_enc_block(ggml_context *ctx, ggml_tensor *x,
-                             const WhisperEncBlock &b, int n_heads, int d_model,
-                             bool use_flash) {
-  {
-    ggml_tensor *y = layer_norm(ctx, x, b.norm_attn_w, b.norm_attn_b);
-    y = mha_encoder(ctx, y, b.attn_q_w, b.attn_q_b, b.attn_k_w, b.attn_v_w,
-                    b.attn_v_b, b.attn_out_w, b.attn_out_b, n_heads, d_model,
-                    use_flash);
-    x = ggml_add(ctx, x, y);
-  }
-  {
-    ggml_tensor *y = layer_norm(ctx, x, b.norm_ffn_w, b.norm_ffn_b);
-    y = ffn(ctx, y, b.ffn_fc1_w, b.ffn_fc1_b, b.ffn_fc2_w, b.ffn_fc2_b);
-    x = ggml_add(ctx, x, y);
-  }
-  return x;
-}
 
 // ---------------------------------------------------------------------------
 // Decoder attention (KV-cached)
@@ -345,63 +230,42 @@ ggml_tensor *find_tensor_by_name(ggml_context *gctx, const char *name) {
 EncoderBuild build_encoder_graph(ggml_context *ctx, const WhisperWeights &w,
                                  const WhisperHParams &hp, int n_mel_frames,
                                  bool use_flash) {
+  (void)use_flash;
   EncoderBuild eb{};
 
   if (ctx == nullptr || n_mel_frames <= 0 || n_mel_frames % 2 != 0) {
     return eb;
   }
 
-  const int d_model = hp.enc_d_model;
   const int n_mels = hp.enc_num_mel_bins;
-  const int n_heads = hp.enc_n_heads;
   const int T_enc = n_mel_frames / 2;
 
   if (T_enc > hp.enc_max_source_positions) {
     return eb;
   }
 
-  eb.mel_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_mels, n_mel_frames);
-  if (eb.mel_in == nullptr) {
-    return eb;
-  }
+  core::ModuleBuildContext mctx{ctx, "whisper_encoder", core::BackendType::Cpu};
+
+  auto mel_in = core::make_tensor(
+      mctx, GGML_TYPE_F32,
+      core::TensorShape::from_dims({1, n_mels, n_mel_frames}));
+  eb.mel_in = mel_in.tensor;
   named(eb.mel_in, "enc.mel.in");
   ggml_set_input(eb.mel_in);
 
-  // conv stem: conv_1d wants [T, Cin]; mel arrives [n_mels, T].
-  ggml_tensor *x = ggml_cont(ctx, ggml_transpose(ctx, eb.mel_in));
+  engine::modules::WhisperEmbeddingConfig config;
+  config.n_mels = n_mels;
+  config.n_audio_ctx = hp.enc_max_source_positions;
+  config.n_audio_state = hp.enc_d_model;
+  config.n_audio_head = hp.enc_n_heads;
+  config.n_audio_layer = hp.enc_n_layers;
+  config.layer_norm_eps = 1e-5f;
 
-  // conv1: k=3 s=1 p=1 -> [T, d_model]; HF uses exact-erf GELU here.
-  x = conv_1d_f32(ctx, w.enc_stem.conv0_w, x, 1, 1, 1);
-  x = add_conv1d_bias(ctx, x, w.enc_stem.conv0_b);
-  x = ggml_gelu_erf(ctx, x);
-  x = ggml_cont(ctx, ggml_transpose(ctx, x)); // -> [d_model, T]
+  engine::modules::WhisperEmbeddingModule encoder(config);
+  core::TensorValue enc_out = encoder.build(mctx, mel_in, w.enc);
 
-  // conv2: k=3 s=2 p=1 -> [T_enc, d_model].
-  x = ggml_cont(ctx, ggml_transpose(ctx, x));
-  x = conv_1d_f32(ctx, w.enc_stem.conv1_w, x, 2, 1, 1);
-  x = add_conv1d_bias(ctx, x, w.enc_stem.conv1_b);
-  x = ggml_gelu_erf(ctx, x);
-  x = ggml_cont(ctx, ggml_transpose(ctx, x)); // -> [d_model, T_enc]
-
-  // Learned absolute positional embedding; prefix view when T_enc < max.
-  ggml_tensor *pos_emb = w.enc_top.pos_emb_w;
-  if (T_enc != hp.enc_max_source_positions) {
-    pos_emb = ggml_view_2d(ctx, w.enc_top.pos_emb_w, d_model, T_enc,
-                           w.enc_top.pos_emb_w->nb[1], 0);
-  }
-  named(pos_emb, "enc.pos_emb");
-  x = ggml_add(ctx, x, pos_emb);
-
-  const int n_blocks = static_cast<int>(w.enc_blocks.size());
-  for (int i = 0; i < n_blocks; ++i) {
-    x = build_enc_block(ctx, x, w.enc_blocks[static_cast<size_t>(i)], n_heads,
-                        d_model, use_flash);
-  }
-
-  x = layer_norm(ctx, x, w.enc_top.final_norm_w, w.enc_top.final_norm_b);
-  named(x, "enc.final");
-
-  eb.out = x;
+  eb.out = enc_out.tensor;
+  named(eb.out, "enc.final");
   eb.T_enc = T_enc;
   ggml_set_output(eb.out);
 

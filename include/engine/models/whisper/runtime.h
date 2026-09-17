@@ -52,6 +52,7 @@ private:
 
   // Streams one legacy-named tensor's payload out of the `.bin` and hands it
   // to the weight store with the file's own ggml type.
+  core::TensorValue load_bin_value(const char *legacy_name, bool squeeze_leading);
   ggml_tensor *load_bin_tensor(const char *legacy_name, bool squeeze_leading);
 
   std::string decode_token_ids(const std::vector<int32_t> &ids) const;
