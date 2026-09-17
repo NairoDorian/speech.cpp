@@ -1,4 +1,4 @@
-﻿{
+{
   "schema_version": 1,
   "family": "whisper",
   "display_name": "OpenAI Whisper",
@@ -26,15 +26,12 @@
   "capabilities": {
     "asr": [
       "word_timestamps",
-      "vad_chunking",
-      "translation",
-      "language_detection"
+      "vad_chunking"
     ]
   },
   "runtime": {
     "tags": [
-      "gguf",
-      "bin"
+      "gguf"
     ]
   },
   "options": {
@@ -273,8 +270,7 @@
     "recommended_package": "whisper_tiny_q8_0",
     "tags": [
       "ASR",
-      "GGUF",
-      "Multilingual"
+      "GGUF"
     ],
     "docs": [
       "docs/asr.md",

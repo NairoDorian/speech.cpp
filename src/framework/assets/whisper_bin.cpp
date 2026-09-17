@@ -101,7 +101,8 @@ public:
             throw std::runtime_error(
                 "tensor data out of bounds in whisper .bin: " + std::string(name));
         }
-        std::vector<std::byte> raw(data_.begin() + offset, data_.begin() + offset + size);
+        std::vector<std::byte> raw(size);
+        std::memcpy(raw.data(), data_.data() + offset, size);
         return RawTensorData{
             TensorMetadata{entry.name, ggml_type_name(entry.type), entry.shape},
             std::move(raw),
@@ -134,17 +135,22 @@ public:
                 break;
             case GGML_TYPE_F16:
                 ggml_fp16_to_fp32_row(
-                    reinterpret_cast<const ggml_half *>(data),
-                    out.data(), static_cast<int>(n_elem));
+                    reinterpret_cast<const ggml_fp16_t *>(data),
+                    out.data(), static_cast<int64_t>(n_elem));
                 break;
             case GGML_TYPE_BF16:
                 ggml_bf16_to_fp32_row(
-                    reinterpret_cast<const uint16_t *>(data),
-                    out.data(), static_cast<int>(n_elem));
+                    reinterpret_cast<const ggml_bf16_t *>(data),
+                    out.data(), static_cast<int64_t>(n_elem));
                 break;
-            default:
-                ggml_dequantize(data, entry.type, n_elem, n_elem, out.data());
+            default: {
+                const ggml_type_traits * traits = ggml_get_type_traits(entry.type);
+                if (traits == nullptr || traits->to_float == nullptr) {
+                    throw std::runtime_error("tensor type is not readable as F32: " + std::string(name));
+                }
+                traits->to_float(data, out.data(), static_cast<int64_t>(n_elem));
                 break;
+            }
         }
         return out;
     }

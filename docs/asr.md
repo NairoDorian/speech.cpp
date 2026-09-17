@@ -2,6 +2,8 @@
 
 | Model | Family | Mode(s) | Quick Start |
 |---|---|---|---|
+| Canary 180M Flash | `canary_asr` | offline | [Canary 180M Flash](models/canary_asr.md) |
+| Cohere Transcribe | `cohere_asr` | offline | [Cohere Transcribe](models/cohere_asr.md) |
 | Fun-ASR-Nano | `fun_asr_nano` | offline | [Fun-ASR-Nano](#fun-asr-nano) |
 | Granite Speech 5.0 TurboCTC | `granite5asr` | offline | [Granite Speech 5.0 TurboCTC](community_models/granite5asr.md) |
 | Qwen3 ASR | `qwen3_asr` | offline, streaming | [Qwen3 ASR](#qwen3-asr) |
@@ -10,7 +12,9 @@
 | Higgs Audio STT | `higgs_audio_stt` | offline, streaming | [Higgs Audio STT](#higgs-audio-stt) |
 | Hviske ASR | `hviske_asr` | offline | [Hviske ASR](#hviske-asr) |
 | Moonshine Streaming ASR | `moonshine_asr` | offline, streaming | [Moonshine Streaming ASR](models/moonshine_asr.md) |
+| MOSS-Transcribe-Diarize | `moss_transcribe_diarize` | offline, text-output streaming | [MOSS-Transcribe-Diarize](models/moss_transcribe_diarize.md) |
 | Nemotron ASR | `nemotron_asr` | offline, streaming | [Nemotron ASR](#nemotron-asr) |
+| Niagara ASR | `niagara_asr` | offline | [Niagara ASR](#niagara-asr) |
 | Parakeet-TDT | `parakeet_tdt` | offline, streaming | [Parakeet-TDT](#parakeet-tdt) |
 | SenseVoice-Small | `sense_asr` | offline, streaming | [SenseVoice-Small](#sensevoice-small) |
 | VibeVoice ASR | `vibevoice_asr` | offline | [VibeVoice ASR](models/vibevoice_asr.md#vibevoice-asr) |
@@ -238,6 +242,21 @@ Compatibility aliases for existing requests:
 | `audio_chunk_seconds` | `audio_chunk_duration_sec` |
 | `audio_chunk_duration_seconds` | `audio_chunk_duration_sec` |
 | `audio_chunk_duration` | `audio_chunk_duration_sec` |
+
+## Niagara ASR
+
+Niagara provides English offline transcription with 19M and 38M Batch checkpoints
+under the same `niagara_asr` family. Select the checkpoint through `--model`.
+
+```bash
+audiocpp_cli --task asr --family niagara_asr \
+  --model models/Niagara-ASR-GGUF/niagara-19m-batch.en-f32.gguf \
+  --backend cpu --threads 8 --audio speech.wav \
+  --text-out transcript.txt --log
+```
+
+Use `niagara-38m-batch.en-f32.gguf` for the 38M checkpoint. These are offline batch
+models; streaming and audio chunking are not supported.
 
 ## Nemotron ASR
 
