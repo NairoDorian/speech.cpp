@@ -46,7 +46,7 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | Test suite status | **110/110 green** on `build-cpu-core`; `build-cpu-full` unlocked (firered_audio fix) — ASR smoke tests (`whisper`, `moonshine`, `moonshine_streaming`, `qwen3_asr`, `voxtral_realtime`, `hviske_asr`, `nemotron_asr`) + WER gates (`whisper`, `qwen3_asr`) green | **100%** |
 | **Completed increment** | **Upstream `78d47706` (0 behind), ggml 0.22.0 (CPU+CUDA certified), Phase 11 W1a + W1b + W2a** | **DONE** |
 | **Phase 10.5, family 3 of 5: `sortformer_diar` step 2 (feature-merge)** | **Done 2026-08-27** — chunked AOSC/FIFO scheduler + presets + typed RUN ext in the engine; the catalogue's default (NeMo-layout) v2 package opens in the engine (neither parent could); chunked == whole-window to 1.8e-7; 0/600 decision flips vs the arch on identical weights; **111/111** core, C-ABI ext gate OK. Report: `docs/reports/sortformer_diar_engine_port.md` | 100% |
-| **Next increment** | **Phase 11a: DecodeDriver + WhisperEmbeddingModule (B31)** | **IN PROGRESS** |
+| **Next increment** | **Phase 11a B31 Part 2: fold Whisper encoder onto WhisperEmbeddingModule** | **IN PROGRESS** |
 
 ## DONE this session
 
@@ -68,6 +68,14 @@ The three ASR engine packages each carried a byte-for-byte identical KV cache st
 - **Runtimes** (`src/models/*/runtime.cpp`): `kv_cache_init(...)` → `engine::asr::kv_cache_init(...)` (3 call sites).
 - **firered_audio fix** (`3de02cdc`): the cpu-full ASR build was blocked by a ggml v0.22.0 API change — `ggml_gated_delta_net` gained a `K` (state-snapshot count) parameter. Added `K=1` at both call sites in `src/models/firered_audio/qwen35_runtime.cpp`, matching the old API's default behavior (keep only final state).
 - **Verification**: full cpu-full reconfigure + build clean (91 targets). All three ASR engine smoke tests pass: `moonshine_engine_smoke_test` (PASS, 4.76s), `moonshine_streaming_engine_smoke_test` (PASS, 25.78s), `whisper_engine_smoke_test` (PASS, 13.74s). WER gate: `asr_e2e_whisper_wer_test` PASS (3.17s) — encoder port still matches arch baseline after the KV cache unification. `test_adapter_sniff_dispatch` PASS.
+
+### Phase 11a B31 Part 1 — WhisperBinTensorSource (2026-09-15, commit f6a9d2b2)
+
+Created a shared `TensorSource` for the legacy Whisper `.bin` weight format, eliminating the private `load_whisper_assets()` parser in the engine package.
+
+- **`include/engine/framework/assets/whisper_bin.h`** + **`src/framework/assets/whisper_bin.cpp`**: implements `WhisperBinTensorSource` (subclass of `TensorSource`). Parses the `.bin` format (magic `0x67676d6c`, 11×int32 hparams, mel filterbank, vocabulary, tensor manifest) and implements the full `TensorSource` interface: `has_tensor`, `require_metadata`, `tensors`, `require_tensor_data`, `require_f32`, `optional_f32`. Tensor data is stored in-memory with per-record byte offsets; `require_f32()` decodes F32/F16/BF16 tensors via `ggml_fp16_to_fp32_row` / `ggml_bf16_to_fp32_row`.
+- **`src/framework/assets/tensor_source.cpp`**: registered `.bin` handling in `open_tensor_source()` — files with `.bin` extension that pass the magic check route to `WhisperBinTensorSource`; non-Whisper `.bin` (ZIP/torch format) handled by `open_torch_bin_tensor_source`.
+- **Verification**: `cpu-core` build clean — `engine_core` (with `WhisperBinTensorSource`), `engine_transcribe_runtime`, `transcribe.dll` all compile + link. `test_adapter_sniff_dispatch` PASS.
 
 ### Phase 10.5, family 4 of 5 — `fun_asr_nano` retirement (2026-08-27, commit 1be9ac40)
 Completed the final retirement of the Phase 10.5 family wave, dropping the parallel `transcribe.cpp` arch in favor of the engine `fun_asr_nano` family.
