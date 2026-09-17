@@ -41,14 +41,6 @@ namespace whisper {
 extern const Arch arch;
 }
 
-namespace moonshine {
-extern const Arch arch;
-}
-
-namespace moonshine_streaming {
-extern const Arch arch;
-}
-
 namespace gigaam {
 extern const Arch arch;
 }
@@ -70,16 +62,17 @@ const Arch * find_arch(const char * name) {
         return nullptr;
     }
 
-    // Retired standalone arches (Phase 10.5): the engine families now own
+    // Retired standalone arches: the engine families now own
     // their GGUF architecture names through the ArchAdapter —
-    //   B15 sortformer  -> sortformer_diar (parakeet keeps the embedded
-    //      diarizer core under src/runtime/arch/sortformer)
-    //   B13 sensevoice  -> sense_asr
-    //   B14 fun_asr_nano -> fun_asr_nano
+    //   B15 sortformer          -> sortformer_diar (Phase 10.5)
+    //   B13 sensevoice          -> sense_asr (Phase 10.5)
+    //   B14 fun_asr_nano        -> fun_asr_nano (Phase 10.5)
+    //   B16a moonshine          -> moonshine (Phase 11b)
+    //   B16b moonshine_streaming-> moonshine_streaming (Phase 11b)
     static const Arch * const k_archs[] = {
         &parakeet::arch,         &cohere::arch,      &canary::arch,     &voxtral::arch,
-        &canary_qwen::arch,      &whisper::arch,     &moonshine::arch,  &moonshine_streaming::arch,
-        &gigaam::arch,      &granite::arch,    &granite_nar::arch,
+        &canary_qwen::arch,      &whisper::arch,
+        &gigaam::arch,           &granite::arch,     &granite_nar::arch,
         &medasr::arch,           &moss::arch,
     };
     constexpr size_t k_n = sizeof(k_archs) / sizeof(k_archs[0]);

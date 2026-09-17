@@ -44,10 +44,30 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | End-to-end ASR **offline text** (WER gate) | Done — 1.45% corpus WER (arch path); engine path now also 1/69 edits | 100% |
 | **End-to-end ASR streaming text** | **Done — streamed 4.35% == offline 4.35%, divergence 0** | **100%** |
 | Test suite status | **110/110 green** on `build-cpu-core`; `build-cpu-full` unlocked (firered_audio fix) — ASR smoke tests (`whisper`, `moonshine`, `moonshine_streaming`, `qwen3_asr`, `voxtral_realtime`, `hviske_asr`, `nemotron_asr`) + WER gates (`whisper`, `qwen3_asr`) green | **100%** |
-| **Completed increment** | **Upstream synchronization (53 commits merged, 0 behind); Phase 11a B31 Part 2 (Whisper encoder folded onto WhisperEmbeddingModule)** | **DONE** |
-| **Next increment** | **Phase 11a continuation: Moonshine / Moonshine-Streaming encoder & decoder module fusion** | **READY** |
+| **Completed increment** | **Wave W1 Retirement (B16a: Moonshine & B16b: Moonshine-Streaming deleted, C ABI adapter routing live, 100% C ABI parity verified)** | **DONE** |
+| **Next increment** | **Wave W2b: Whisper full scope (temperature fallback, telemetry, timestamps) & Whisper arch retirement (B16c)** | **READY** |
 
 ## DONE this session
+
+### Phase 11b Wave W1 Retirement — B16a (Moonshine) & B16b (Moonshine-Streaming) (2026-09-17)
+
+Retired the legacy transcribe.cpp arch implementations for Moonshine and Moonshine-Streaming in favor of the unified native engine packages:
+
+- **Legacy Arch Removal**:
+  - Deleted `src/runtime/arch/moonshine/` (9 files, 3,506 LOC).
+  - Deleted `src/runtime/arch/moonshine_streaming/` (9 files, 3,630 LOC).
+  - Removed forward declarations and `k_archs` entries from `src/runtime/transcribe-arch.cpp`.
+- **C ABI Adapter Routing** (`src/runtime/transcribe-arch-adapter.cpp`):
+  - Added `"moonshine"` and `"moonshine_streaming"` to `adapter_archs[]`.
+  - Added extension handling for `TRANSCRIBE_EXT_KIND_MOONSHINE_STREAMING_STREAM` in `adapter_family_accepts_ext`, `adapter_check_stream_ext`, and `adapter_apply_stream_ext` (mapping `min_decode_interval_ms` to `moonshine_streaming.min_decode_interval_ms`).
+- **C ABI Extension Preservation** (`src/runtime/transcribe-family-ext.cpp`):
+  - Preserved public ABI symbol `transcribe_moonshine_streaming_stream_ext_init` (initializing `ext.kind`, `ext.size`, and default `min_decode_interval_ms = -1`).
+- **Spec & Test Alignment**:
+  - Updated `model_specs/moonshine_streaming.json` with `moonshine_streaming.min_decode_interval_ms` request option.
+  - Aligned C ABI test target guards (`asr_e2e_wer_test`, `asr_stream_text_wer_test`, `asr_e2e_edits_test`) with `AUDIOCPP_LINKED_MODELS` membership in `CMakeLists.txt` and `cmake/transcribe-tests.cmake`.
+- **Verification Gates**:
+  - `build-cpu-full`: `asr_e2e_wer_test` passed (1.449% WER = 1/69 edits, 1.39s), `asr_stream_text_wer_test` passed (4.348% WER, divergence 0, 25.11s), `asr_e2e_edits_test` passed (1.38s).
+  - `build-cpu-core`: 100% test suite pass rate (106 passed, 1 clean skip on missing model, 0 failed).
 
 ### Phase 11a B31 Part 2 — Fold Whisper Encoder onto `WhisperEmbeddingModule` (2026-09-17)
 

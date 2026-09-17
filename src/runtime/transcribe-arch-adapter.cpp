@@ -35,6 +35,7 @@
 #include "transcribe-model.h"
 #include "transcribe-path.h"
 #include "transcribe-session.h"
+#include "transcribe/moonshine_streaming.h"
 #include "transcribe/sortformer.h"
 #include "transcribe/voxtral_realtime.h"
 
@@ -325,6 +326,9 @@ bool adapter_family_accepts_ext(const std::string & family, transcribe_ext_slot 
         // whole recording (transcribe/sortformer.h).
         return slot == TRANSCRIBE_EXT_SLOT_RUN && kind == TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM;
     }
+    if (family == "moonshine_streaming") {
+        return slot == TRANSCRIBE_EXT_SLOT_STREAM && kind == TRANSCRIBE_EXT_KIND_MOONSHINE_STREAMING_STREAM;
+    }
     return false;
 }
 
@@ -429,6 +433,19 @@ transcribe_status adapter_check_stream_ext(const std::string & family,
         }
         return TRANSCRIBE_OK;
     }
+    if (family == "moonshine_streaming") {
+        if (const transcribe_status st = transcribe_ext_check(
+                fam, TRANSCRIBE_EXT_KIND_MOONSHINE_STREAMING_STREAM,
+                sizeof(transcribe_moonshine_streaming_stream_ext));
+            st != TRANSCRIBE_OK) {
+            return st;
+        }
+        const auto * mx = reinterpret_cast<const transcribe_moonshine_streaming_stream_ext *>(fam);
+        if (mx->min_decode_interval_ms < -1) {
+            return TRANSCRIBE_ERR_INVALID_ARG;
+        }
+        return TRANSCRIBE_OK;
+    }
     // An extension pointed at a family with no surface: the generic contract
     // says probe first, so reject rather than silently ignore it.
     return TRANSCRIBE_ERR_INVALID_ARG;
@@ -440,15 +457,25 @@ void adapter_apply_stream_ext(TaskRequest & request,
                               const std::string & family,
                               const transcribe_stream_params * stream_params) {
     const transcribe_ext * fam = (stream_params != nullptr) ? stream_params->family : nullptr;
-    if (fam == nullptr || family != "voxtral_realtime") {
+    if (fam == nullptr) {
         return;
     }
-    const auto * vx = reinterpret_cast<const transcribe_voxtral_realtime_stream_ext *>(fam);
-    if (vx->num_delay_tokens >= 0) {
-        request.options["num_delay_tokens"] = std::to_string(vx->num_delay_tokens);
+    if (family == "voxtral_realtime") {
+        const auto * vx = reinterpret_cast<const transcribe_voxtral_realtime_stream_ext *>(fam);
+        if (vx->num_delay_tokens >= 0) {
+            request.options["num_delay_tokens"] = std::to_string(vx->num_delay_tokens);
+        }
+        if (vx->min_decode_interval_ms >= 0) {
+            request.options["min_decode_interval_ms"] = std::to_string(vx->min_decode_interval_ms);
+        }
+        return;
     }
-    if (vx->min_decode_interval_ms >= 0) {
-        request.options["min_decode_interval_ms"] = std::to_string(vx->min_decode_interval_ms);
+    if (family == "moonshine_streaming") {
+        const auto * mx = reinterpret_cast<const transcribe_moonshine_streaming_stream_ext *>(fam);
+        if (mx->min_decode_interval_ms >= 0) {
+            request.options["moonshine_streaming.min_decode_interval_ms"] = std::to_string(mx->min_decode_interval_ms);
+        }
+        return;
     }
 }
 
@@ -1259,6 +1286,14 @@ static const Arch adapter_archs[] = {
      &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
      &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
     {"moss",                &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"moonshine",           &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"moonshine_streaming", &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
      &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
      &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
      &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},

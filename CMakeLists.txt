@@ -2508,20 +2508,24 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
         # the runtime cannot load any ASR GGUF and the gate would fail, not
         # skip, in an otherwise-supported configuration.
         if (SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES)
-            add_test(NAME asr_e2e_wer_test
-                     COMMAND asr_e2e_wer_test
-                         "${CMAKE_CURRENT_SOURCE_DIR}/models/moonshine-tiny-Q8_0.gguf"
-                         "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
-            set_tests_properties(asr_e2e_wer_test PROPERTIES SKIP_RETURN_CODE 2)
+            if ("moonshine" IN_LIST AUDIOCPP_LINKED_MODELS)
+                add_test(NAME asr_e2e_wer_test
+                         COMMAND asr_e2e_wer_test
+                             "${CMAKE_CURRENT_SOURCE_DIR}/models/moonshine-tiny-Q8_0.gguf"
+                             "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
+                set_tests_properties(asr_e2e_wer_test PROPERTIES SKIP_RETURN_CODE 2)
+            endif()
 
             # Streaming-text gate: same fetch script, second pinned model
             # (moonshine-streaming-tiny Q8_0). Skips identically while the
             # model is absent.
-            add_test(NAME asr_stream_text_wer_test
-                     COMMAND asr_stream_text_wer_test
-                         "${CMAKE_CURRENT_SOURCE_DIR}/models/moonshine-streaming-tiny-Q8_0.gguf"
-                         "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
-            set_tests_properties(asr_stream_text_wer_test PROPERTIES SKIP_RETURN_CODE 2)
+            if ("moonshine_streaming" IN_LIST AUDIOCPP_LINKED_MODELS)
+                add_test(NAME asr_stream_text_wer_test
+                         COMMAND asr_stream_text_wer_test
+                             "${CMAKE_CURRENT_SOURCE_DIR}/models/moonshine-streaming-tiny-Q8_0.gguf"
+                             "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
+                set_tests_properties(asr_stream_text_wer_test PROPERTIES SKIP_RETURN_CODE 2)
+            endif()
 
             # Whisper family gate (Phase 11 W2 prerequisite): third pinned
             # model, and the only one that is a legacy ggml .bin rather than a

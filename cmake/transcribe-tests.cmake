@@ -124,11 +124,13 @@ if (SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES)
     )
     target_link_libraries(asr_e2e_edits_test PRIVATE transcribe)
     if (ENGINE_BUILD_TESTS)
-        add_test(NAME asr_e2e_edits_test
-                 COMMAND asr_e2e_edits_test
-                     "${CMAKE_CURRENT_SOURCE_DIR}/models/moonshine-tiny-Q8_0.gguf"
-                     "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
-        set_tests_properties(asr_e2e_edits_test PROPERTIES SKIP_RETURN_CODE 2)
+        if ("moonshine" IN_LIST AUDIOCPP_LINKED_MODELS)
+            add_test(NAME asr_e2e_edits_test
+                     COMMAND asr_e2e_edits_test
+                         "${CMAKE_CURRENT_SOURCE_DIR}/models/moonshine-tiny-Q8_0.gguf"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
+            set_tests_properties(asr_e2e_edits_test PROPERTIES SKIP_RETURN_CODE 2)
+        endif()
     endif()
 
     # Phase 9 Parity and Contract Tests

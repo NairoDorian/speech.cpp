@@ -1,4 +1,4 @@
-﻿{
+{
   "schema_version": 1,
   "family": "moonshine_streaming",
   "display_name": "Moonshine Streaming ASR",
@@ -36,6 +36,14 @@
         "required": false,
         "min": 0,
         "default": 0
+      },
+      {
+        "name": "moonshine_streaming.min_decode_interval_ms",
+        "type": "int",
+        "description": "Minimum gap between per-feed partial decodes in ms; -1 uses default (240), 0 decodes on every advance.",
+        "required": false,
+        "min": -1,
+        "default": -1
       }
     ],
     "session": [

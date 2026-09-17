@@ -11,6 +11,12 @@ Dates are the work-session dates recorded in the plan.
 
 ### Added
 
+- **Phase 11b Wave W1 Retirement — Retire Legacy Moonshine & Moonshine-Streaming Arches (2026-09-17)**:
+  - Retired duplicate legacy transcribe.cpp implementations `src/runtime/arch/moonshine/` and `src/runtime/arch/moonshine_streaming/` (~7,136 LOC removed, Appendix B rows B16a & B16b).
+  - Wired `"moonshine"` and `"moonshine_streaming"` into the ArchAdapter dispatch table (`src/runtime/transcribe-arch-adapter.cpp`), routing C ABI calls directly to `engine::models::moonshine` and `engine::models::moonshine_streaming`.
+  - Preserved public C ABI stream extension symbol `transcribe_moonshine_streaming_stream_ext_init` in `src/runtime/transcribe-family-ext.cpp`, routing `min_decode_interval_ms` to `moonshine_streaming.min_decode_interval_ms`.
+  - Verified 100% C ABI parity on `build-cpu-full`: `asr_e2e_wer_test` passed (1.449% WER = 1/69 edits, 1.39s), `asr_stream_text_wer_test` passed (4.348% WER, divergence 0, 25.11s), `asr_e2e_edits_test` passed (1.38s). Full CTest suite on `build-cpu-core`: 100% green (106 passed, 1 clean skip, 0 failed).
+
 - **Phase 11a B31 Part 2 — Fold Whisper Encoder onto `WhisperEmbeddingModule` (2026-09-17)**:
   - Folded the native Whisper engine encoder onto `engine::modules::WhisperEmbeddingModule`, removing duplicate encoder implementations (`conv_1d_f32`, `add_conv1d_bias`, `mha_encoder`, `build_enc_block`) from `src/models/whisper/graphs.cpp`.
   - Replaced private weight structs `WhisperEncStem`, `WhisperEncTop`, and `WhisperEncBlock` with shared `WhisperEmbeddingWeights` in `WhisperWeights`.

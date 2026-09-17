@@ -13,6 +13,7 @@
 // knobs themselves are served by the ArchAdapter, which translates the
 // extension into the framework session's request options.
 
+#include "transcribe/moonshine_streaming.h"
 #include "transcribe/sortformer.h"
 #include "transcribe/voxtral_realtime.h"
 
@@ -45,4 +46,18 @@ extern "C" void transcribe_sortformer_stream_ext_init(struct transcribe_sortform
     p->ext.size = sizeof(*p);
     p->ext.kind = TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM;
     p->preset   = TRANSCRIBE_SORTFORMER_PRESET_DEFAULT;
+}
+
+// moonshine_streaming: arch retired in Phase 11b (ledger B16b). The native
+// engine `moonshine_streaming` package serves streaming and offline ASR
+// through the adapter. The init function stamps the transcribe_ext header
+// (size + kind) and default min_decode_interval_ms (-1 -> 240 ms).
+extern "C" void transcribe_moonshine_streaming_stream_ext_init(struct transcribe_moonshine_streaming_stream_ext * p) {
+    if (p == nullptr) {
+        return;
+    }
+    std::memset(p, 0, sizeof(*p));
+    p->ext.size               = sizeof(*p);
+    p->ext.kind               = TRANSCRIBE_EXT_KIND_MOONSHINE_STREAMING_STREAM;
+    p->min_decode_interval_ms = -1;
 }
