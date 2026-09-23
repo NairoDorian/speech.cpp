@@ -9,6 +9,35 @@ Dates are the work-session dates recorded in the plan.
 
 ## [Unreleased]
 
+### Fixed (2026-09-24)
+
+- **Voxtral-Realtime: a second offline run on a session decoded garbage.** The engine's cached audio-encoder and
+  text-prefill graphs uploaded their positions and attention masks once, at construction; those buffers do not
+  survive a compute, so re-running a same-length clip returned "." or "σ" instead of the transcript. Both graphs
+  now upload them on every run. Found by transcribe.cpp's `stream_offline_interleave_smoke`, newly vendored;
+  `voxtral_realtime_engine_smoke_test` gained a back-to-back repeat check that failed before the fix.
+- **Parakeet buffered streaming lost the last words** (transcribe.cpp `63baefe6`, #145): finalize now flushes the
+  retained right context and pads lookahead silence; cursor math uses cumulative samples. Reproduced first with the
+  parent's test (996 failed checks), which now passes.
+
+### Changed (2026-09-24)
+
+- **transcribe.cpp S3 conformer memory chain** (`139869c2`, `b174a427`, `8e413fef`, `be7a8b35`): parakeet peak
+  working set 579 -> 463 MB (-20%) with byte-identical transcripts on 6 clips up to 83 s.
+- **Offline compute scratch is released after every run** (transcribe.cpp `9aa6599f`, #150): the scheduler and
+  graph context move into the session base and are freed after each offline run, so one long utterance no longer
+  pins its peak for the session's lifetime.
+- **Voxtral-Realtime offline requests default to delay 30** (transcribe.cpp `e2f82cb6`), the best evaluated;
+  streaming keeps the model's 6.
+- Intake / preflight scripts read and write JSON as UTF-8 (transcribe.cpp `6d7fc06f`).
+
+### Added (2026-09-24)
+
+- Pinned test models `parakeet-tdt_ctc-110m-Q8_0.gguf` and `parakeet-unified-en-0.6b-Q4_K_M.gguf` (the first local
+  conformer models). New gates: `asr_e2e_parakeet_wer_test` (held to 2/69), `transcribe_parakeet_buffered_stream_eos_smoke`,
+  `transcribe_stream_offline_interleave_smoke`. `asr_e2e_wer_test` takes `SPEECHCPP_ASR_E2E_PRINT_HYP=1` to print
+  every raw transcript for exact before/after comparisons.
+
 ### Added
 
 - **audio.cpp merged to `9bdd1d90` (v0.8.2, 70 commits, 2026-09-23)**: LiveAvatar, AuK, Confucius4-R2T2

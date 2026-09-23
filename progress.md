@@ -60,6 +60,23 @@ C-ABI gates), `build-cpu-full`, `build-cpu-asr`, `build-client-compact-minimized
 
 ## DONE this session
 
+### transcribe.cpp ledger items + a Voxtral-Realtime engine bug (2026-09-24)
+
+- **New local models make conformer work testable**: `parakeet-tdt_ctc-110m-Q8_0` (gate `asr_e2e_parakeet_wer_test`, 2/69,
+  bound 2.9% verified to fail at 2.0) and `parakeet-unified-en-0.6b-Q4_K_M` (buffered streaming path).
+- **S3 conformer memory chain**: `conformer.cpp` now equals parent HEAD bar comments and one 585b98f7 helper. Parakeet
+  transcripts byte-identical before/after (4 LibriSpeech + jfk + 83 s whole-earth); peak working set 579 -> 463 MB,
+  wall +~5% (3 runs each). granite_nar hunks deferred (they need 585b98f7).
+- **63baefe6 tail loss**: parent test vendored and run on the unfixed tree first (996 failures), passes after.
+- **9aa6599f scratch release**: base-owned sched / compute_ctx released after each offline run; parent's
+  `stream_offline_interleave_smoke` vendored (parakeet-unified, moonshine_streaming, voxtral_realtime).
+- **e2f82cb6**: Voxtral-RT offline default delay 30 in the engine; stream-vs-offline compared at equal delay.
+- **Engine bug found**: the interleave test showed Voxtral-RT's second offline run returning "."; isolated with a 1-minute
+  repro (same clip twice through `asr_e2e_wer_test`) and by disabling each graph cache (both caches were bad). Root
+  cause: positions / masks uploaded only at graph construction. Fixed by uploading every run; an audit of the other
+  engine models for the same pattern was started.
+- `6d7fc06f` UTF-8 intake applied.
+
 ### audio.cpp merge to `9bdd1d90` (2026-09-23, pushed)
 
 - **ggml first** (`f4d8e31e`): audio.cpp's own-ggml commits ported onto the 0.24.0 stack as patches 0012-0015,
