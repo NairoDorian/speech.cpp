@@ -130,7 +130,9 @@ static constexpr std::string_view kAliasesMinimaxMusic3[] = {"minimax-music"};
 static constexpr std::string_view kAliasesMmsForcedAligner[] = {"mms-aligner"};
 static constexpr std::string_view kAliasesMossVoicegen[] = {"moss-voicegen"};
 static constexpr std::string_view kAliasesOutetts[] = {"outetts-tts"};
-static constexpr std::string_view kAliasesVietneuTts[] = {"vietneu"};
+// Renamed upstream (audio.cpp #647): vietneu_tts -> vieneu_v3_turbo. The old
+// id stays as an alias so existing callers and C ABI scripts keep resolving.
+static constexpr std::string_view kAliasesVieneuV3Turbo[] = {"vieneu", "vietneu", "vietneu_tts"};
 
 #define ARR_DESC(arr) arr, (sizeof(arr)/sizeof((arr)[0]))
 #define EMPTY_DESC nullptr, 0
@@ -209,7 +211,7 @@ static const FamilyEntry kStaticFamilies[] = {
     {"mms_forced_aligner", ARR_DESC(kAliasesMmsForcedAligner), EMPTY_DESC, "model_specs/mms_forced_aligner.json", VoiceTaskKind::Alignment},
     {"moss_voicegen", ARR_DESC(kAliasesMossVoicegen), EMPTY_DESC, "model_specs/moss_voicegen.json", VoiceTaskKind::Tts},
     {"outetts", ARR_DESC(kAliasesOutetts), EMPTY_DESC, "model_specs/outetts.json", VoiceTaskKind::Tts},
-    {"vietneu_tts", ARR_DESC(kAliasesVietneuTts), EMPTY_DESC, "model_specs/vietneu_tts.json", VoiceTaskKind::Tts},
+    {"vieneu_v3_turbo", ARR_DESC(kAliasesVieneuV3Turbo), EMPTY_DESC, "model_specs/vieneu_v3_turbo.json", VoiceTaskKind::Tts},
 };
 
 static constexpr size_t kFamilyCount = sizeof(kStaticFamilies) / sizeof(kStaticFamilies[0]);

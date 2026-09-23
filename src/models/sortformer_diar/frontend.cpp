@@ -1,19 +1,43 @@
 #include "engine/models/sortformer_diar/frontend.h"
 
-#include "engine/framework/audio/conversion.h"
-#include "engine/framework/audio/dsp.h"
-#include "engine/framework/audio/waveform_ops.h"
-#include "engine/framework/debug/profiler.h"
+#include "engine/framework/audio/nemo_mel_frontend.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <stdexcept>
 #include <utility>
 
 namespace engine::models::sortformer_diar {
 
-namespace {
-using engine::debug::measure_ms;
-}  // namespace
+// Upstream audio.cpp (#628) moved the Sortformer mel frontend onto the shared
+// NemoMelFrontend. speech.cpp's package layouts (SortformerPackageLayout) carry
+// a layout-dependent frontend contract, so the shared frontend is configured
+// from it rather than from the HF defaults alone:
+//   - peak_normalize   -> WaveScale (HF scales to peak; NeMo does not)
+//   - normalize        -> MelNorm   (HF per_feature; NeMo GGUF may be "NA")
+//   - frame_count      -> ValidFrameRule at run time (HF floor; NeMo ceil)
+audio::NemoMelFrontend make_sortformer_frontend(const SortformerAssets & assets) {
+    const auto & source = assets.feature_config;
+    audio::NemoMelFrontendConfig config;
+    config.sample_rate = source.sample_rate;
+    config.n_mels = source.num_mel_bins;
+    // Caution: this is based on NeMo Sortformer preprocessing, which uses
+    // torch.stft(..., center=True, pad_mode="constant").
+    config.stft = {source.n_fft, source.hop_length, source.win_length,
+                   true, audio::STFTPadMode::Constant, audio::STFTFamily::Default};
+    config.input_rate = audio::MelInputRate::RequireMatch;
+    config.wave_scale = source.peak_normalize
+        ? audio::WaveScale::DivideByMaxPlusEps
+        : audio::WaveScale::None;
+    config.preemphasis = source.preemphasis;
+    config.mel_path = audio::MelPath::LogMelSpectrogram;
+    config.norm = source.normalize == SortformerFeatureNormalize::PerFeature
+        ? audio::MelNorm::PerBinF32
+        : audio::MelNorm::None;
+    config.frame_multiple = 16;
+    config.pad_basis = audio::PadBasis::ValidFrames;
+    return audio::NemoMelFrontend(std::move(config));
+}
 
 SortformerFeatureBatch compute_sortformer_features(
     const runtime::AudioBuffer & audio,
@@ -26,91 +50,40 @@ SortformerFeatureBatch compute_sortformer_features(
     if (audio.sample_rate != assets.feature_config.sample_rate) {
         throw std::runtime_error("Sortformer diar currently requires 16 kHz input audio");
     }
+    if (assets.frontend == nullptr) {
+        throw std::runtime_error("Sortformer diar assets have no mel frontend");
+    }
     const auto & feature_config = assets.feature_config;
-    auto mono = audio::mixdown_interleaved_to_mono_average(audio.samples, audio.channels);
-    // The HF feature extractor scales the waveform to its peak before
-    // pre-emphasis; NeMo's AudioToMelSpectrogramPreprocessor does not. The
-    // package layout decides (SortformerFeatureExtractorConfig::peak_normalize).
-    if (feature_config.peak_normalize && !mono.empty()) {
-        const auto max_it = std::max_element(mono.begin(), mono.end());
-        const float scale = 1.0f / (*max_it + 1.0e-3f);
-        for (float & sample : mono) {
-            sample *= scale;
-        }
-    }
-    mono = audio::apply_preemphasis(std::move(mono), feature_config.preemphasis);
-    audio::AudioTensor mel;
-    const auto log_mel_compute = [&]() {
-        const audio::STFTConfig stft_config{
-            feature_config.n_fft,
-            feature_config.hop_length,
-            feature_config.win_length,
-            true,
-            // Caution: this is Based on NeMo Sortformer preprocessing, which uses
-            // torch.stft(..., center=True, pad_mode="constant"). Other model
-            // families may legitimately require a different STFT pad mode.
-            audio::STFTPadMode::Constant,
-        };
-        mel = audio::LogMelSpectrogram().compute(
-            mono,
-            1,
-            static_cast<int64_t>(mono.size()),
-            audio.sample_rate,
-            stft_config,
-            feature_config.num_mel_bins,
-            static_cast<size_t>(std::max<int64_t>(1, threads)));
-    };
-    if (timings != nullptr) {
-        timings->log_mel_ms += measure_ms(log_mel_compute);
-    } else {
-        log_mel_compute();
-    }
-    const int64_t raw_frames = mel.shape[2];
-    const int64_t hop = feature_config.hop_length;
-    const int64_t sample_count = static_cast<int64_t>(mono.size());
     // Caution: use the valid frame count, not the raw centered-STFT frame count,
     // when sizing the padded feature buffer. The HF port tracks floor(n / hop);
     // NeMo's preprocessor reports ceil(n / hop) (the transcribe.cpp frontend's
     // nemo_seq_len_ceil). The centered STFT always yields 1 + floor(n / hop)
     // frames, so either count fits in what was computed.
-    int64_t valid_frames = 0;
-    switch (feature_config.frame_count) {
-        case SortformerFrameCount::Floor:
-            valid_frames = std::max<int64_t>(0, sample_count / hop);
-            break;
-        case SortformerFrameCount::Ceil:
-            valid_frames = std::max<int64_t>(0, (sample_count + hop - 1) / hop);
-            break;
-    }
-    std::vector<int64_t> lengths = {std::min(valid_frames, raw_frames)};
-    const int64_t frames = ((lengths.front() + 15) / 16) * 16;
-    audio::FeatureNormalizeOutput normalized;
-    const auto normalize_compute = [&]() {
-        normalized = audio::FeatureNormalizer().compute(
-            mel.values,
-            lengths,
-            1,
-            feature_config.num_mel_bins,
-            raw_frames,
-            feature_config.normalize == SortformerFeatureNormalize::PerFeature
-                ? audio::FeatureNormalizeType::PerFeature
-                : audio::FeatureNormalizeType::None);
-    };
+    const auto valid_rule = feature_config.frame_count == SortformerFrameCount::Ceil
+        ? audio::ValidFrameRule::CeilHops
+        : audio::ValidFrameRule::FloorHops;
+    const auto mel = assets.frontend->extract_audio(
+        audio.samples, audio.sample_rate, audio.channels,
+        {true, valid_rule},
+        static_cast<size_t>(std::max<int64_t>(1, threads)));
     if (timings != nullptr) {
-        timings->feature_normalizer_ms += measure_ms(normalize_compute);
-    } else {
-        normalize_compute();
+        timings->log_mel_ms += mel.mel_ms;
+        timings->feature_normalizer_ms += mel.normalize_ms;
     }
-
     SortformerFeatureBatch batch;
-    batch.frames = frames;
-    batch.valid_frames = lengths.front();
-    batch.time_major.resize(static_cast<size_t>(frames * feature_config.num_mel_bins), 0.0f);
-    for (int64_t t = 0; t < batch.valid_frames; ++t) {
-        for (int64_t m = 0; m < feature_config.num_mel_bins; ++m) {
-            const size_t dst = static_cast<size_t>((t * feature_config.num_mel_bins) + m);
-            batch.time_major[dst] = normalized.normalized.values[static_cast<size_t>((m * raw_frames) + t)];
-        }
+    batch.frames = mel.frames;
+    batch.valid_frames = mel.valid_frames;
+    batch.time_major = mel.values;
+    // speech.cpp contract: frames at or past valid_frames are zero padding.
+    // PerFeature normalization already zeroes them; with normalize=None the
+    // shared frontend copies up to raw_frames, which can leave one raw
+    // centered-STFT frame past the valid count (NeMo ceil vs 1 + floor).
+    const int64_t n_mels = feature_config.num_mel_bins;
+    for (int64_t t = batch.valid_frames; t < batch.frames; ++t) {
+        std::fill_n(
+            batch.time_major.begin() + static_cast<std::ptrdiff_t>(t * n_mels),
+            static_cast<size_t>(n_mels),
+            0.0f);
     }
     return batch;
 }

@@ -26,6 +26,25 @@ PIN HISTORY:
   36da5713 (ggml 0.22.0) -> 456172ec (ggml 0.24.0), 2026-09-23.
   8c63e709 (ggml 0.20.2) -> 36da5713 (ggml 0.22.0), 2026-08-26.
 
+2026-09-23 (later) -- AUDIO.CPP MERGE TO 9bdd1d90: PATCHES 0012-0015.
+The audio.cpp merge c0b26a50..9bdd1d90 carried eight commits that edit
+audio.cpp's own ggml. Their deltas were ported by hand onto the 0.24.0 stack
+(3-way per file on LF-normalized sides), not taken from the merge -- the merge
+itself keeps external/ggml at OURS. Ported (the API surface upstream engine
+code calls, plus CPU kernels):
+  0012  07490d83 lowering APIs + 5 ops           GGML_OP_COUNT 109 -> 114
+  0013  82b4dc3a ssm_scan fusion API (flag in op_params slot 1: 0.24.0's
+        slot 0 is K -- deliberate divergence, see the header)
+  0014  712dd75a MUL_MAT_ACC + SNAKE_1D with CPU reference kernels  -> 116
+  0015  speech.cpp: CPU supports_op refuses the ops it cannot compute
+NOT PORTED (need CUDA / Metal / Vulkan builds to verify; tracked in
+MULTI_AGENT_FUSION_PLAN_AND_TRACKER.md): the CUDA lowering implementations
+(62c664af, 82b4dc3a's kernels, bef51fcc), Metal (4bb1a204, 712dd75a's Metal
+hunks incl. a kernel_ssm_scan_f32 fix) and vulkan-shaders-gen hardening
+(5785167a, eb8e21bd). Engine side: audio8_tts's two ggml_ssm_scan calls gained
+0.24.0's K argument (K = 1). Verified: sync-ggml.sh --check exact;
+build-cpu-core 113/113 on the patched pin before the merge.
+
 2026-09-23 -- FOUR UNTRACKED FORK DELTAS CAPTURED, THEN THE 0.24.0 BUMP.
 Before bumping, a pin + patches round-trip at 36da5713 showed ~1,800 lines in
 26 files that were in this tree but in NO patch: audio.cpp merges after the

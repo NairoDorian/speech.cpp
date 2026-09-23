@@ -36,10 +36,19 @@ public:
     // and only takes effect if a caller genuinely needs a larger metadata pool.
     static constexpr size_t kMetadataPoolBudget = 16ull * 1024ull * 1024ull;  // 16 MB
 
-    BackendWeightStore(ggml_backend_t backend, BackendType backend_type, std::string name, size_t context_bytes)
+    // `buffer_type` (upstream audio.cpp LiveAvatar, #605): when non-null the
+    // weight buffer is allocated from this buffer type (e.g. the device's host
+    // buffer type for offloaded blocks) instead of the backend's default.
+    BackendWeightStore(
+        ggml_backend_t backend,
+        BackendType backend_type,
+        std::string name,
+        size_t context_bytes,
+        ggml_backend_buffer_type_t buffer_type = nullptr)
         : backend_(backend),
           backend_type_(backend_type),
-          name_(std::move(name)) {
+          name_(std::move(name)),
+          buffer_type_(buffer_type) {
         if (backend_ == nullptr) {
             throw std::runtime_error(name_ + " backend is not initialized");
         }
@@ -62,6 +71,12 @@ public:
                 share_key_ += props.device_id != nullptr ? props.device_id : "?";
             } else {
                 share_key_ += "|unknown-device";
+            }
+            // A store with an explicit buffer type (e.g. host memory) must
+            // never bind to, or provide, a buffer of a different type.
+            if (buffer_type_ != nullptr) {
+                share_key_ += "|buft:";
+                share_key_ += ggml_backend_buft_name(buffer_type_);
             }
         }
         // no_alloc=true => pool holds metadata only; do not commit the full
@@ -193,7 +208,7 @@ public:
             upload_shared();
             return;
         }
-        buffer_ = ggml_backend_alloc_ctx_tensors(ctx_.get(), backend_);
+        buffer_ = alloc_weight_buffer();
         if (buffer_ == nullptr) {
             throw std::runtime_error("failed to allocate " + name_ + " backend weight buffer");
         }
@@ -204,6 +219,16 @@ public:
     }
 
 private:
+    // Allocates the weight buffer for ctx_, honoring an explicit buffer type
+    // when one was given (upstream #605) and the backend default otherwise.
+    // Every allocation site (independent, shared-provider, shared-fallback)
+    // goes through here so the buffer type is never silently dropped.
+    ggml_backend_buffer_t alloc_weight_buffer() {
+        return buffer_type_ != nullptr
+            ? ggml_backend_alloc_ctx_tensors_from_buft(ctx_.get(), buffer_type_)
+            : ggml_backend_alloc_ctx_tensors(ctx_.get(), backend_);
+    }
+
     struct GgmlContextDeleter {
         void operator()(ggml_context * ctx) const noexcept {
             if (ctx != nullptr) {
@@ -238,7 +263,7 @@ private:
         auto & registry = SharedWeightRegistry::instance();
         const std::string registry_key = share_key_ + "|" + fingerprint;
         auto result = registry.acquire(registry_key, fingerprint, [&]() {
-            ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx_.get(), backend_);
+            ggml_backend_buffer_t buffer = alloc_weight_buffer();
             if (buffer == nullptr) {
                 throw std::runtime_error("failed to allocate " + name_ + " shared backend weight buffer");
             }
@@ -255,7 +280,7 @@ private:
         if (result.first == nullptr) {
             // Fingerprint conflict: same key, different tensor set (different
             // model, or a different storage-type configuration). Share nothing.
-            buffer_ = ggml_backend_alloc_ctx_tensors(ctx_.get(), backend_);
+            buffer_ = alloc_weight_buffer();
             if (buffer_ == nullptr) {
                 throw std::runtime_error("failed to allocate " + name_ + " backend weight buffer");
             }
@@ -521,6 +546,7 @@ private:
     ggml_backend_t backend_ = nullptr;
     BackendType backend_type_ = BackendType::Cpu;
     std::string name_;
+    ggml_backend_buffer_type_t buffer_type_ = nullptr;
     std::unique_ptr<ggml_context, GgmlContextDeleter> ctx_;
     ggml_backend_buffer_t buffer_ = nullptr;
     // Non-empty when this store participates in weight sharing. Buffer

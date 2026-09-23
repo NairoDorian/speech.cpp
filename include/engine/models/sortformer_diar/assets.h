@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/framework/audio/nemo_mel_frontend.h"
 #include "engine/framework/assets/resource_bundle.h"
 #include "engine/framework/assets/tensor_source.h"
 #include "engine/framework/core/backend_weight_store.h"
@@ -209,6 +210,7 @@ struct SortformerAssets {
     SortformerModelConfig model_config;
     SortformerFeatureExtractorConfig feature_config;
     std::shared_ptr<const assets::TensorSource> model_weights;
+    std::shared_ptr<const audio::NemoMelFrontend> frontend;
 };
 
 // True when `model_path` is (or is a directory holding) a GGUF whose

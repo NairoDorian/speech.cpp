@@ -35,6 +35,7 @@
   import { defaultChunkBudget, splitTtsChunks } from '$lib/text';
   import { UI_THEME_STORAGE_KEY, resolvedTheme, resolveUiTheme, uiThemes, type UiTheme } from '$lib/theme';
   import { modelStudioPanelFor, type GenericControlReplacements } from '$lib/models/panels';
+  import { prepareLiveAvatarOutput } from '$lib/models/liveavatar/video';
   import Arena from './Arena.svelte';
   import type {
     AudioOutput,
@@ -91,7 +92,7 @@
   let advancedValues: Record<string, unknown> = {};
   let paramSpecs: ParamSpec[] = [];
   let outputAudio: AudioOutput[] = [];
-  let outputArtifacts: Array<{ id: string; url: string; extension: string }> = [];
+  let outputArtifacts: Array<{ id: string; url: string; extension: string; mime: string }> = [];
   let outputText = '';
   let outputJson = '';
   let logs: string[] = [];
@@ -251,7 +252,7 @@
 
   function setParameterValue(spec: ParamSpec, value: unknown) {
     advancedValues = { ...advancedValues, [spec.name]: value };
-    if (selected?.family === 'yue2' && spec.scope === 'session') {
+    if (['auk', 'yue2', 'liveavatar'].includes(selected?.family || '') && spec.scope === 'session') {
       isLoaded = loadedModels.some((model) => model.id === selectedId && model.loaded &&
         modelMatchesSelectedPackage(model, selected));
     }
@@ -273,7 +274,7 @@
   const workflowTabs = [
     { id: 'tts', label: 'Text to speech', filterLabel: 'TTS', tasks: ['tts', 'clon'] },
     { id: 'asr', label: 'ASR / Transcription', filterLabel: 'ASR', tasks: ['asr'] },
-    { id: 'music', label: 'Music generation', filterLabel: 'Music', tasks: ['gen'] },
+    { id: 'music', label: 'Music / video generation', filterLabel: 'Music / video generation', tasks: ['gen'] },
     { id: 'conversion', label: 'Voice conversion', filterLabel: 'Voice conversion', tasks: ['vc', 'svc', 's2s'] },
     { id: 'separation', label: 'Source separation', filterLabel: 'Separation', tasks: ['sep'] },
     { id: 'analysis', label: 'Audio analysis', filterLabel: 'Analysis', tasks: ['vad', 'diar', 'align', 'spk', 'midi'] },
@@ -307,6 +308,7 @@
     apollo: 'Apollo',
     universr: 'UniverSR',
     pulsevad: 'PulseVAD',
+    nemotron_3_diar: 'Nemotron 3 Diarization',
     personaplex: 'PersonaPlex'
   };
 
@@ -315,7 +317,10 @@
   };
   const asrLanguages: Record<string, string[]> = {
     canary_asr: ['en', 'de', 'es', 'fr'],
-    cohere_asr: ['en', 'fr', 'de', 'es', 'it', 'pt', 'nl', 'pl', 'el', 'ar', 'ja', 'zh', 'vi', 'ko']
+    cohere_asr: ['en', 'fr', 'de', 'es', 'it', 'pt', 'nl', 'pl', 'el', 'ar', 'ja', 'zh', 'vi', 'ko'],
+    // Confucius4-R2T2 takes canonical language names (the engine normalizes
+    // case); 'Auto' leaves language detection on.
+    confucius4_r2t2: ['Auto', 'Chinese', 'English', 'Cantonese', 'Japanese', 'Korean', 'Arabic', 'German', 'French', 'Spanish', 'Portuguese', 'Indonesian', 'Italian', 'Russian', 'Thai', 'Vietnamese', 'Turkish', 'Hindi', 'Malay', 'Dutch', 'Swedish', 'Danish', 'Finnish', 'Polish', 'Czech', 'Filipino', 'Persian', 'Greek', 'Romanian', 'Hungarian', 'Macedonian']
   };
 
   function pathVariantLabel(path: string) {
@@ -432,6 +437,7 @@
   $: modelStudioPanel = modelStudioPanelConfig?.component;
   $: replacesGenericControls = modelStudioPanelConfig?.replacesGenericControls || noGenericControlReplacements;
   $: usesYue2Request = modelStudioPanelConfig?.requestMode === 'yue2';
+  $: modelPanelUploading = modelStudioPanelConfig?.blocksRunWhileUploading === true && loraUploading;
   $: isFireRedAudioEdit = selected?.id === 'firered-audio-semantic-edit' ||
     selected?.id === 'firered-audio-acoustic-edit';
   $: allowsAutoDuration = selected?.family === 'ace_step';
@@ -443,7 +449,8 @@
     selected?.family === 'chatterbox_turbo'
   ) && selected?.task === 'tts';
   $: needsSource = ['asr', 'vc', 'svc', 's2s', 'sep', 'vad', 'diar', 'align', 'midi'].includes(selected?.task) ||
-    isFireRedAudioEdit;
+    isFireRedAudioEdit || selected?.family === 'liveavatar' ||
+    (selected?.family === 'auk' && selected?.task === 'gen');
   $: acceptsSource = needsSource || (selected?.task === 'gen' && !replacesGenericControls.genSource);
   $: acceptsVideo = selected?.request_options?.includes('video') === true;
   $: needsVoice = (['clon', 'vc', 'svc'].includes(selected?.task) && selected?.family !== 'rvc') ||
@@ -453,7 +460,7 @@
   $: usesBuiltInVoiceSelector = Boolean(selected?.builtin_voices?.length);
   $: isQwenBase = selected?.task === 'tts' && selected?.family === 'qwen3_tts' &&
     !selected?.id.includes('custom');
-  $: allowsQuickStartVoice = ['tts', 'clon'].includes(selected?.task);
+  $: allowsQuickStartVoice = ['tts', 'clon'].includes(selected?.task) && selected?.family !== 'auk';
   $: referenceVoiceRequired = !(allowsQuickStartVoice && quickStartVoice) && (
     (['clon', 'vc', 'svc'].includes(selected?.task) && selected?.family !== 'rvc') || isQwenBase);
   $: lyricsRequired = requiresRequestOption(selected, 'lyrics');
@@ -476,7 +483,7 @@
     !['apollo', 'universr'].includes(selected?.family) &&
     !replacesGenericControls.text;
   $: supportsLiveAsr = selected?.task === 'asr' &&
-    ['voxtral_realtime', 'nemotron_asr', 'higgs_audio_stt', 'sense_asr', 'vibevoice_asr_streaming'].includes(selected?.family);
+    ['voxtral_realtime', 'nemotron_asr', 'higgs_audio_stt', 'sense_asr', 'vibevoice_asr_streaming', 'confucius4_r2t2'].includes(selected?.family);
   $: modelInventoryLoading = server === null ||
     (Boolean(server.ui_management) && Object.keys(packageSizes).length === 0 && packageSizeState !== 'failed');
   $: selectableModelIds = new Set(activeCatalog.filter((entry) => {
@@ -1047,7 +1054,8 @@
       !(hidesDurationSec && spec.name === 'duration_sec'));
     advancedValues = Object.fromEntries(byId.map((spec) => [spec.name, spec.default ?? '']));
     if (selected?.family in asrTokenDefaults) asrMaxTokens = asrTokenDefaults[selected.family];
-    if (selected?.family in asrLanguages) language = 'en';
+    if (selected?.family === 'confucius4_r2t2') language = 'Auto';
+    else if (selected?.family in asrLanguages) language = 'en';
     if (selected?.family === 'minimax_h3') {
       duration = 15;
       advancedValues = { ...advancedValues, num_frames: miniMaxFramesForDuration(duration), dit_acceleration: 'none' };
@@ -1060,12 +1068,16 @@
         advancedValues = {
           ...advancedValues,
           ar_lora: configured?.['yue2.ar_lora'] ?? '',
-          ar_lora_scale: Number(configured?.['yue2.ar_lora_scale'] ?? 1)
+          ar_lora_scale: Number(configured?.['yue2.ar_lora_scale'] ?? 1),
+          nar_lora: configured?.['yue2.nar_lora'] ?? '',
+          nar_lora_scale: Number(configured?.['yue2.nar_lora_scale'] ?? 1)
         };
       }
       text = '';
       lyrics = '';
       ensureYue2DefaultLyrics();
+    } else if (selected?.family === 'liveavatar') {
+      text = selected.default_text || '';
     } else if (!text.trim() && selected?.default_text) {
       text = selected.default_text;
     }
@@ -1177,7 +1189,7 @@
   }
 
   async function doLoad(modeOverride?: string) {
-    if (usesYue2Request && loraUploading) return;
+    if (modelPanelUploading) return;
     if (!selectedId) {
       status = 'Choose an installed model before loading.';
       warningStatus = status;
@@ -1312,6 +1324,7 @@
         if (spec?.scope === 'session') return false;
         if (selected?.family === 'canary_asr' && name === 'target_language' && value === '') return false;
         if (selected?.family === 'universr' && name === 'input_sample_rate' && value === '') return false;
+        if (selected?.family === 'auk' && typeof value === 'string' && value.trim().length === 0) return false;
         if (usesYue2Request && typeof value === 'string' && value.trim().length === 0) return false;
         return true;
       }));
@@ -1319,10 +1332,15 @@
   }
 
   function sessionParameterOptions() {
-    return Object.fromEntries(paramSpecs
+    const options = Object.fromEntries(paramSpecs
       .filter((spec) => spec.scope === 'session')
       .map((spec) => [spec.session_option || spec.name, String(advancedValues[spec.name] ?? spec.default ?? '')])
       .filter(([, value]) => value.length > 0));
+    if (selected?.family === 'auk') {
+      const generator = String(advancedValues.model_gguf || 'auk-base-f32.gguf');
+      options['auk.variant'] = generator.startsWith('auk-flash-') ? 'flash' : 'base';
+    }
+    return options;
   }
 
   function base64Text(value: string): string {
@@ -1395,6 +1413,7 @@
 
   function clearOutput() {
     for (const output of outputAudio) URL.revokeObjectURL(output.url);
+    for (const artifact of outputArtifacts) URL.revokeObjectURL(artifact.url);
     outputAudio = [];
     outputArtifacts = [];
     outputText = '';
@@ -1644,7 +1663,7 @@
   }
 
   async function run() {
-    if (running || (usesYue2Request && loraUploading)) return;
+    if (running || modelPanelUploading) return;
     if (!selectedId) {
       status = 'Choose an installed model before running a request.';
       warningStatus = status;
@@ -1665,6 +1684,7 @@
     errorStatus = '';
     status = tr('status.runningTask', { task: localizedTaskLabel(selected.task) });
     log(status);
+    const liveAvatarDrivingAudio = selected.family === 'liveavatar' ? sourceFile : null;
     try {
       const resolvedSeed = resolveRequestSeed(seed);
       if (referenceVoiceRequired && !voiceFile) {
@@ -1676,6 +1696,12 @@
       }
       if (lyricsRequired && !lyrics.trim()) {
         throw new StatusWarning(`${selected.display_name_en || selected.display_name} requires lyrics.`);
+      }
+      if (selected.family === 'liveavatar') {
+        if (!sourceFile) throw new StatusWarning('LiveAvatar requires driving audio.');
+        if (!String(advancedValues.reference_image_path || '').trim()) {
+          throw new StatusWarning('LiveAvatar requires a reference image.');
+        }
       }
       await ensureLoaded();
         const options = requestOptions();
@@ -1759,7 +1785,7 @@
             const resolvedText = requestText();
             if (resolvedText) request.text = resolvedText;
             if (lyrics.trim()) request.lyrics = lyrics;
-            if (!isFireRedAudioEdit) {
+            if (!isFireRedAudioEdit && selected.family !== 'auk') {
               if (usesDurationSecOption) options.duration_sec = duration;
               else request.duration_seconds = duration;
             }
@@ -1776,6 +1802,10 @@
           request.reference_text = referenceText;
         }
         const result = await runTask({ model: selected.id, request }, aborter.signal);
+        outputText = typeof result.text === 'string' ? result.text : '';
+        outputJson = JSON.stringify(result, (key, value) =>
+          (key === 'audio' || key === 'payload') && typeof value === 'string'
+            ? `<base64 data: ${value.length} chars>` : value, 2);
         if (typeof result.audio === 'string') {
           outputAudio = [{ id: 'output', url: base64AudioUrl(result.audio) }];
         }
@@ -1786,19 +1816,23 @@
             .map((entry) => ({ id: entry.id, url: base64AudioUrl(entry.audio) }));
         }
         if (Array.isArray(result.artifacts)) {
-          outputArtifacts = result.artifacts
-            .filter((entry): entry is { id: string; payload: string; meta?: Record<string, string> } =>
-              typeof entry?.id === 'string' && typeof entry?.payload === 'string')
-            .map((entry) => ({
+          if (selected.family === 'liveavatar') {
+            status = 'Encoding LiveAvatar MP4 in browser…';
+            const prepared = await prepareLiveAvatarOutput(result, liveAvatarDrivingAudio);
+            outputArtifacts = prepared.artifacts;
+            if (prepared.warning) log(prepared.warning);
+          } else {
+            outputArtifacts = result.artifacts
+              .filter((entry): entry is { id: string; payload: string; meta?: Record<string, string> } =>
+                typeof entry?.id === 'string' && typeof entry?.payload === 'string')
+              .map((entry) => ({
               id: entry.id,
               extension: entry.meta?.extension || (entry.meta?.format === 'midi' ? 'mid' : 'bin'),
+              mime: entry.meta?.mime || 'application/octet-stream',
               url: `data:${entry.meta?.mime || 'application/octet-stream'};base64,${entry.payload}`
             }));
+          }
         }
-        outputText = typeof result.text === 'string' ? result.text : '';
-        outputJson = JSON.stringify(result, (key, value) =>
-          (key === 'audio' || key === 'payload') && typeof value === 'string'
-            ? `<base64 data: ${value.length} chars>` : value, 2);
       }
       const elapsed = ((performance.now() - started) / 1000).toFixed(2);
       warningStatus = '';
@@ -2136,6 +2170,7 @@
     recordingStream?.getTracks().forEach((track) => track.stop());
     liveStream?.getTracks().forEach((track) => track.stop());
     for (const output of outputAudio) URL.revokeObjectURL(output.url);
+    for (const artifact of outputArtifacts) URL.revokeObjectURL(artifact.url);
     if (installPoll !== null) window.clearInterval(installPoll);
     if (packageSizePoll !== null) window.clearInterval(packageSizePoll);
     if (themePreferenceQuery && themePreferenceListener) {
@@ -2256,7 +2291,7 @@
           </div>
         {:else}
           <button class="single-model-toggle" class:resident={isLoaded}
-            disabled={!selectedId || loadingModel || (usesYue2Request && loraUploading) || installed === false || !server?.ui_management}
+            disabled={!selectedId || loadingModel || modelPanelUploading || installed === false || !server?.ui_management}
             title={!server?.ui_management ? 'Configured by server config' : isLoaded ? tr('studio.unload') : tr('studio.load')}
             on:click={toggleSingleModel}>
             {!server?.ui_management ? (isLoaded ? tr('studio.bundledLoaded') : 'Configured') :
@@ -2296,10 +2331,10 @@
           </div>
         {/if}
 
-        {#if selected.task === 'gen'}
-          {#if modelStudioPanel}
-            <svelte:component
+        {#if modelStudioPanel}
+          <svelte:component
               this={modelStudioPanel}
+              task={selected.task}
               bind:lyrics
               bind:seed
               bind:loraUploading
@@ -2317,12 +2352,19 @@
               {log}
               {tr}
               {localizedParameterText}
-              {setParameterValue} />
-          {:else}
-            <label for="lyrics">{tr('request.lyrics')} <span>{lyricsRequired ? tr('voice.required') : tr('request.optional')}</span></label>
-            <textarea id="lyrics" rows="3" bind:value={lyrics} required={lyricsRequired}
-              aria-required={lyricsRequired} placeholder="[Verse]…"></textarea>
-          {/if}
+              {setParameterValue}
+              {sourceFile}
+              sourceRecording={recordingTarget === 'source'}
+              sourceRecordingBlocked={Boolean(recorder) || liveRecording}
+              setSourceFile={(file: File | null) => sourceFile = file}
+              startSourceRecording={() => startRecording('source')}
+              stopSourceRecording={stopRecording} />
+        {:else if selected.task === 'gen'}
+          <label for="lyrics">{tr('request.lyrics')} <span>{lyricsRequired ? tr('voice.required') : tr('request.optional')}</span></label>
+          <textarea id="lyrics" rows="3" bind:value={lyrics} required={lyricsRequired}
+            aria-required={lyricsRequired} placeholder="[Verse]…"></textarea>
+        {/if}
+        {#if selected.task === 'gen'}
           {#if selected.family === 'ace_step'}
             <div class="media-actions">
               <button type="button" disabled={running || rewritingCaption || (!text.trim() && !lyrics.trim())}
@@ -2387,7 +2429,7 @@
           {/if}
         </div>
 
-            {#if acceptsSource}
+            {#if acceptsSource && selected.family !== 'liveavatar'}
               <label for="source">{tr('request.sourceAudio')} {needsSource ? '' : `(${tr('request.optional')})`}</label>
               <input id="source" class="file file-native" type="file" accept="audio/*"
                 bind:this={sourceInput}
@@ -2460,13 +2502,15 @@
                   on:change={(event) => chooseVoiceReference(event.currentTarget.files?.[0] || null)} />
                 <label class="file-picker" for="voice"><strong>{tr('file.choose')}</strong><span>{voiceFile?.name || tr('file.none')}</span></label>
               </div>
-              <div>
-                <label for="reference-file">{tr('voice.referenceText')} <span>.txt</span></label>
-                <input id="reference-file" class="file file-native" type="file" accept=".txt,text/plain"
-                  bind:this={referenceTextInput}
-                  on:change={(event) => chooseReferenceText(event.currentTarget.files?.[0] || null)} />
-                <label class="file-picker" for="reference-file"><strong>{tr('file.choose')}</strong><span>{referenceTextFile?.name || tr('file.none')}</span></label>
-              </div>
+              {#if selected.family !== 'auk'}
+                <div>
+                  <label for="reference-file">{tr('voice.referenceText')} <span>.txt</span></label>
+                  <input id="reference-file" class="file file-native" type="file" accept=".txt,text/plain"
+                    bind:this={referenceTextInput}
+                    on:change={(event) => chooseReferenceText(event.currentTarget.files?.[0] || null)} />
+                  <label class="file-picker" for="reference-file"><strong>{tr('file.choose')}</strong><span>{referenceTextFile?.name || tr('file.none')}</span></label>
+                </div>
+              {/if}
             </div>
           {/if}
           {#if !usesBuiltInVoiceSelector || !quickStartVoice}
@@ -2486,11 +2530,13 @@
           {/if}
           {#if !usesBuiltInVoiceSelector || !quickStartVoice}
             <MediaPreview file={voiceFile} kind="audio" label={tr('file.preview')} />
-            <label for="reference">{tr('voice.transcript')}
-              <span>{referenceTextRequired ? tr('voice.requiredClone') : tr('voice.recommendedClone')}</span>
-            </label>
-            <textarea id="reference" rows="2" bind:value={referenceText}
-              placeholder={tr('voice.transcriptPlaceholder')}></textarea>
+            {#if selected.family !== 'auk'}
+              <label for="reference">{tr('voice.transcript')}
+                <span>{referenceTextRequired ? tr('voice.requiredClone') : tr('voice.recommendedClone')}</span>
+              </label>
+              <textarea id="reference" rows="2" bind:value={referenceText}
+                placeholder={tr('voice.transcriptPlaceholder')}></textarea>
+            {/if}
           {/if}
           <!--
             Saved voices keep a named reference recording and transcript for reuse. They are persisted only
@@ -2594,7 +2640,7 @@
         {/if}
 
         <div class="runbar">
-          <button class="run" disabled={!selectedId || running || (usesYue2Request && loraUploading) || (!isLoaded && installed === false)} on:click={run}
+          <button class="run" disabled={!selectedId || running || modelPanelUploading || (!isLoaded && installed === false)} on:click={run}
             title={!selectedId ? 'Choose an installed model first' : !isLoaded && installed === false ? 'Install this model from the Models tab first' : ''}>
             <span>{running ? tr('run.working') : tr('run.run')}</span>
             <kbd>Ctrl ↵</kbd>
@@ -2634,6 +2680,10 @@
             {#each outputArtifacts as artifact}
               <article>
                 <div><strong>{artifact.id}</strong><a href={artifact.url} download={`${selected.id}-${artifact.id}.${artifact.extension}`}>Save {artifact.extension.toUpperCase()}</a></div>
+                {#if artifact.mime.startsWith('video/')}
+                  <MediaPreview src={artifact.url} name={`${selected.id}-${artifact.id}.${artifact.extension}`}
+                    kind="video" label="Video preview" />
+                {/if}
               </article>
             {/each}
           </div>
