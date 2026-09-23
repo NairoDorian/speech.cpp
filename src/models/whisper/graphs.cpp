@@ -1,7 +1,8 @@
 // engine/models/whisper/graphs.cpp - ggml graph builders for the native
 // engine Whisper ASR package.
 //
-// Ported from src/runtime/arch/whisper/{encoder,decoder}.cpp with identical
+// Ported from src/runtime/arch/whisper/{encoder,decoder}.cpp (deleted in
+// B16c) with identical
 // graph topology and numerics. The transcribe-side tensor-dump plumbing is not
 // carried over (engine tracing covers observability), and the two conformer
 // helpers the arch borrowed (conv_1d_f32 / layer_norm) are reimplemented

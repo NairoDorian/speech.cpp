@@ -14,13 +14,15 @@ compiled into the unified runtime:
   src/runtime/arch/moonshine_streaming. HF repo revision 85ddff6,
   pinned 2026-08-20.
 - whisper tiny.en (74 MB, legacy ggml .bin) -> asr_e2e_whisper_wer_test, the
-  Whisper family gate. ggerganov/whisper.cpp ggml-tiny.en.bin - the canonical
-  whisper.cpp distribution, MIT. Pinned 2026-08-26 because
-  model_specs/whisper.json is catalog-only: its 16 packages point at
-  Whisper-*-GGUF paths that do NOT exist in audio-cpp/audio.cpp-gguf, so there
-  is no downloadable GGUF for the family. The legacy .bin loader
-  (src/runtime/arch/whisper/bin_load.cpp) reads this format directly, which is
-  why the gate uses it. Arch: src/runtime/arch/whisper.
+  Whisper legacy-format gate. ggerganov/whisper.cpp ggml-tiny.en.bin - the
+  canonical whisper.cpp distribution, MIT. Pinned 2026-08-26, when the family
+  was believed to have no downloadable GGUF because model_specs/whisper.json
+  points at Whisper-*-GGUF paths that do not exist in audio-cpp/audio.cpp-gguf.
+  That was only half the picture (corrected 2026-09-23): parent transcribe.cpp
+  publishes every Whisper variant as a GGUF under handy-computer/, pinned
+  below. The .bin stays pinned because it gates the legacy loader.
+- whisper tiny.en / tiny (46 MB each, transcribe.cpp GGUF, Q8_0) -> the Whisper
+  GGUF gates (English and multilingual). handy-computer/whisper-*-gguf.
 
 The LibriSpeech fixtures the gates score against are NOT fetched here: the four
 wav/txt pairs plus manifest.jsonl are vendored under
@@ -82,6 +84,31 @@ PINNED_MODELS = (
         sha256="930e4622ad3a24158b91406c30c977fa6a26b34cb32d6ac3e57cfb23383a869e",
         size=50_462_816,
     ),
+    # Phase 11 W2b: the family's real distribution format. transcribe.cpp
+    # publishes every Whisper variant as a GGUF under handy-computer/ (see
+    # ../transcribe.cpp/catalog/whisper-*.json, "published_repo"); the 2026-08-26
+    # note below that "no downloadable GGUF exists" only ever held for
+    # audio-cpp/audio.cpp-gguf. tiny.en exercises the English prefix; the
+    # multilingual tiny exercises language detection / <|lang|> / translate.
+    # URLs pin the repo commit, not main.
+    PinnedModel(
+        filename="whisper-tiny.en-Q8_0.gguf",
+        url=(
+            "https://huggingface.co/handy-computer/whisper-tiny.en-gguf/resolve/"
+            "f2406b60206a289ed322f1cf8c492c070c042b1f/whisper-tiny.en-Q8_0.gguf"
+        ),
+        sha256="e8c9b73c06344307d8b346e07fbe93dd88d894627854bcff31523f1ce44394fa",
+        size=45_904_544,
+    ),
+    PinnedModel(
+        filename="whisper-tiny-Q8_0.gguf",
+        url=(
+            "https://huggingface.co/handy-computer/whisper-tiny-gguf/resolve/"
+            "2678cc66038359b97c8e6fd6454c56fc9006d571/whisper-tiny-Q8_0.gguf"
+        ),
+        sha256="325b9c7997cd1eff81ef709d55766565e71be696130cc3a3d444713798706834",
+        size=45_981_088,
+    ),
     PinnedModel(
         filename="ggml-tiny.en.bin",
         url=(
@@ -90,6 +117,18 @@ PINNED_MODELS = (
         ),
         sha256="921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f",
         size=77_704_715,
+    ),
+    # The multilingual legacy .bin: the language-detection path of
+    # whisper_bin_e2e_smoke and the GGUF-vs-.bin vocabulary check of
+    # whisper_bin_tokenize_parity (both need a multilingual tiny).
+    PinnedModel(
+        filename="ggml-tiny.bin",
+        url=(
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/"
+            "5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.bin"
+        ),
+        sha256="be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
+        size=77_691_713,
     ),
     # Phase 10.5: the audio.cpp package for the canonical Qwen3-ASR engine
     # family (model_specs/qwen3_asr.json id qwen3_asr_0_6b_q8_0). Its

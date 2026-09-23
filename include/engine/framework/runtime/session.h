@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -255,6 +256,13 @@ using ProgressCallback = std::function<bool(const ProgressInfo &)>;
 // Thrown by run() when a progress callback returns false (cancellation).
 struct ProgressCanceled : std::runtime_error {
     using std::runtime_error::runtime_error;
+
+    // What the run completed before it was canceled, when the family can say
+    // (Whisper: the 30 s windows already decoded). Optional: most families
+    // leave it null. The C ABI publishes it as the partial result the
+    // TRANSCRIBE_ERR_ABORTED contract promises (transcribe.h). Shared so the
+    // exception stays cheap to copy.
+    std::shared_ptr<const TaskResult> partial;
 };
 
 enum class StreamingInputKind {

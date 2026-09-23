@@ -1,5 +1,7 @@
 #pragma once
 
+#include "engine/framework/assets/tensor_source.h"
+#include "engine/framework/text/tokenizer_hub.h"
 #include "engine/models/whisper/graphs_internal.h"
 
 #include "ggml.h"
@@ -7,58 +9,82 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace engine::models::whisper {
 
-// One tensor in the legacy whisper.cpp `.bin`, located but not read. Payload
-// bytes are streamed per tensor at weight-upload time so a large-v3 `.bin`
-// (~1.5 GB) is never held twice in host memory.
-struct WhisperBinTensor {
-  std::string name;             // legacy whisper.cpp name
-  ggml_type type = GGML_TYPE_F32;
-  int32_t n_dims = 0;
-  int64_t ne[4] = {1, 1, 1, 1}; // ggml order, as stored in the file
-  uint64_t offset = 0;          // from start of file
-  uint64_t nbytes = 0;          // == ggml_nbytes(type, ne)
-};
-
-// Host-side model resources shared across sessions.
+// The two ways Whisper is distributed.
 //
-// W2a loads the legacy whisper.cpp `.bin` rather than a GGUF, because
-// model_specs/whisper.json is catalog-only: its 16 packages point at
-// Whisper-*-GGUF paths that do not exist in audio-cpp/audio.cpp-gguf, so no
-// GGUF is obtainable for this family. The `.bin` is the canonical
-// distribution (ggerganov/whisper.cpp) and is what the pinned gate model uses.
+//   TranscribeGguf  parent transcribe.cpp's GGUF (`general.architecture =
+//                   "whisper"`, `stt.whisper.*` / `stt.frontend.*` KVs, a
+//                   GPT-2 tokenizer holding every special and timestamp token,
+//                   the mel filterbank and window as tensors). Published for
+//                   every variant under huggingface.co/handy-computer/.
+//   LegacyBin       whisper.cpp's monolithic `.bin` (ggml magic, 11 int32
+//                   hparams, filterbank, raw-bytes vocab, tensors). No
+//                   generation config: specials, suppression lists and the
+//                   language table are synthesized.
+enum class WhisperWeightLayout { TranscribeGguf, LegacyBin };
+
+// Host-side model resources shared across sessions (Phase 11 W2a/W2b).
 struct WhisperAssets {
   WhisperHParams hparams;
-  std::string variant; // "tiny.en", "base", ...
+  WhisperWeightLayout layout = WhisperWeightLayout::LegacyBin;
+  std::string variant; // "tiny.en", "whisper-base", ...
   std::filesystem::path model_path;
 
-  // Decode-only vocabulary: whisper's `.bin` stores raw byte strings, so
-  // detokenization is byte concatenation over the generated ids.
+  // Weights, for both layouts, through the shared TensorSource (the .bin one
+  // streams each payload from disk). Tensor names differ per layout; ask
+  // through tensor_name() with the legacy whisper.cpp name.
+  std::shared_ptr<const assets::TensorSource> source;
+
+  // Encode + decode, HF-exact for both layouts (TokenizerHub: GPT-2 byte-level
+  // BPE for the GGUF, tiktoken rank BPE over the raw-bytes vocab for the .bin).
+  text::TokenizerPtr tokenizer;
+
+  // Languages in the order the arch iterated them for detection (GGUF:
+  // general.languages; .bin: whisper.cpp's table), with their <|xx|> ids.
+  // English-only models keep {"en"} and no ids: their prompt has no slot.
+  std::vector<std::string> language_codes;
+  std::vector<int32_t> language_token_ids;
+
+  // Frontend: row-major [n_mels, n_fft / 2 + 1]; the window is shipped by the
+  // GGUF and computed (periodic Hann) for the .bin, which carries none.
+  std::vector<float> mel_filterbank;
+  std::vector<float> window;
+
+  // Raw vocabulary pieces of a .bin (empty for the GGUF); kept for tests.
   std::vector<std::string> vocab_tokens;
 
-  // Mel filterbank shipped inside the `.bin` (n_mel x n_fft_bins, row-major).
-  int32_t n_mel_filters = 0;
-  int32_t n_fft_filters = 0;
-  std::vector<float> mel_filterbank;
-
-  std::vector<WhisperBinTensor> tensors;
-
   const WhisperHParams &config() const noexcept { return hparams; }
+
+  // The source tensor name for a legacy whisper.cpp name
+  // ("encoder.blocks.3.attn.query.weight"): itself for a .bin, the
+  // transcribe.cpp canonical name ("enc.blocks.3.attn.q.weight") for a GGUF.
+  std::string tensor_name(std::string_view legacy_name) const;
+
+  // Id of a special-token literal ("<|en|>", "<|0.00|>", "<|startofprev|>"),
+  // or nullopt. Used to reject special tokens typed into a prompt, the way
+  // HF's get_prompt_ids does.
+  std::optional<int32_t> special_token_id(std::string_view literal) const;
+
+  // Text <-> ids. decode() drops nothing: callers pass text ids only.
+  std::vector<int32_t> encode(std::string_view text) const;
+  std::string decode(const std::vector<int32_t> &ids) const;
 };
 
-// Parse and validate a legacy whisper.cpp `.bin`. Throws std::runtime_error
-// on a wrong magic, a non-Whisper geometry, or any structural inconsistency.
+// Loads either layout (dispatch on the file's magic). Throws
+// std::runtime_error on anything that is not a well-formed Whisper model.
 std::shared_ptr<const WhisperAssets>
 load_whisper_assets(const std::filesystem::path &model_path);
 
-// True when the file at `path` starts with the whisper.cpp `ggml` magic.
-// Cheap sniff used by the loader's can_load().
+// Cheap sniffs used by the loader's can_load().
 bool looks_like_whisper_bin(const std::filesystem::path &path);
+bool looks_like_whisper_gguf(const std::filesystem::path &path);
 
 // The generation-time suppression list the legacy format omits. English-only
 // and multilingual `.bin` files carry different tokenizers, so their

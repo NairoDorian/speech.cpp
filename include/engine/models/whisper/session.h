@@ -6,6 +6,7 @@
 #include "engine/models/whisper/assets.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -47,6 +48,9 @@ public:
   std::unique_ptr<runtime::IVoiceTaskSession>
   create_task_session(const runtime::TaskSpec &task,
                       const runtime::SessionOptions &options) const override;
+
+  // HF-exact ids from either format (TokenizerHub), for transcribe_tokenize.
+  std::optional<std::vector<int32_t>> tokenize(const std::string &text) const override;
 
 private:
   runtime::ModelMetadata metadata_;

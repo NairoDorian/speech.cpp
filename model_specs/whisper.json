@@ -64,6 +64,98 @@
         "required": false,
         "min": 0.0,
         "default": 0.0
+      },
+      {
+        "name": "task",
+        "type": "string",
+        "description": "transcribe or translate (multilingual models); the C ABI's task field.",
+        "required": false,
+        "default": "transcribe"
+      },
+      {
+        "name": "timestamps",
+        "type": "string",
+        "description": "none, auto or segment (or the C ABI's 0 / 1 / 2). Word-level timing is not supported.",
+        "required": false,
+        "default": "none"
+      },
+      {
+        "name": "initial_prompt",
+        "type": "string",
+        "description": "Context / vocabulary prompt, tokenized as HF get_prompt_ids; special-token literals are rejected.",
+        "required": false
+      },
+      {
+        "name": "prompt_tokens",
+        "type": "string",
+        "description": "Comma-separated prompt token ids (without <|startofprev|>); wins over initial_prompt.",
+        "required": false
+      },
+      {
+        "name": "prompt_condition",
+        "type": "string",
+        "description": "first_segment (default) or all_segments; all_segments requires condition_on_prev_tokens.",
+        "required": false,
+        "default": "first_segment"
+      },
+      {
+        "name": "condition_on_prev_tokens",
+        "type": "bool",
+        "description": "Carry the previous window's tokens as context (auto-disabled after a hot fallback tier).",
+        "required": false,
+        "default": false
+      },
+      {
+        "name": "max_prev_context_tokens",
+        "type": "int",
+        "description": "Cap on carried context tokens; 0 = max_target_positions / 2 - 1.",
+        "required": false,
+        "min": 0,
+        "default": 0
+      },
+      {
+        "name": "temperature_inc",
+        "type": "float",
+        "description": "Temperature fallback step; 0 disables the ladder.",
+        "required": false,
+        "min": 0.0,
+        "default": 0.2
+      },
+      {
+        "name": "compression_ratio_thold",
+        "type": "float",
+        "description": "Fall back when the window's compression ratio exceeds this; inf disables.",
+        "required": false,
+        "default": 2.4
+      },
+      {
+        "name": "logprob_thold",
+        "type": "float",
+        "description": "Fall back when the window's average logprob is below this; -inf disables.",
+        "required": false,
+        "default": -1.0
+      },
+      {
+        "name": "no_speech_thold",
+        "type": "float",
+        "description": "Drop a window whose no-speech probability exceeds this and whose logprob fails; inf disables.",
+        "required": false,
+        "default": 0.6
+      },
+      {
+        "name": "seed",
+        "type": "int",
+        "description": "Sampler seed for temperature > 0; 0 = nondeterministic.",
+        "required": false,
+        "min": 0,
+        "default": 0
+      },
+      {
+        "name": "max_initial_timestamp",
+        "type": "float",
+        "description": "Cap on the first timestamp, seconds; negative disables.",
+        "required": false,
+        "default": 1.0
       }
     ],
     "session": [
@@ -74,6 +166,18 @@
         "preset": "weight_type_full",
         "required": false,
         "default": "native"
+      },
+      {
+        "name": "kv_type",
+        "type": "enum",
+        "description": "KV-cache dtype: f32 (default), f16, or auto (F16 for F16 / quantized decoders, the whisper.cpp policy).",
+        "values": [
+          "f32",
+          "f16",
+          "auto"
+        ],
+        "required": false,
+        "default": "f32"
       }
     ],
     "load": []

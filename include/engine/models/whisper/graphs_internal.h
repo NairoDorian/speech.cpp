@@ -1,7 +1,7 @@
 // engine/models/whisper/graphs_internal.h - native engine Whisper ASR graph
 // layer: hparams, weight slots, KV cache, and ggml graph builders.
 //
-// Phase 11 Wave W2a port of src/runtime/arch/whisper/ into the engine
+// Phase 11 Wave W2a port of src/runtime/arch/whisper/ (deleted in B16c) into the engine
 // framework. The numerics mirror the arch implementation exactly; only the
 // surrounding machinery differs (engine BackendWeightStore / MelExtractor /
 // TokenizerHub / RunControl instead of transcribe_model / MelFrontend /

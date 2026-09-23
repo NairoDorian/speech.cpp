@@ -25,12 +25,29 @@ struct TaskCapability {
     std::vector<RunMode> modes;
 };
 
+// Finest timing an ASR family returns when supports_timestamps is set.
+enum class TimestampGranularity { Segment, Word };
+
 struct CapabilitySet {
     std::vector<TaskCapability> supported_tasks;
     std::vector<std::string> languages;
     bool supports_speaker_reference = false;
     bool supports_style_condition = false;
     bool supports_timestamps = false;
+    // Whisper decodes segment timestamps only (word timing would need
+    // cross-attention DTW); the C ABI must then reject WORD requests.
+    TimestampGranularity timestamp_granularity = TimestampGranularity::Word;
+
+    // ASR decode features the C ABI adapter publishes as capability fields
+    // and TRANSCRIBE_FEATURE_* bits (added for the Whisper takeover, W2b.2).
+    bool supports_translate = false;
+    // Spoken-language identification. Unset keeps the adapter's historical
+    // inference (any language list means detection); an English-only Whisper
+    // lists {"en"} but cannot detect, so it says false explicitly.
+    std::optional<bool> supports_language_detection = std::nullopt;
+    bool supports_initial_prompt = false;
+    bool supports_temperature_fallback = false;
+    bool supports_long_form = false;
     // The offline autoregressive decode honours the spec_k_drafts request
     // option (n-gram-lookup speculative decoding). Mirrors
     // transcribe_capabilities::supports_spec_decode across the C ABI adapter.
@@ -115,6 +132,13 @@ public:
     virtual std::unique_ptr<IVoiceTaskSession> create_task_session(
         const TaskSpec & task,
         const SessionOptions & options) const = 0;
+
+    // Text -> the model's token ids (what transcribe_tokenize() returns through
+    // the C ABI). Optional: nullopt when the family exposes no text tokenizer.
+    virtual std::optional<std::vector<int32_t>> tokenize(const std::string & text) const {
+        (void) text;
+        return std::nullopt;
+    }
 };
 
 struct LoaderAdvertisement {
