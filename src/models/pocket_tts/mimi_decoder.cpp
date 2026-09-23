@@ -548,6 +548,9 @@ public:
             ctx,
             GGML_TYPE_F32,
             core::TensorShape::from_dims({1, 1, transformed_frames_, cache_steps_ + transformed_frames_}));
+        // uploaded once; must survive every re-run of the cached graph (see mark_persistent_input)
+        core::mark_persistent_input(positions_.tensor);
+        core::mark_persistent_input(attention_mask_.tensor);
 
         x = modules::TransposeModule({{0, 2, 1, 3}, 3}).build(ctx, x);
         for (int64_t layer = 0; layer < config_.transformer_layers; ++layer) {
@@ -562,6 +565,8 @@ public:
                     ctx,
                     GGML_TYPE_F32,
                     core::TensorShape::from_dims({1, cache_steps_, config_.num_heads, head_dim_}));
+                core::mark_persistent_input(prefix_key->tensor);
+                core::mark_persistent_input(prefix_value->tensor);
                 zero_prefix_keys_.push_back(*prefix_key);
                 zero_prefix_values_.push_back(*prefix_value);
             }
@@ -802,6 +807,8 @@ public:
             ctx,
             GGML_TYPE_F32,
             core::TensorShape::from_dims({1, 1, frames_, cache_steps_ + frames_}));
+        // re-copied only when keep_steps changes; must survive every re-run of the cached graph (see mark_persistent_input)
+        core::mark_persistent_input(attention_mask_.tensor);
         attention_masks_.reserve(static_cast<size_t>(cache_steps_ + 1));
         attention_mask_values_.reserve(static_cast<size_t>(cache_steps_ + 1));
         for (int64_t keep_steps = 0; keep_steps <= cache_steps_; ++keep_steps) {
@@ -831,6 +838,9 @@ public:
                     ctx,
                     GGML_TYPE_F32,
                     core::TensorShape::from_dims({1, cache_steps_, config_.num_heads, head_dim_}));
+                // the carry copies read these after compute, so the allocator must not reuse them
+                core::mark_persistent_input(prefix_key->tensor);
+                core::mark_persistent_input(prefix_value->tensor);
                 prefix_keys_.push_back(*prefix_key);
                 prefix_values_.push_back(*prefix_value);
                 work_prefix_keys_.push_back(core::make_tensor(
@@ -849,6 +859,8 @@ public:
                     ctx,
                     GGML_TYPE_F32,
                     core::TensorShape::from_dims({1, cache_steps_, config_.num_heads, head_dim_})));
+                core::mark_persistent_input(zero_prefix_keys_.back().tensor);
+                core::mark_persistent_input(zero_prefix_values_.back().tensor);
             }
 
             auto outputs = modules::StreamingTransformerEncoderBlockModule({
@@ -866,6 +878,10 @@ public:
                 prefix_value,
                 attention_mask_);
             x = outputs.output;
+            // Read after compute (the append copies view them), so the graph
+            // allocator must not hand their memory to a later node.
+            ggml_set_output(outputs.key.tensor);
+            ggml_set_output(outputs.value.tensor);
             keys_.push_back(outputs.key);
             values_.push_back(outputs.value);
         }

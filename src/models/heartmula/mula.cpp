@@ -1,5 +1,6 @@
 #include "engine/models/heartmula/mula.h"
 
+#include "engine/framework/core/backend.h"
 #include "engine/framework/core/backend_weight_store.h"
 #include "engine/framework/modules/activation_modules.h"
 #include "engine/framework/modules/linear_module.h"
@@ -618,6 +619,8 @@ public:
         input_ = x.tensor;
         positions_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, steps_);
         auto positions = core::wrap_tensor(positions_, core::TensorShape::from_dims({steps_}), GGML_TYPE_I32);
+        // uploaded once; must survive every re-run of the cached graph (see mark_persistent_input)
+        core::mark_persistent_input(positions_);
 
         auto & constants = runtime_->backbone_constants();
         constants.begin_graph();
@@ -1022,6 +1025,8 @@ public:
         input_ = x.tensor;
         positions_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, steps_);
         auto positions = core::wrap_tensor(positions_, core::TensorShape::from_dims({steps_}), GGML_TYPE_I32);
+        // uploaded once; must survive every re-run of the cached graph (see mark_persistent_input)
+        core::mark_persistent_input(positions_);
         codebook_index_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, 1);
         auto codebook_index = core::wrap_tensor(codebook_index_, core::TensorShape::from_dims({1}), GGML_TYPE_I32);
 

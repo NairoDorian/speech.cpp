@@ -1,5 +1,6 @@
 #include "engine/models/irodori_tts/condition_encoder.h"
 
+#include "engine/framework/core/backend.h"
 #include "engine/framework/core/backend_weight_store.h"
 #include "engine/framework/modules/activation_modules.h"
 #include "engine/framework/modules/lookup_modules.h"
@@ -1155,9 +1156,10 @@ private:
       positions_ = core::make_tensor(build_ctx, GGML_TYPE_I32,
                                      core::TensorShape::from_dims({tokens_}));
       ggml_set_input(ref_latent_.tensor);
-      ggml_set_input(ref_mask_.tensor);
-      ggml_set_input(attention_mask_.tensor);
-      ggml_set_input(positions_.tensor);
+      // uploaded once; must survive every re-run of the cached graph (see mark_persistent_input)
+      core::mark_persistent_input(ref_mask_.tensor);
+      core::mark_persistent_input(attention_mask_.tensor);
+      core::mark_persistent_input(positions_.tensor);
       auto output = build_irodori_reference_latent_encoder(
           build_ctx, ref_latent_, ref_mask_, attention_mask_, positions_,
           owner.weights_, config);

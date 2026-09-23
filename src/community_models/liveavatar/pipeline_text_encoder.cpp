@@ -1,5 +1,6 @@
 #include "pipeline_internal.h"
 
+#include "engine/framework/core/backend.h"
 #include "engine/framework/debug/profiler.h"
 #include "engine/framework/modules/text_encoders/t5_base_encoder.h"
 #include "engine/framework/modules/weight_binding.h"
@@ -264,7 +265,8 @@ private:
             GGML_TYPE_F32,
             engine::core::TensorShape::from_dims({max_batch_, config_.attention_heads, tokens, tokens}));
         ggml_set_input(input_ids_.tensor);
-        ggml_set_input(relative_buckets_.tensor);
+        // uploaded once; must survive every re-run of the cached graph (see mark_persistent_input)
+        engine::core::mark_persistent_input(relative_buckets_.tensor);
         ggml_set_input(attention_mask_.tensor);
         const auto output = engine::modules::T5BaseEncoderModule(config_).build(
             build_ctx,

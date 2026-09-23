@@ -546,6 +546,8 @@ public:
         transformer_frames_ = seq.shape.dims[1];
         positions_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, transformer_frames_);
         auto positions_value = core::wrap_tensor(positions_, core::TensorShape::from_dims({transformer_frames_}), GGML_TYPE_I32);
+        // uploaded once; must survive every re-run of the cached graph (see mark_persistent_input)
+        core::mark_persistent_input(positions_);
         for (const auto & layer : weights_->transformer_layers) {
             seq = transformer_block(build_ctx, seq, positions_value, layer, constants);
         }

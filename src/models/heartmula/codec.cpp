@@ -1,5 +1,6 @@
 #include "engine/models/heartmula/codec.h"
 
+#include "engine/framework/core/backend.h"
 #include "engine/framework/core/backend_weight_store.h"
 #include "engine/framework/core/execution_context.h"
 #include "engine/framework/modules/activation_modules.h"
@@ -925,6 +926,9 @@ public:
         auto freqs = core::wrap_tensor(freqs_, core::TensorShape::from_dims({1, 256}), GGML_TYPE_F32);
         positions_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, frames_);
         auto positions = core::wrap_tensor(positions_, core::TensorShape::from_dims({frames_}), GGML_TYPE_I32);
+        // uploaded once; must survive every re-run of the cached graph (see mark_persistent_input)
+        core::mark_persistent_input(freqs_);
+        core::mark_persistent_input(positions_);
         auto out = flow_estimator(
             ctx,
             input,

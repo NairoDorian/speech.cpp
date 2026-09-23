@@ -2,6 +2,7 @@
 
 #include "minicpm_blocks.h"
 
+#include "engine/framework/core/backend.h"
 #include "engine/framework/core/execution_context.h"
 #include "engine/framework/modules/activation_modules.h"
 #include "engine/framework/modules/linear_module.h"
@@ -720,6 +721,8 @@ private:
     auto positions = engine::core::wrap_tensor(
         positions_, engine::core::TensorShape::from_dims({steps}),
         GGML_TYPE_I32);
+    // uploaded once; must survive every re-run of the cached graph (see mark_persistent_input)
+    engine::core::mark_persistent_input(positions_);
     auto base_hidden = input_embeddings;
     for (const auto &layer : model_weights.base_lm.layers) {
       auto layer_out = minicpm_prefill_layer(

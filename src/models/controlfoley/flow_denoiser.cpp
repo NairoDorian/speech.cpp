@@ -1003,6 +1003,9 @@ std::unique_ptr<FlowGraph> build_flow_graph(
     out->text_cond = core::make_tensor(ctx, GGML_TYPE_F32, core::TensorShape::from_dims({batch, config.hidden_dim}));
     out->latent_positions = core::make_tensor(ctx, GGML_TYPE_I32, core::TensorShape::from_dims({config.latent_seq_len}));
     out->clip_positions = core::make_tensor(ctx, GGML_TYPE_I32, core::TensorShape::from_dims({config.clip_seq_len}));
+    // uploaded once; must survive every re-run of the cached graph (see mark_persistent_input)
+    core::mark_persistent_input(out->latent_positions.tensor);
+    core::mark_persistent_input(out->clip_positions.tensor);
 
     auto latent = build_projection(
         ctx,

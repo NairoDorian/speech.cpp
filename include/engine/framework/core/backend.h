@@ -99,6 +99,22 @@ ggml_status compute_graph(
     HostGraphPlan & plan,
     const char * label = nullptr);
 
+// Mark a graph input whose contents are uploaded ONCE (after the graph is
+// allocated) and must survive every later compute of a cached graph:
+// positions, attention masks, RoPE tables, relative-position buckets, zero
+// initial states. ggml's graph allocator may give an input's memory to a
+// consumer op computed in place (ggml-alloc.c reuses any parent that is not
+// an OUTPUT) or free it after its last use, so a plain or input-flagged
+// constant is correct on the first compute and garbage on every reuse
+// (Voxtral-Realtime returned "." on its second run, 2026-09-24). Flagging it
+// as input AND output keeps it allocated up front and never reused. Call it
+// before ggml_gallocr_reserve / ggml_gallocr_alloc_graph. Per-call data that
+// is uploaded before every compute does not need it.
+inline void mark_persistent_input(ggml_tensor * tensor) {
+    ggml_set_input(tensor);
+    ggml_set_output(tensor);
+}
+
 void write_tensor_f32(const TensorValue & tensor, const float * values, size_t count);
 void write_tensor_f32_slice(const TensorValue & tensor, size_t element_offset, const float * values, size_t count);
 void write_tensor_f32(const TensorValue & tensor, const std::vector<float> & values);

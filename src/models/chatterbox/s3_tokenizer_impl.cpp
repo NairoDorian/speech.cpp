@@ -389,6 +389,9 @@ public:
             ctx,
             GGML_TYPE_F32,
             engine::core::TensorShape::from_dims({1, time_, 1, head_dim}));
+        // uploaded once; must survive every re-run of the cached graph (see mark_persistent_input)
+        engine::core::mark_persistent_input(cos_.tensor);
+        engine::core::mark_persistent_input(sin_.tensor);
 
         auto seq = bct_to_btc(ctx, x);
         for (const auto & block : weights.blocks) {

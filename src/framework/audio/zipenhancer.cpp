@@ -368,6 +368,8 @@ core::TensorValue make_relative_projection_constant(
     const Param & pos_weight) {
     const auto shape = core::TensorShape::from_dims({1, seq, seq});
     auto value = core::make_tensor(ctx, GGML_TYPE_F32, shape);
+    // uploaded once; must survive every re-run of the cached graph (see mark_persistent_input)
+    core::mark_persistent_input(value.tensor);
     constants.push_back(GraphConstant{value.tensor, seq, head, dim, &pos_weight});
     return value;
 }

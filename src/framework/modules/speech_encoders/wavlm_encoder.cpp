@@ -818,6 +818,8 @@ private:
             ctx,
             GGML_TYPE_F32,
             core::TensorShape::from_dims({batch, weights_->config.num_attention_heads, tokens, tokens}));
+        // uploaded once; must survive every re-run of the cached graph (see mark_persistent_input)
+        core::mark_persistent_input(position_bias_.tensor);
         outputs_ = build_wavlm_graph_layers(
             ctx,
             input_,

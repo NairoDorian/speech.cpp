@@ -1,5 +1,6 @@
 #include "engine/models/stable_audio/foundation/rf_dit.h"
 
+#include "engine/framework/core/backend.h"
 #include "engine/framework/core/backend_weight_store.h"
 #include "engine/framework/core/execution_context.h"
 #include "engine/framework/debug/profiler.h"
@@ -912,7 +913,8 @@ private:
         ggml_set_input(alpha_.tensor);
         ggml_set_input(cfg_scale_.tensor);
         ggml_set_input(apg_scale_.tensor);
-        ggml_set_input(positions_tensor_.tensor);
+        // uploaded once; must survive every re-run of the cached graph (see mark_persistent_input)
+        core::mark_persistent_input(positions_tensor_.tensor);
         core::ModuleBuildContext build_ctx{ctx_.get(), "stable_audio.foundation.rf_dit", backend_type_};
         auto output = build_graph_output(build_ctx);
         output_ = output.tensor;

@@ -550,9 +550,12 @@ public:
         transformer_frames_ = seq.shape.dims[1];
         positions_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, transformer_frames_);
         auto positions_value = core::wrap_tensor(positions_, core::TensorShape::from_dims({transformer_frames_}), GGML_TYPE_I32);
+        // uploaded once; must survive every re-run of the cached graph (see mark_persistent_input)
+        core::mark_persistent_input(positions_);
         std::optional<core::TensorValue> attention_mask = std::nullopt;
         if (perf_mode_ == Qwen3TTSPerfMode::FlashAttention) {
             attention_mask_ = ggml_new_tensor_4d(ctx_.get(), GGML_TYPE_F16, transformer_frames_, transformer_frames_, 1, 1);
+            core::mark_persistent_input(attention_mask_);
             attention_mask = core::wrap_tensor(
                 attention_mask_,
                 core::TensorShape::from_dims({1, 1, transformer_frames_, transformer_frames_}),

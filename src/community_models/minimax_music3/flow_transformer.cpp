@@ -237,9 +237,10 @@ struct MiniMaxMusic3FlowTransformerRuntime::Impl {
         ggml_set_input(slot.latents.tensor);
         ggml_set_input(slot.condition.tensor);
         ggml_set_input(slot.time_features.tensor);
-        ggml_set_input(slot.rope_cos.tensor);
-        ggml_set_input(slot.rope_sin.tensor);
-        ggml_set_input(slot.rope_positions.tensor);
+        // uploaded once; must survive every re-run of the cached graph (see mark_persistent_input)
+        core::mark_persistent_input(slot.rope_cos.tensor);
+        core::mark_persistent_input(slot.rope_sin.tensor);
+        core::mark_persistent_input(slot.rope_positions.tensor);
 
         auto zeros = core::wrap_tensor(ggml_scale(ctx.ggml, slot.latents.tensor, 0.0F), slot.latents.shape, GGML_TYPE_F32);
         auto x = modules::ConcatModule({1}).build(ctx, slot.latents, zeros);

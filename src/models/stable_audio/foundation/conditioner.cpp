@@ -1,5 +1,6 @@
 #include "engine/models/stable_audio/foundation/conditioner.h"
 
+#include "engine/framework/core/backend.h"
 #include "engine/framework/core/backend_weight_store.h"
 #include "engine/framework/core/execution_context.h"
 #include "engine/framework/debug/profiler.h"
@@ -336,7 +337,8 @@ private:
             core::TensorShape::from_dims({max_batch_, config.t5_attention_heads, tokens, tokens}),
             GGML_TYPE_F32);
         ggml_set_input(input_ids_.tensor);
-        ggml_set_input(relative_buckets_.tensor);
+        // uploaded once; must survive every re-run of the cached graph (see mark_persistent_input)
+        core::mark_persistent_input(relative_buckets_.tensor);
         ggml_set_input(attention_mask_.tensor);
         core::ModuleBuildContext build_ctx{ctx_.get(), "stable_audio.foundation.t5", backend_type_};
         auto output = modules::T5BaseEncoderModule(t5_base_config(config))

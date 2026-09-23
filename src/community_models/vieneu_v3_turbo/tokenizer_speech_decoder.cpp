@@ -946,9 +946,10 @@ public:
         codes_ = ggml_new_tensor_3d(ctx_.get(), GGML_TYPE_I32, code_frames_, config.num_quantizers, 1);
         ggml_set_input(codes_);
         positions_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, code_frames_);
-        ggml_set_input(positions_);
+        // uploaded once; must survive every re-run of the cached graph (see mark_persistent_input)
+        core::mark_persistent_input(positions_);
         mask_ = ggml_new_tensor_2d(ctx_.get(), GGML_TYPE_F32, code_frames_, code_frames_);
-        ggml_set_input(mask_);
+        core::mark_persistent_input(mask_);
 
         core::ModuleBuildContext build_ctx{
             ctx_.get(),

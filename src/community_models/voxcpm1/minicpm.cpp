@@ -2,6 +2,7 @@
 
 #include "minicpm_blocks.h"
 
+#include "engine/framework/core/backend.h"
 #include "engine/framework/core/execution_context.h"
 #include "engine/framework/modules/activation_modules.h"
 #include "engine/framework/modules/linear_module.h"
@@ -754,7 +755,8 @@ private:
         GGML_TYPE_F32);
     positions_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, steps);
     if (mem_saver_) {
-      ggml_set_input(positions_);
+      // uploaded once; must survive every re-run of the cached graph (see mark_persistent_input)
+      engine::core::mark_persistent_input(positions_);
     }
     auto positions = engine::core::wrap_tensor(
         positions_, engine::core::TensorShape::from_dims({steps}),

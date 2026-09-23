@@ -190,7 +190,8 @@ std::vector<float> expand_ct_by_durations(const std::vector<float> &values, int6
 core::TensorValue make_zero_lstm_state(core::ModuleBuildContext &ctx, int64_t hidden_size,
                                        std::vector<ggml_tensor *> &zero_state_inputs) {
     auto tensor = core::make_tensor(ctx, GGML_TYPE_F32, core::TensorShape::from_dims({1, hidden_size}));
-    ggml_set_input(tensor.tensor);
+    // uploaded once; must survive every re-run of the cached graph (see mark_persistent_input)
+    core::mark_persistent_input(tensor.tensor);
     zero_state_inputs.push_back(tensor.tensor);
     return tensor;
 }

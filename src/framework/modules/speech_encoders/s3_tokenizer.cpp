@@ -217,6 +217,9 @@ public:
             ctx,
             GGML_TYPE_F32,
             engine::core::TensorShape::from_dims({1, time_, heads, half_head_dim}));
+        // uploaded once; must survive every re-run of the cached graph (see mark_persistent_input)
+        engine::core::mark_persistent_input(cos_.tensor);
+        engine::core::mark_persistent_input(sin_.tensor);
 
         auto seq = TransposeModule({{0, 2, 1, 3}, x.shape.rank}).build(ctx, x);
         for (const auto & block : weights.blocks) {
