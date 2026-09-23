@@ -9,6 +9,15 @@ Dates are the work-session dates recorded in the plan.
 
 ## [Unreleased]
 
+### Added
+
+- **audio.cpp merged to `9bdd1d90` (v0.8.2, 70 commits, 2026-09-23)**: LiveAvatar, AuK, Confucius4-R2T2
+  streaming ASR, vibevoice_asr_streaming, zipvoice, Piper, KittenTTS, moss_tts_v15, Nemotron 3 diarization,
+  shared NeMo mel / reference-audio frontends, a native batch transcription endpoint, WebUI v0.8.2.
+- **ggml patches 0012-0015**: audio.cpp's lowering API, ssm_scan fusion API, MUL_MAT_ACC / SNAKE_1D (with CPU
+  kernels), and a CPU guard for ops it cannot compute. The CUDA / Metal / Vulkan implementations are not ported
+  yet: LiveAvatar / Wan S2V have no kernels for their five new ops until they are.
+
 ### Removed
 
 - **The transcribe.cpp Whisper arch is retired (B16c, Phase 11 W2b, 2026-09-23)**: `src/runtime/arch/whisper/`

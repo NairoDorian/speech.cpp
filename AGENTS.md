@@ -68,7 +68,10 @@ scripts/sync-deps.sh --verify-ggml  # + prove external/ggml == pin + tracked pat
    `scripts/sync-ggml.sh --check`: audio.cpp vendors its own hand-edited ggml,
    so its ggml changes only ever arrive as untracked edits inside a merge.
    Anything `--check` reports must become a `patches/ggml/NNNN-*.patch` first,
-   or the next sync deletes it silently.
+   or the next sync deletes it silently. To port an audio.cpp ggml commit
+   onto the stack use `scripts/port-ggml-commit.sh` (its header has the
+   setup and the post-merge checklist: fork-only ops, op tables, op_params
+   slots, caller signatures).
 
 Post-sync verification is mandatory:
 

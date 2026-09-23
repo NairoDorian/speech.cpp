@@ -1,27 +1,43 @@
-# audio.cpp upstream merge `c0b26a50..487800f5` — trial-merge report and plan
+# audio.cpp upstream merge `c0b26a50..487800f5` (then `..9bdd1d90`) — trial-merge report, plan, and outcome
 
-> **Status (2026-09-23): PREPARED, NOT MERGED.** A full trial merge of the 61
-> upstream commits was done in a scratch clone (branch `merge-upstream-487800f5`,
-> merge commit `85574744`, parents `f3c2ffca` + `487800f5`; `rev-list` right count
-> 0). It is **blocked on ggml**: eight upstream commits carry audio.cpp's own
-> ggml-fork deltas (new lowering APIs and ops), and upstream engine code calls
-> them, so even `build-cpu-core` cannot compile until those deltas exist as
-> tracked patches on our `456172ec` (0.24.0) tree. Nothing below was built.
+> **Status (2026-09-23, later): MERGED as `38769d51`**, extended to
+> `9bdd1d90` (Release v0.8.2) because upstream moved 8 commits past the trial
+> target while the ggml work was done (Nemotron 3 diarization, native batch
+> transcription endpoint, a moss codec window fix, README). None of the 8
+> touch ggml; all merged clean. `git rev-list --left-right --count
+> main...upstream/main` = `122 0`.
 >
-> **Order of work for the merge increment:**
-> 1. Port the NEEDS-GGML-PATCH hunks (section c) as `patches/ggml/0012-*` onward,
->    one patch per upstream feature, with provenance headers (same method as
->    0008-0011: build on a scratch LF stack, round-trip with
->    `scripts/sync-ggml.sh --check`). Watch the overlaps flagged below with our
->    0004 (two-sided broadcast) and 0006 (im2col weight type).
-> 2. Redo the merge in speech.cpp itself (or fetch the scratch branch if it
->    still exists) and close it as a **recorded merge** (Operating Rule 6).
-> 3. Verify: core + CUDA suites, the sortformer engine / streaming / scheduler
->    tests and the 0/600-flip parity gate on BOTH layouts (riskiest resolution),
->    then `sync-ggml.sh --check`.
-> 4. Then adopt transcribe.cpp's R2T2 fixes (`47d8c5da` backlog folding first) on
->    the `confucius4_r2t2` package this merge brings — see
->    `transcribe_cpp_triage.md` series S4.
+> **What was done, in the order below:**
+> 1. ggml deltas ported as `patches/ggml/0012-0015` (`f4d8e31e`), section (c):
+>    c.1 (07490d83) API surface -> 0012; c.3 (82b4dc3a) API only -> 0013, with
+>    the fusion flag moved to op_params slot 1 because 0.24.0's `SSM_SCAN`
+>    keeps `K` in slot 0; c.6 (712dd75a) API + CPU kernels -> 0014; plus 0015,
+>    which makes the CPU backend refuse the ops it cannot compute.
+>    **Not ported (need CUDA / Metal / Vulkan builds):** c.2, the CUDA half of
+>    c.3, c.4, c.5, the Metal half of c.6, c.7. Functional cost: LiveAvatar /
+>    Wan S2V on CUDA (its five new ops have no kernel anywhere yet), audio8_tts
+>    and Breeze fast paths on Metal. Everything else treats the lowerings as
+>    hints.
+> 2. The merge was redone in speech.cpp itself, reusing this report's
+>    resolutions for files neither side had touched since (cli/main.cpp,
+>    sortformer frontend + assets, family_registry.cpp) and resolving
+>    `CMakeLists.txt`, `backend_weight_store.h` and `README.md` afresh the same
+>    way (both had moved on our side). One defect the source-level trial could
+>    not see: upstream `audio8_tts/ar.cpp` calls `ggml_ssm_scan` without 0.24.0's
+>    `K` argument -> passes `K = 1`.
+> 3. Verified on CPU (the routine test target): `build-cpu-core` 121/121,
+>    `build-cpu-asr-abi` 115/115 (1 skip each); all ASR WER gates at baseline;
+>    sortformer on the NeMo-GGUF layout unchanged — oracle DER 0.3288 and
+>    chunked == whole-window at 1.8e-7, the pre-merge values (risk d.2 closed
+>    for that layout; the HF layout's smoke test passes). CUDA not built (user
+>    preference: CPU-only routine testing).
+> 4. Still open from (d): R2T2 fixes from transcribe.cpp on `confucius4_r2t2`;
+>    registering `confucius4_r2t2` / `nemotron_3_diar` in `family_registry`
+>    (C-ABI routing) once their GGUF architecture names are confirmed; the
+>    Metal / CUDA ggml ports; `kokoro_word_timings_test` / moss parity
+>    executables in reduced presets (d.8).
+>
+> The original plan follows, unchanged, for the record.
 
 ---
 

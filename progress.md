@@ -1,8 +1,10 @@
 # Progress — Unified_Audio.cpp (speech.cpp ggml fork) merge & improve
 
-Status snapshot (2026-09-23, later): **W2b.2 + B16c done — the Whisper arch is deleted and the C ABI runs the engine package** (all four transcribe.cpp C-ABI Whisper gates green, 3/69, byte-exact C-ABI parity); four adapter-wide result-mapping defects fixed; new `build-cpu-asr-abi` tree for model-backed C-ABI gates. `build-cpu-core` **113/113 (1 clean skip)**, `build-cpu-asr-abi` **108/108 (1 clean skip)**.
+Status snapshot (2026-09-23, latest): **audio.cpp merged to `9bdd1d90` (v0.8.2, 70 commits) as `38769d51`**, after porting audio.cpp's ggml API as patches 0012-0015; everything committed and pushed on `main`. `build-cpu-core` **121/121**, `build-cpu-asr-abi` **115/115** (1 clean skip each); sortformer NeMo-GGUF layout unchanged; CUDA / Metal / Vulkan halves of audio.cpp's ggml work tracked as not ported.
 
-Earlier snapshot (2026-09-23): **L13 dependency sync done; W2b.1 done (engine Whisper at arch parity, GGUF + .bin); working tree UNCOMMITTED** (AGENTS.md Git Hygiene — awaiting the user's go-ahead). ggml `36da5713` (0.22.0) → **`456172ec` (0.24.0)** with 11 tracked patches (4 newly captured audio.cpp deltas; 0007 replaced by transcribe.cpp's working CUDA pool trim); Windows CUDA build fixed; transcribe.cpp triaged to `0a67b65b` (ledger `docs/upstream/transcribe_cpp_triage.md`); audio.cpp `487800f5` trial-merged but blocked on ggml ops (`docs/upstream/audio_cpp_merge_487800f5.md`); premature B16c parked in `git stash`; Whisper C-ABI retirement gate registered; TokenizerHub made HF-faithful; eight no-op assert tests made live. **`build-cpu-core` 121/121** (1 clean skip).
+Previous snapshot (2026-09-23, later): **W2b.2 + B16c done — the Whisper arch is deleted and the C ABI runs the engine package** (all four transcribe.cpp C-ABI Whisper gates green, 3/69, byte-exact C-ABI parity); four adapter-wide result-mapping defects fixed; new `build-cpu-asr-abi` tree for model-backed C-ABI gates. `build-cpu-core` **113/113 (1 clean skip)**, `build-cpu-asr-abi` **108/108 (1 clean skip)**.
+
+Earlier snapshot (2026-09-23): **L13 dependency sync done; W2b.1 done (engine Whisper at arch parity, GGUF + .bin); working tree UNCOMMITTED** (AGENTS.md Git Hygiene — awaiting the user's go-ahead). ggml `36da5713` (0.22.0) → **`456172ec` (0.24.0)** with 11 tracked patches (4 newly captured audio.cpp deltas; 0007 replaced by transcribe.cpp's working CUDA pool trim); Windows CUDA build fixed; transcribe.cpp triaged to `0a67b65b` (ledger `docs/upstream/transcribe_cpp_triage.md`); audio.cpp `487800f5` trial-merged but blocked on ggml ops (`docs/upstream/audio_cpp_merge_9bdd1d90.md`); premature B16c parked in `git stash`; Whisper C-ABI retirement gate registered; TokenizerHub made HF-faithful; eight no-op assert tests made live. **`build-cpu-core` 121/121** (1 clean skip).
 
 ## Repo layout (important, non-obvious)
 `Unified_Audio.cpp/` is a **plain container directory with no git repo of its
@@ -11,7 +13,7 @@ own**. It holds five independent repositories (three primary, two hardened refer
 | Folder | Role |
 |---|---|
 | `speech.cpp/` | the active development repo (the ggml/audio.cpp fork). **All merge work, and this log, live here.** Remote: `NairoDorian/speech.cpp`, upstream `0xShug0/audio.cpp`. |
-| `audio.cpp/` | **parent** — read from, never committed to (sibling checkout at `487800f5`, 2026-09-23; speech.cpp's `upstream/main` is 61 commits ahead of our last merge — see `docs/upstream/audio_cpp_merge_487800f5.md`). Has a git `upstream` remote here, so it is the only source that yields a merge-base. |
+| `audio.cpp/` | **parent** — read from, never committed to (sibling checkout at `487800f5`; speech.cpp merged upstream `9bdd1d90` on 2026-09-23 — see `docs/upstream/audio_cpp_merge_9bdd1d90.md`). Has a git `upstream` remote here, so it is the only source that yields a merge-base. |
 | `transcribe.cpp/` | **parent, equally authoritative** — read from, never committed to (checkout at `0a67b65b`, 2026-09-23; **triage watermark `0a67b65b`** in `docs/upstream/transcribe_cpp_triage.md` — the ledger is the merge-base git cannot give us). No remote here, so its drift is invisible to git and must be triaged by hand — that is a tooling limit, **not** a hierarchy. See AGENTS.md "Dual Parentage". |
 | `audio_cunba/` (pulled to `8cf5136`) & `transcribe_cunba/` (pulled to `2345350`) | hardened reference trees containing allocator fixes, VAD chunk planning, shared weights, batched decoders, C ABI, and build acceleration. |
 
@@ -53,9 +55,28 @@ C-ABI gates), `build-cpu-full`, `build-cpu-asr`, `build-client-compact-minimized
 | **Completed increment** | **Wave W1 Retirement (B16a: Moonshine & B16b: Moonshine-Streaming deleted, C ABI adapter routing live, 100% C ABI parity verified)** | **DONE** |
 | **Completed increment** | **L13 dependency sync (ggml 0.24.0, 4 captured patches, CUDA build fixes, transcribe.cpp triage + 3 adoptions, audio.cpp trial merge) + Whisper C-ABI retirement gate** | **DONE (uncommitted)** |
 | **Completed increment** | **W2b.2 + B16c: Whisper C-ABI takeover, arch + parallel `.bin` parser deleted, adapter-wide result-mapping fixes** | **DONE (uncommitted)** |
-| **Next increment** | **audio.cpp merge `487800f5` (ggml ops as patches 0012+ first), then transcribe.cpp ledger items; W2b.3 (Whisper batched decode / static step graph) as performance work** | **READY — awaiting user review (pause rule)** |
+| **Completed increment** | **audio.cpp merge `c0b26a50..9bdd1d90` (70 commits) as `38769d51`; ggml patches 0012-0015** | **DONE (pushed)** |
+| **Next increment** | **transcribe.cpp ledger items (conformer S3, parakeet tail loss, scratch release, Voxtral-RT delay 30, reclaim S2, threading S1; R2T2 fixes on the newly merged `confucius4_r2t2`); CUDA ggml ports 0016+ when a CUDA build is scheduled; W2b.3 performance** | **READY** |
 
 ## DONE this session
+
+### audio.cpp merge to `9bdd1d90` (2026-09-23, pushed)
+
+- **ggml first** (`f4d8e31e`): audio.cpp's own-ggml commits ported onto the 0.24.0 stack as patches 0012-0015,
+  3-way per file on LF-normalized sides (audio.cpp stores ggml CRLF, so a plain `git apply -3` saw every line
+  as changed). Two real incompatibilities found and handled: `GGML_OP_IM2COL_FAST_1D` is fork-only (dropped
+  from a setter assert), and 0.24.0's `SSM_SCAN` keeps `K` in op_params slot 0, where audio.cpp puts its fusion
+  flag (moved to slot 1). CPU kernels exist for MUL_MAT_ACC / SNAKE_1D (reached only on Metal upstream); the five
+  CUDA-only ops are refused by the CPU backend (0015) instead of silently computing nothing.
+  `sync-ggml.sh --check` exact; `build-cpu-core` 113/113 on the patched pin before merging.
+- **Merge** (`38769d51`): 23 conflicts (17 under `external/ggml`, kept OURS). Reused the trial merge's
+  resolutions where neither side had moved; redid `CMakeLists.txt`, `backend_weight_store.h`, `README.md`.
+  `audio8_tts/ar.cpp` needed 0.24.0's `K` argument. Upstream's 8 newer commits (Nemotron 3 diarization, batch
+  transcription endpoint, moss codec fix) merged clean.
+- **Verified** (CPU): core 121/121, ASR+ABI 115/115; all ASR WER gates at baseline; sortformer NeMo-GGUF
+  DER 0.3288 and chunked == whole-window 1.8e-7, identical to before.
+- **Not done**: CUDA / Metal / Vulkan ggml ports (need those builds); `family_registry` entries for
+  `confucius4_r2t2` / `nemotron_3_diar`.
 
 ### W2b.2 + B16c — Whisper C-ABI takeover, arch retired (2026-09-23, uncommitted)
 
@@ -119,7 +140,7 @@ linked the `engine_core` OBJECT library directly and missed the CUDA iSTFT / tor
   uninitialized memory); `TRANSCRIBE_DISABLE_STATIC_DECODE=1` restores the transcript. Do not adopt that hunk.
 
 **audio.cpp `c0b26a50..487800f5` (61 commits) trial-merged** in a scratch clone by a subagent: 45 clean, 6 resolved,
-8 blocked on audio.cpp ggml ops that upstream engine code now calls → `docs/upstream/audio_cpp_merge_487800f5.md`.
+8 blocked on audio.cpp ggml ops that upstream engine code now calls → `docs/upstream/audio_cpp_merge_9bdd1d90.md`.
 
 **Whisper C-ABI retirement gate.** `whisper_e2e_smoke`, `whisper_tokenize_parity` and their `.bin` twins had been
 vendored in Phase 7.1 and never registered. Now registered against pinned models (`whisper-tiny{,.en}-Q8_0.gguf` from
