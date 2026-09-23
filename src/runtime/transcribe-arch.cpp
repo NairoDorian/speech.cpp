@@ -37,10 +37,6 @@ namespace canary_qwen {
 extern const Arch arch;
 }
 
-namespace whisper {
-extern const Arch arch;
-}
-
 namespace gigaam {
 extern const Arch arch;
 }
@@ -69,9 +65,10 @@ const Arch * find_arch(const char * name) {
     //   B14 fun_asr_nano        -> fun_asr_nano (Phase 10.5)
     //   B16a moonshine          -> moonshine (Phase 11b)
     //   B16b moonshine_streaming-> moonshine_streaming (Phase 11b)
+    //   B16c whisper            -> whisper (Phase 11 W2b; GGUF and .bin)
     static const Arch * const k_archs[] = {
         &parakeet::arch,         &cohere::arch,      &canary::arch,     &voxtral::arch,
-        &canary_qwen::arch,      &whisper::arch,
+        &canary_qwen::arch,
         &gigaam::arch,           &granite::arch,     &granite_nar::arch,
         &medasr::arch,           &moss::arch,
     };

@@ -15,7 +15,6 @@
 
 #include "transcribe.h"
 
-#include "arch/whisper/bin_load.h"
 #include "ggml-backend.h"
 #include "ggml.h"  // ggml_log_set: route ggml diagnostics into our sink
 #include "transcribe-abi.h"
@@ -722,7 +721,7 @@ extern "C" void transcribe_speaker_segment_init(struct transcribe_speaker_segmen
 }
 
 // Whisper telemetry + run-extension init and chunk-trace accessors live in
-// arch/whisper/public.cpp so this dispatcher stays family-agnostic. Whisper
+// transcribe-family-ext.cpp so this dispatcher stays family-agnostic. Whisper
 // run knobs are in transcribe_whisper_run_ext (via run_params::family);
 // sensevoice/funasr_nano use_itn and canary pnc use the generic run_params
 // itn/pnc enums.
@@ -803,14 +802,14 @@ constexpr size_t k_min_token_size           = TRANSCRIBE_FIELD_END(transcribe_to
 constexpr size_t k_min_speaker_segment_size = TRANSCRIBE_FIELD_END(transcribe_speaker_segment, p);
 constexpr size_t k_min_timings_size         = TRANSCRIBE_FIELD_END(transcribe_timings, decode_ms);
 constexpr size_t k_min_device_info_size     = TRANSCRIBE_FIELD_END(transcribe_device_info, kind);
-// k_min_whisper_chunk_trace_size lives in arch/whisper/public.cpp with
+// k_min_whisper_chunk_trace_size lives in transcribe-family-ext.cpp with
 // the chunk-trace accessor that uses it.
 
 #undef TRANSCRIBE_FIELD_END
 
 // Size-aware ABI helpers (check_struct_size / check_input_struct_size /
 // copy_out_prefix) live in transcribe-abi.h so per-family public
-// accessors (arch/whisper/public.cpp) share one definition. Pull them
+// accessors (transcribe-family-ext.cpp) share one definition. Pull them
 // into this TU's unqualified scope so existing call sites are unchanged.
 using transcribe::check_input_struct_size;
 using transcribe::check_struct_size;
@@ -1549,18 +1548,15 @@ static transcribe_status transcribe_model_load_file_impl(const char *           
         }
     }
 
-    // 0x67676d6c ("ggml" little-endian): legacy whisper.cpp .bin. Hand off
-    // to the whisper .bin adapter, which validates the hparams as
-    // whisper-shaped (rejecting unrelated ggml-magic files like Silero VAD).
-    if (magic == 0x67676d6cu) {
-        return transcribe::whisper::load_from_bin(path, params, out_model);
-    }
-
-    // Not a GGUF and not a legacy .bin: ask the audio.cpp framework registry
-    // whether one of its families claims this path (a `.safetensors` weight
-    // file or a model directory). GGUF stays the canonical, first-checked
-    // format — this runs only where the GGUF reader would fail anyway, so the
-    // documented error contract for genuinely bad files is unchanged.
+    // Not a GGUF: ask the audio.cpp framework registry whether one of its
+    // families claims this path - a `.safetensors` weight file, a model
+    // directory, or a legacy whisper.cpp `.bin` (0x67676d6c, "ggml"; the
+    // engine `whisper` loader claims the magic and then rejects hparams that
+    // are not Whisper-shaped, e.g. a Silero VAD .bin, which the adapter
+    // surfaces as ERR_UNSUPPORTED_ARCH). GGUF stays the canonical,
+    // first-checked format: this runs only where the GGUF reader would fail
+    // anyway, so the documented error contract for genuinely bad files is
+    // unchanged.
     if (path_is_dir || magic != 0x46554747u) {
         const std::string family = transcribe::adapter_sniff_framework_family(path);
         if (!family.empty()) {
@@ -1577,6 +1573,13 @@ static transcribe_status transcribe_model_load_file_impl(const char *           
         if (path_is_dir) {
             // No loader claimed the directory and there is nothing for the
             // GGUF reader to open.
+            return TRANSCRIBE_ERR_UNSUPPORTED_ARCH;
+        }
+        if (magic == 0x67676d6cu) {
+            // A ggml container no linked family claims (a build without the
+            // `whisper` model, or a non-Whisper ggml file): the format was
+            // recognised, the architecture was not - the answer the retired
+            // arch's .bin loader gave, not the GGUF reader's ERR_GGUF.
             return TRANSCRIBE_ERR_UNSUPPORTED_ARCH;
         }
     }
@@ -2951,15 +2954,11 @@ static int transcribe_tokenize_impl(const struct transcribe_model * model,
     if (model == nullptr || text == nullptr) {
         return INT_MIN;
     }
-    const transcribe::Tokenizer * tok = model->tokenizer();
-    if (tok == nullptr) {
+    const std::optional<std::vector<int32_t>> encoded = model->tokenize_text(std::string(text));
+    if (!encoded.has_value()) {
         return INT_MIN;
     }
-
-    std::vector<int32_t> ids;
-    if (tok->encode(std::string(text), ids) != TRANSCRIBE_OK) {
-        return INT_MIN;
-    }
+    const std::vector<int32_t> & ids = *encoded;
 
     const size_t n = ids.size();
     if (n > static_cast<size_t>(INT_MAX)) {

@@ -1,6 +1,6 @@
 // arch/moss/encoder.cpp - MOSS Whisper encoder + VQAdaptor graph builders.
 //
-// The encoder is stock HF WhisperEncoder (see arch/whisper/encoder.cpp): a
+// The encoder is stock HF WhisperEncoder (see src/models/whisper/graphs.cpp): a
 // 2-layer Conv1d stem (GELU-erf) + learned positional embedding + N pre-LN
 // transformer blocks (LayerNorm, gelu FFN; q/v/out carry bias, k does not) +
 // final LayerNorm. The adaptor consumes the 4x-time-merged, per-chunk-trimmed,

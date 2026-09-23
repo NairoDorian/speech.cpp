@@ -55,6 +55,8 @@ if (SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES)
     add_transcribe_test(transcribe_batch_mask_unit tests/transcribe/batch_mask_unit.cpp)
     add_transcribe_test(transcribe_conv_pw_promote_unit tests/transcribe/conv_pw_promote_unit.cpp)
     add_transcribe_test(transcribe_debug_dump_unit tests/transcribe/debug_dump_unit.cpp)
+    # transcribe.cpp ed3468f3 (#165): decode budget scales with audio length.
+    add_transcribe_test(transcribe_decode_budget_unit tests/transcribe/decode_budget_unit.cpp)
     add_transcribe_test(transcribe_granite_diarize_parser_unit tests/transcribe/granite_diarize_parser_unit.cpp)
     add_transcribe_test(transcribe_log_unit tests/transcribe/log_unit.cpp)
     add_transcribe_test(transcribe_mel_unit tests/transcribe/mel_unit.cpp)
@@ -70,19 +72,64 @@ if (SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES)
     add_transcribe_test(transcribe_thread_default_unit tests/transcribe/thread_default_unit.cpp)
     add_transcribe_test(transcribe_tokenizer_decode_only_unit tests/transcribe/tokenizer_decode_only_unit.cpp)
     add_transcribe_test(transcribe_utf8_path_unit tests/transcribe/utf8_path_unit.cpp)
-    add_transcribe_test(transcribe_whisper_bin_parser_unit tests/transcribe/whisper_bin_parser_unit.cpp)
-    add_transcribe_test(transcribe_whisper_bin_suppress_unit tests/transcribe/whisper_bin_suppress_unit.cpp)
+
+    # Whisper public-ABI contract gates (Phase 11 W2b). Ported from transcribe.cpp
+    # in Phase 7.1 but never registered until 2026-09-23. They pin what the C ABI
+    # promises for Whisper - language detection with no hint, SEGMENT timestamps
+    # advertised and returned, the run ext (prompts, temperature ladder,
+    # thresholds), chunk traces, abort, HF-identical BPE ids. They were the gate
+    # the engine package had to pass before the arch retired (ledger B16c) and
+    # now run against the engine through the ArchAdapter, so they need the
+    # `whisper` model linked. Models come from scripts/fetch_asr_test_model.py;
+    # each test exits 77 (SKIP) while its model is absent.
+    set(_whisper_models "${CMAKE_CURRENT_SOURCE_DIR}/models")
+    if ("whisper" IN_LIST AUDIOCPP_LINKED_MODELS)
+        add_transcribe_test(transcribe_whisper_e2e_smoke tests/transcribe/whisper_e2e_smoke.cpp)
+        add_transcribe_test(transcribe_whisper_tokenize_parity tests/transcribe/whisper_tokenize_parity.cpp)
+        add_transcribe_test(transcribe_whisper_bin_e2e_smoke tests/transcribe/whisper_bin_e2e_smoke.cpp)
+        add_transcribe_test(transcribe_whisper_bin_tokenize_parity tests/transcribe/whisper_bin_tokenize_parity.cpp)
+        # The .bin parser / suppress-list units test the engine loader
+        # (src/models/whisper/assets.cpp) since B16c deleted the arch's own
+        # parser (src/runtime/transcribe-bin-loader.cpp).
+        add_transcribe_test(transcribe_whisper_bin_parser_unit tests/transcribe/whisper_bin_parser_unit.cpp)
+        add_transcribe_test(transcribe_whisper_bin_suppress_unit tests/transcribe/whisper_bin_suppress_unit.cpp)
+    endif()
+    if (ENGINE_BUILD_TESTS AND "whisper" IN_LIST AUDIOCPP_LINKED_MODELS)
+        # The glossary-prompt check's thresholds (parent defaults: >= 5 hits,
+        # margin > 3) are calibrated for a large model: the parent's own build
+        # misses them with tiny, base and small (measured 2026-09-23). On the
+        # pinned tiny the retired arch measured unprompted 0 -> prompted 2 in
+        # both formats, so the gate holds tiny to exactly that; the engine
+        # reproduces it.
+        set(_whisper_tiny_glossary "TRANSCRIBE_WHISPER_GLOSSARY_MIN_HITS=2;TRANSCRIBE_WHISPER_GLOSSARY_MIN_MARGIN=1")
+        set_tests_properties(transcribe_whisper_e2e_smoke PROPERTIES
+            ENVIRONMENT "TRANSCRIBE_WHISPER_GGUF=${_whisper_models}/whisper-tiny-Q8_0.gguf;${_whisper_tiny_glossary}")
+        set_tests_properties(transcribe_whisper_tokenize_parity PROPERTIES
+            ENVIRONMENT "TRANSCRIBE_WHISPER_GGUF=${_whisper_models}/whisper-tiny-Q8_0.gguf")
+        set_tests_properties(transcribe_whisper_bin_e2e_smoke PROPERTIES
+            ENVIRONMENT "TRANSCRIBE_WHISPER_BIN_TINY_EN=${_whisper_models}/ggml-tiny.en.bin;TRANSCRIBE_WHISPER_BIN_TINY_Q8_0=${_whisper_models}/ggml-tiny.bin;${_whisper_tiny_glossary}")
+        set_tests_properties(transcribe_whisper_bin_parser_unit PROPERTIES
+            ENVIRONMENT "TRANSCRIBE_WHISPER_BIN_TINY_Q8_0=${_whisper_models}/ggml-tiny.bin")
+        set_tests_properties(transcribe_whisper_bin_tokenize_parity PROPERTIES
+            ENVIRONMENT "TRANSCRIBE_WHISPER_GGUF_TINY=${_whisper_models}/whisper-tiny-Q8_0.gguf;TRANSCRIBE_WHISPER_BIN_TINY_Q8_0=${_whisper_models}/ggml-tiny.bin")
+    endif()
 
     # Phase 7 new unit tests
     add_transcribe_test(test_adapter_sniff_dispatch tests/unittests/test_adapter_sniff_dispatch.cpp)
+    add_transcribe_test(test_adapter_run_params tests/unittests/test_adapter_run_params.cpp)
 
-    # test_shared_weight_vram links engine_core and ggml
+    # Engine-level tests link engine_runtime, never the engine_core OBJECT
+    # library directly: engine_core is compiled with ENGINE_HAS_CUDA_ISTFT /
+    # ENGINE_HAS_CUDA_TORCH_RANDOM under GGML_CUDA and calls kernels whose .cu
+    # sources (and CUDA::cudart / CUDA::cufft) are attached to engine_runtime.
+    # Linking engine_core alone works on CPU and fails to link on every CUDA
+    # build (LNK2019 on CudaIstftRuntime, found 2026-09-23).
     add_executable(test_shared_weight_vram tests/unittests/test_shared_weight_vram.cpp)
     target_include_directories(test_shared_weight_vram PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
-    target_link_libraries(test_shared_weight_vram PRIVATE engine_core ggml ggml-cpu ggml-base cjson_vendor yaml_vendor sentencepiece)
+    target_link_libraries(test_shared_weight_vram PRIVATE engine_runtime ggml ggml-cpu ggml-base cjson_vendor yaml_vendor sentencepiece)
     if (ENGINE_BUILD_TESTS)
         add_test(NAME test_shared_weight_vram COMMAND test_shared_weight_vram)
     endif()
@@ -139,7 +186,7 @@ if (SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
-    target_link_libraries(frontend_contract_test PRIVATE engine_core ggml ggml-cpu ggml-base sentencepiece cjson_vendor yaml_vendor)
+    target_link_libraries(frontend_contract_test PRIVATE engine_runtime ggml ggml-cpu ggml-base sentencepiece cjson_vendor yaml_vendor)
     if (ENGINE_BUILD_TESTS)
         add_test(NAME frontend_contract_test COMMAND frontend_contract_test)
     endif()
@@ -149,17 +196,33 @@ if (SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
-    target_link_libraries(frontend_parity_test PRIVATE engine_core ggml ggml-cpu ggml-base sentencepiece cjson_vendor yaml_vendor)
+    target_link_libraries(frontend_parity_test PRIVATE engine_runtime ggml ggml-cpu ggml-base sentencepiece cjson_vendor yaml_vendor)
     if (ENGINE_BUILD_TESTS)
         add_test(NAME frontend_parity_test COMMAND frontend_parity_test)
     endif()
+
+    # Phase 8 contract tests. The tracker certified Phase 8 on StreamingSessionBase,
+    # StreamChunker and RunControl, but these three sources were never compiled or
+    # registered until 2026-09-23 (and, like the Phase 9 tests here, their bare
+    # assert() checks vanished under Release's NDEBUG).
+    foreach(_phase8_test streaming_session_base stream_chunker run_control)
+        add_executable(${_phase8_test}_test tests/unittests/test_${_phase8_test}.cpp)
+        target_include_directories(${_phase8_test}_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+        )
+        target_link_libraries(${_phase8_test}_test PRIVATE engine_runtime ggml ggml-cpu ggml-base sentencepiece cjson_vendor yaml_vendor)
+        if (ENGINE_BUILD_TESTS)
+            add_test(NAME ${_phase8_test}_test COMMAND ${_phase8_test}_test)
+        endif()
+    endforeach()
 
     add_executable(tokenizer_parity_test tests/unittests/test_tokenizer_parity.cpp)
     target_include_directories(tokenizer_parity_test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
-    target_link_libraries(tokenizer_parity_test PRIVATE engine_core ggml ggml-cpu ggml-base sentencepiece cjson_vendor yaml_vendor)
+    target_link_libraries(tokenizer_parity_test PRIVATE engine_runtime ggml ggml-cpu ggml-base sentencepiece cjson_vendor yaml_vendor)
     if (ENGINE_BUILD_TESTS)
         add_test(NAME tokenizer_parity_test COMMAND tokenizer_parity_test)
     endif()

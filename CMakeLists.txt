@@ -506,11 +506,16 @@ add_compile_options(
 )
 
 if (AUDIOCPP_STRIP_DEAD_CODE)
+    # Host-compiler flags only. add_compile_options() applies to EVERY enabled
+    # language, and nvcc on Windows parses a bare "/Gy" as a second input file
+    # ("nvcc fatal: A single input file is required ..."), so without the
+    # COMPILE_LANGUAGE guard every MSVC + GGML_CUDA Release build of the engine's
+    # own .cu sources failed (found 2026-09-23, istft_cuda_runtime.cu).
     if (MSVC)
         add_compile_options(
-            $<$<CONFIG:Release>:/Gy>
-            $<$<CONFIG:Release>:/Gw>
-            $<$<CONFIG:Release>:/GF>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:/Gy>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:/Gw>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:/GF>
         )
         add_link_options(
             $<$<CONFIG:Release>:/OPT:REF>
@@ -518,8 +523,8 @@ if (AUDIOCPP_STRIP_DEAD_CODE)
         )
     else()
         add_compile_options(
-            $<$<CONFIG:Release>:-ffunction-sections>
-            $<$<CONFIG:Release>:-fdata-sections>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:-ffunction-sections>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:-fdata-sections>
         )
         if (NOT APPLE)
             add_link_options(
@@ -591,6 +596,9 @@ add_library(engine_core OBJECT
     src/framework/model_spec/options.cpp
     src/framework/model_spec/schema.cpp
     src/framework/assets/tensor_source.cpp
+    src/framework/assets/gguf_metadata.cpp
+    src/framework/asr/sampling.cpp
+    external/miniz/miniz.c
     src/framework/assets/weight_norm_folding.cpp
     src/framework/assets/lora_tensor_source.cpp
     src/framework/assets/torch_bin.cpp
@@ -749,6 +757,21 @@ add_library(engine_core OBJECT
     src/framework/sampling/torch_random.cpp
 )
 audiocpp_configure_runtime_object(engine_core)
+
+# miniz (external/miniz, vendored release; see its UPSTREAM). Only the deflate
+# half is compiled, for the ASR compression-ratio fallback gate
+# (framework/asr/sampling.cpp). MINIZ_NO_ZLIB_COMPATIBLE_NAMES keeps miniz's zlib
+# aliases (compress, crc32, Z_OK, ...) out of our symbols, so a host that also
+# links real zlib cannot collide with us. Moved from src/runtime/third_party
+# (2026-09-23) because src/runtime is deleted in Phase 11c.
+target_compile_definitions(engine_core PRIVATE
+    MINIZ_NO_INFLATE_APIS
+    MINIZ_NO_STDIO
+    MINIZ_NO_TIME
+    MINIZ_NO_ZLIB_COMPATIBLE_NAMES
+)
+target_include_directories(engine_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external/miniz)
+set_source_files_properties(external/miniz/miniz.c PROPERTIES COMPILE_OPTIONS "$<IF:$<C_COMPILER_ID:MSVC>,/w,-w>")
 
 # These two small built-in model paths are kept outside the selectable composite list for now.
 add_library(engine_model_silero_vad OBJECT
@@ -1775,6 +1798,7 @@ audiocpp_add_model(whisper
         src/models/whisper/assets.cpp
         src/models/whisper/runtime.cpp
         src/models/whisper/session.cpp
+        src/models/whisper/decoding.cpp
     INCLUDES
         engine/models/whisper/session.h
     LOADERS
@@ -2302,7 +2326,6 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
         src/runtime/transcribe-arch-adapter.cpp
         src/runtime/transcribe-backend.cpp
         src/runtime/transcribe-batch-util.cpp
-        src/runtime/transcribe-bin-loader.cpp
         src/runtime/transcribe-debug.cpp
         src/runtime/transcribe-env.cpp
         src/runtime/transcribe-family-ext.cpp
@@ -2321,7 +2344,6 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
         src/runtime/conformer/conformer.cpp
         src/runtime/sanm/sanm.cpp
         src/runtime/granite_conformer/shaw_attn.cpp
-        src/runtime/third_party/miniz/miniz.c
     )
     set_target_properties(engine_transcribe_runtime PROPERTIES EXCLUDE_FROM_ALL TRUE)
     audiocpp_configure_runtime_object(engine_transcribe_runtime)
@@ -2332,16 +2354,7 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
     target_compile_definitions(engine_transcribe_runtime PRIVATE
         TRANSCRIBE_BUILD
         TRANSCRIBE_COMMIT="${TRANSCRIBE_BUILD_COMMIT}"
-        MINIZ_NO_INFLATE_APIS
-        MINIZ_NO_STDIO
-        MINIZ_NO_TIME
-        MINIZ_NO_ZLIB_COMPATIBLE_NAMES
     )
-    if (MSVC)
-        set_source_files_properties(src/runtime/third_party/miniz/miniz.c PROPERTIES COMPILE_OPTIONS "/w")
-    else()
-        set_source_files_properties(src/runtime/third_party/miniz/miniz.c PROPERTIES COMPILE_OPTIONS "-w")
-    endif()
 
     # transcribe.cpp arch families (whisper, parakeet, canary, ...). One
     # OBJECT library per family, grouped by directory under src/runtime/arch/.
@@ -2527,23 +2540,19 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
                 set_tests_properties(asr_stream_text_wer_test PROPERTIES SKIP_RETURN_CODE 2)
             endif()
 
-            # Whisper family gate (Phase 11 W2 prerequisite): third pinned
-            # model, and the only one that is a legacy ggml .bin rather than a
-            # GGUF -- model_specs/whisper.json is catalog-only, its 16 packages
-            # point at Whisper-*-GGUF paths that do not exist in
-            # audio-cpp/audio.cpp-gguf, so there is no downloadable GGUF for
-            # this family. ggerganov/whisper.cpp's ggml-tiny.en.bin loads
-            # through src/runtime/arch/whisper/bin_load.cpp instead, which also
-            # exercises the legacy loader W2 has to carry over.
-            #
-            # This locks the arch-path baseline (corpus WER 4.34783%, 3/69)
-            # that the native engine Whisper package must match, the same way
-            # the moonshine gates locked theirs before W1a/W1b.
-            add_test(NAME asr_e2e_whisper_wer_test
-                     COMMAND asr_e2e_wer_test
-                         "${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-tiny.en.bin"
-                         "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
-            set_tests_properties(asr_e2e_whisper_wer_test PROPERTIES SKIP_RETURN_CODE 2)
+            # Whisper family gate: third pinned model, and the legacy
+            # whisper.cpp ggml .bin distribution (ggml-tiny.en.bin). It locked
+            # the arch-path baseline (corpus WER 4.34783%, 3/69) before W2; since
+            # the arch retired (B16c) the .bin reaches the engine `whisper`
+            # package through the framework sniff, and the same 3/69 is the bar.
+            # The GGUF distribution is gated by whisper_engine_gguf_smoke_test.
+            if ("whisper" IN_LIST AUDIOCPP_LINKED_MODELS)
+                add_test(NAME asr_e2e_whisper_wer_test
+                         COMMAND asr_e2e_wer_test
+                             "${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-tiny.en.bin"
+                             "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
+                set_tests_properties(asr_e2e_whisper_wer_test PROPERTIES SKIP_RETURN_CODE 2)
+            endif()
 
             # Phase 10.5: qwen3_asr through the public C ABI. The audio.cpp
             # GGUF carries general.architecture == "audiocpp" and reaches the
@@ -2568,13 +2577,21 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
                          COMMAND asr_e2e_wer_test
                              "${CMAKE_CURRENT_SOURCE_DIR}/models/sensevoice-small-q8-audiocpp-v1.gguf"
                              "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
-                set_tests_properties(asr_e2e_sense_asr_wer_test PROPERTIES SKIP_RETURN_CODE 2)
+                # sense_asr defaults to audio_chunk_mode=auto, i.e. Silero VAD
+                # chunking, and its spec default VAD path
+                # (assets/framework/models/silero_vad) is repo-relative - so
+                # these gates must run from the source root, like the Whisper
+                # gates. (A C-ABI caller outside the repo has the same problem:
+                # open item in MULTI_AGENT_FUSION_PLAN_AND_TRACKER.md.)
+                set_tests_properties(asr_e2e_sense_asr_wer_test PROPERTIES SKIP_RETURN_CODE 2
+                                     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 
                 add_test(NAME asr_stream_text_sense_asr_wer_test
                          COMMAND asr_stream_text_wer_test
                              "${CMAKE_CURRENT_SOURCE_DIR}/models/sensevoice-small-q8-audiocpp-v1.gguf"
                              "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
-                set_tests_properties(asr_stream_text_sense_asr_wer_test PROPERTIES SKIP_RETURN_CODE 2)
+                set_tests_properties(asr_stream_text_sense_asr_wer_test PROPERTIES SKIP_RETURN_CODE 2
+                                     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
             endif()
 
             # FunASR-Nano through the engine fun_asr_nano family (B14). Offline
@@ -3619,6 +3636,7 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
             src/models/whisper/assets.cpp
             src/models/whisper/runtime.cpp
             src/models/whisper/session.cpp
+            src/models/whisper/decoding.cpp
         )
         target_include_directories(whisper_engine_smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
         add_test(
@@ -3629,6 +3647,67 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         )
         set_tests_properties(whisper_engine_smoke_test PROPERTIES SKIP_RETURN_CODE 2)
+
+        # W2b: the engine package on the family's GGUF distribution, held to the
+        # same exact parity as the .bin gate above (the retired arch measured
+        # 3/69 on it too).
+        add_test(
+            NAME whisper_engine_gguf_smoke_test
+            COMMAND whisper_engine_smoke_test
+                ${CMAKE_CURRENT_SOURCE_DIR}/models/whisper-tiny.en-Q8_0.gguf
+                ${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        )
+        set_tests_properties(whisper_engine_gguf_smoke_test PROPERTIES SKIP_RETURN_CODE 2)
+
+        # W2b: the C ABI (dispatcher -> ArchAdapter -> engine) == the engine
+        # called directly, byte-exact, across language detection, translate,
+        # segment timestamps, prompts and long-form (whole-earth.wav), plus the
+        # Whisper C-ABI contract (capabilities, rejections). Before B16c this
+        # was whisper_engine_arch_parity_test (engine vs the retired arch).
+        # The C-ABI side needs the `whisper` model linked into libtranscribe.
+        if (SPEECHCPP_ENABLE_UNIFIED_ABI AND "whisper" IN_LIST AUDIOCPP_LINKED_MODELS)
+            add_engine_unittest(whisper_c_abi_parity_test tests/unittests/test_whisper_c_abi_parity.cpp)
+            target_sources(whisper_c_abi_parity_test PRIVATE
+                src/models/whisper/graphs.cpp
+                src/models/whisper/assets.cpp
+                src/models/whisper/runtime.cpp
+                src/models/whisper/session.cpp
+                src/models/whisper/decoding.cpp
+            )
+            target_include_directories(whisper_c_abi_parity_test PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests
+                ${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe)
+            target_link_libraries(whisper_c_abi_parity_test PRIVATE transcribe)
+            add_test(
+                NAME whisper_c_abi_parity_test
+                COMMAND whisper_c_abi_parity_test
+                    ${CMAKE_CURRENT_SOURCE_DIR}/models/whisper-tiny-Q8_0.gguf
+                    ${CMAKE_CURRENT_SOURCE_DIR}/samples
+                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            )
+            set_tests_properties(whisper_c_abi_parity_test PROPERTIES SKIP_RETURN_CODE 2)
+        endif()
+
+        # W2b: the Whisper decoding recipe (timestamp rules, segment retrieval,
+        # temperature fallback, no-speech gate, long-form seek, language
+        # detection, prompt carry) under a scripted fake decoder - no model.
+        add_engine_unittest(whisper_decoding_test tests/unittests/test_whisper_decoding.cpp)
+        target_sources(whisper_decoding_test PRIVATE src/models/whisper/decoding.cpp)
+        add_test(NAME whisper_decoding_test COMMAND whisper_decoding_test)
+
+        # W2b: the engine TokenizerHub encodes Whisper text HF-exactly from both
+        # distribution formats (GGUF byte-level BPE and .bin tiktoken rank BPE).
+        add_engine_unittest(whisper_tokenizer_hub_test tests/unittests/test_whisper_tokenizer_hub.cpp)
+        target_sources(whisper_tokenizer_hub_test PRIVATE src/models/whisper/assets.cpp)
+        add_test(
+            NAME whisper_tokenizer_hub_test
+            COMMAND whisper_tokenizer_hub_test
+                ${CMAKE_CURRENT_SOURCE_DIR}/models/whisper-tiny-Q8_0.gguf
+                ${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-tiny.bin
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        )
+        set_tests_properties(whisper_tokenizer_hub_test PROPERTIES SKIP_RETURN_CODE 2)
 
         # Phase 10.5: the Phase-10 verdict for qwen3_asr executed - the engine
         # package is canonical and transcribe.cpp's distinguishing features moved

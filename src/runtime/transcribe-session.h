@@ -138,6 +138,23 @@ struct TRANSCRIBE_API transcribe_session {
     // Equals full_text modulo whitespace for families that do none.
     std::string                      raw_text;
 
+    // Per-window decode telemetry of the last offline run: the accepted
+    // temperature tier and the metrics that decided it (Whisper's fallback
+    // trace, surfaced by transcribe_get_whisper_chunk_count / _trace).
+    // Filled by the ArchAdapter from TaskResult::decode_telemetry; empty for
+    // families that report none. Cleared by clear_result().
+    struct DecodeTraceEntry {
+        int64_t t0_ms               = 0;
+        int64_t t1_ms               = 0;
+        float   temperature_used    = 0.0f;
+        float   compression_ratio   = 0.0f;
+        float   avg_logprob         = 0.0f;
+        float   no_speech_prob      = 0.0f;
+        bool    no_speech_triggered = false;
+        int32_t n_fallbacks         = 0;
+    };
+    std::vector<DecodeTraceEntry> decode_traces;
+
     // Offline batch results (transcribe_run_batch). The scratch fields
     // above are the single "current result" slot every run() writes into
     // and the single-shot accessors read; batch_results is a separate

@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -144,6 +145,12 @@ struct transcribe_model {
     // it. Used by internal code (and tests) to inspect the vocabulary
     // without dragging the per-family layout into the central dispatch.
     virtual const transcribe::Tokenizer * tokenizer() const { return nullptr; }
+
+    // Text -> token ids for transcribe_tokenize(). The default encodes with
+    // tokenizer(); adapter-wrapped engine models have no transcribe::Tokenizer
+    // and override this to ask the framework model (W2b.2). nullopt = the
+    // model cannot tokenize text.
+    virtual std::optional<std::vector<int32_t>> tokenize_text(const std::string & text) const;
 
     // Replace the languages list. Stores the strings inside the model
     // (so their c_str() lifetime is bound to the model lifetime), then

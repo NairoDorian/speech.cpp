@@ -1,6 +1,6 @@
 // arch/voxtral/weights.cpp - read_voxtral_hparams + build_voxtral_weights.
 //
-// Pattern mirrors arch/whisper/weights.cpp (encoder) and
+// Pattern mirrors the retired arch/whisper/weights.cpp (encoder) and
 // arch/qwen3_asr/weights.cpp (decoder). Every required hparam is read
 // explicitly; a missing tensor or shape mismatch is fatal.
 //

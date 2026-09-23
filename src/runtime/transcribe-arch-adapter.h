@@ -22,6 +22,7 @@
 #include "transcribe-arch.h"
 
 #include <string>
+#include <unordered_map>
 
 namespace transcribe {
 
@@ -42,5 +43,22 @@ const Arch * adapter_find_arch(const char * name);
 // existed only converter-produced GGUF families could ever reach find_arch()
 // - every safetensors/model_spec family failed with ERR_GGUF before dispatch.
 std::string adapter_sniff_framework_family(const char * path);
+
+// Translate a tri-state run knob (transcribe_run_params::pnc / itn / diarize:
+// DEFAULT / OFF / ON) into the boolean request-option value engine families
+// declare: OFF -> "false", ON -> "true", DEFAULT (or an unknown value) ->
+// nullptr, meaning "leave the option unset so the family's spec default
+// applies". Exposed for tests/unittests/test_adapter_run_params.cpp.
+const char * adapter_tristate_bool_option(int mode);
+
+// The typed family run extension (transcribe_run_params::family) as the
+// adapter handles it: validate it the way run_validate does (before the
+// previous result is cleared), and translate an accepted one into the request
+// options the engine session reads. Exposed for
+// tests/unittests/test_adapter_run_params.cpp.
+transcribe_status adapter_validate_family_run_ext(const std::string & family,
+                                                  const transcribe_run_params * params);
+std::unordered_map<std::string, std::string> adapter_family_run_ext_options(
+    const std::string & family, const transcribe_run_params * params);
 
 }  // namespace transcribe

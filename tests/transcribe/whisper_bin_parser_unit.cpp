@@ -1,39 +1,38 @@
-// whisper_bin_parser_unit.cpp - unit smoke for the whisper.cpp `.bin`
-// parser and the magic-byte dispatch.
+// whisper_bin_parser_unit.cpp - the whisper.cpp `.bin` path, as it ships
+// since the Whisper arch retired (Phase 11 W2b, ledger B16c): the magic-byte
+// dispatch in transcribe_model_load_file, the engine `whisper` loader's
+// hparams / mel-filter gates (src/models/whisper/assets.cpp, load_bin) and the
+// statuses the C ABI surfaces.
 //
-// Three behaviors covered:
+// This test used to exercise src/runtime/transcribe-bin-loader.cpp, a second
+// .bin parser the arch owned. With the arch gone that parser had no
+// production consumer and was deleted; the checks moved onto the parser that
+// actually runs. The status contract:
 //
-//   1. Silero VAD `.bin` (also uses 'ggml' magic) is rejected with
-//      TRANSCRIBE_ERR_UNSUPPORTED_ARCH at the hparams gate.
-//   2. The truncated `for-tests-*.bin` fixtures from the upstream
-//      whisper.cpp repo (header-only, no tensor payload) are rejected
-//      with TRANSCRIBE_ERR_GGUF after the parser realizes there are
-//      no tensors in the manifest.
-//   3. A real whisper.cpp `.bin` (e.g. ggml-tiny-q8_0.bin) parses
-//      cleanly and the parsed hparams match expected values.
+//   missing path                         -> TRANSCRIBE_ERR_FILE_NOT_FOUND
+//   ggml magic, not Whisper-shaped       -> TRANSCRIBE_ERR_UNSUPPORTED_ARCH
+//     (Silero VAD .bin; also any .bin in a build without `whisper` linked)
+//   Whisper-shaped but malformed         -> TRANSCRIBE_ERR_UNSUPPORTED_ARCH
+//     (non-canonical mel filters, truncated). The retired arch answered
+//     ERR_GGUF here; the adapter surfaces every family load failure as
+//     UNSUPPORTED_ARCH (the B13 sensevoice / B14 fun_asr_nano convention
+//     pinned by loader_smoke), and Whisper now follows it.
 //
-// All three are gated by env vars rather than local fixtures because
-// the upstream artifacts are not part of this repo. Each path skips
-// (RC 77) when the corresponding env var is unset or the file is
-// missing.
+// Engine-level checks name the gate that fired (the loader's message), so a
+// geometry rejection cannot pass for a truncation or the reverse.
 //
-//   TRANSCRIBE_WHISPER_BIN_SILERO       - any .bin file with `ggml`
-//                                         magic that is NOT a whisper
-//                                         model. The upstream
-//                                         models/for-tests-silero-v6.2.0-ggml.bin
-//                                         is the canonical test
-//                                         artifact.
-//   TRANSCRIBE_WHISPER_BIN_TRUNCATED    - a stripped `for-tests-*.bin`
-//                                         from upstream models/.
-//                                         Whisper-shaped hparams,
-//                                         no tensor payload.
-//   TRANSCRIBE_WHISPER_BIN_TINY_Q8_0    - a real whisper.cpp .bin
-//                                         (recommended:
-//                                         ggml-tiny-q8_0.bin from
-//                                         huggingface.co/ggerganov/
-//                                         whisper.cpp).
+// Env-gated (upstream artifacts not in this repo; each sub-test skips when
+// its variable is unset or the file is missing):
+//   TRANSCRIBE_WHISPER_BIN_SILERO     - a non-Whisper ggml .bin (upstream
+//                                       models/for-tests-silero-v6.2.0-ggml.bin)
+//   TRANSCRIBE_WHISPER_BIN_TRUNCATED  - a stripped upstream for-tests-*.bin
+//                                       (Whisper-shaped hparams, no payload)
+//   TRANSCRIBE_WHISPER_BIN_TINY_Q8_0  - a real multilingual tiny .bin
+//                                       (ggml-tiny.bin, pinned by
+//                                       scripts/fetch_asr_test_model.py)
 
-#include "transcribe-bin-loader.h"
+#include "engine/models/whisper/assets.h"
+#include "transcribe.h"
 
 #include <sys/stat.h>
 
@@ -54,6 +53,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -82,15 +82,44 @@ const char * env_or_null(const char * key) {
     return (v != nullptr && v[0] != '\0') ? v : nullptr;
 }
 
+// transcribe_model_load_file's status; a model that did load is freed.
+transcribe_status c_abi_load(const std::string & path_utf8) {
+    transcribe_model_load_params mp;
+    transcribe_model_load_params_init(&mp);
+    mp.backend             = TRANSCRIBE_BACKEND_CPU;
+    transcribe_model * m   = nullptr;
+    const transcribe_status st = transcribe_model_load_file(path_utf8.c_str(), &mp, &m);
+    if (st != TRANSCRIBE_OK) {
+        CHECK(m == nullptr);
+    }
+    if (m != nullptr) {
+        transcribe_model_free(m);
+    }
+    return st;
+}
+
+// The engine loader's rejection message, or "" when it loaded.
+std::string engine_load_error(const std::filesystem::path & path) {
+    try {
+        (void) engine::models::whisper::load_whisper_assets(path);
+        return "";
+    } catch (const std::exception & e) {
+        return e.what();
+    }
+}
+
+bool contains(const std::string & haystack, const char * needle) {
+    return haystack.find(needle) != std::string::npos;
+}
+
 void test_silero_rejected() {
     const char * path = env_or_null("TRANSCRIBE_WHISPER_BIN_SILERO");
     if (path == nullptr || !file_exists(path)) {
         ++g_skipped;
         return;
     }
-    transcribe::bin_loader::WhisperBinModel m;
-    const auto                              rc = transcribe::bin_loader::parse_whisper_bin(path, m);
-    CHECK(rc == TRANSCRIBE_ERR_UNSUPPORTED_ARCH);
+    CHECK(contains(engine_load_error(path), "not Whisper-shaped"));
+    CHECK(c_abi_load(path) == TRANSCRIBE_ERR_UNSUPPORTED_ARCH);
 }
 
 void test_truncated_rejected() {
@@ -99,11 +128,12 @@ void test_truncated_rejected() {
         ++g_skipped;
         return;
     }
-    transcribe::bin_loader::WhisperBinModel m;
-    const auto                              rc = transcribe::bin_loader::parse_whisper_bin(path, m);
-    // for-tests fixtures pass the hparams gate (real geometry) but
-    // fail at the tensor-manifest pass with no tensors declared.
-    CHECK(rc == TRANSCRIBE_ERR_GGUF);
+    // for-tests fixtures pass the hparams gate (real geometry) and fail
+    // later, on the missing payload.
+    const std::string err = engine_load_error(path);
+    CHECK(!err.empty());
+    CHECK(!contains(err, "not Whisper-shaped"));
+    CHECK(c_abi_load(path) == TRANSCRIBE_ERR_UNSUPPORTED_ARCH);
 }
 
 void test_tiny_q8_parsed() {
@@ -112,49 +142,47 @@ void test_tiny_q8_parsed() {
         ++g_skipped;
         return;
     }
-    transcribe::bin_loader::WhisperBinModel m;
-    const auto                              rc = transcribe::bin_loader::parse_whisper_bin(path, m);
-    CHECK(rc == TRANSCRIBE_OK);
+    std::shared_ptr<const engine::models::whisper::WhisperAssets> assets;
+    try {
+        assets = engine::models::whisper::load_whisper_assets(path);
+    } catch (const std::exception & e) {
+        std::fprintf(stderr, "FAIL: engine could not load %s: %s\n", path, e.what());
+        ++g_failures;
+        return;
+    }
+    const auto & hp = assets->hparams;
 
     // Tiny multilingual whisper geometry.
-    CHECK(m.hp.n_audio_layer == 4);
-    CHECK(m.hp.n_text_layer == 4);
-    CHECK(m.hp.n_audio_state == 384);
-    CHECK(m.hp.n_text_state == 384);
-    CHECK(m.hp.n_audio_head == 6);
-    CHECK(m.hp.n_text_head == 6);
-    CHECK(m.hp.n_mels == 80);
-    CHECK(m.is_multilingual);
-    CHECK(m.num_languages == 99);
+    CHECK(assets->layout == engine::models::whisper::WhisperWeightLayout::LegacyBin);
+    CHECK(hp.enc_n_layers == 4);
+    CHECK(hp.dec_n_layers == 4);
+    CHECK(hp.enc_d_model == 384);
+    CHECK(hp.dec_d_model == 384);
+    CHECK(hp.enc_n_heads == 6);
+    CHECK(hp.dec_n_heads == 6);
+    CHECK(hp.enc_num_mel_bins == 80);
+    CHECK(hp.is_multilingual);
+    CHECK(hp.n_languages == 99);
+    CHECK(assets->language_codes.size() == 99u);
 
-    // Mel filterbank dims for whisper: 80 mels × 201 freq bins.
-    CHECK(m.n_mel_filters == 80);
-    CHECK(m.n_fft_filters == 201);
-    CHECK(m.mel_filterbank.size() == 80u * 201u);
+    // Mel filterbank for whisper: 80 mels x 201 freq bins.
+    CHECK(assets->mel_filterbank.size() == 80u * 201u);
 
     // Tensor manifest: tiny multilingual has 167 tensors (10 input +
     // 15 + 15*4 + 24*4). Allow a small range to permit minor variants.
-    CHECK(m.tensors.size() >= 160 && m.tensors.size() <= 200);
+    const size_t n_tensors = assets->source->tensors().size();
+    CHECK(n_tensors >= 160 && n_tensors <= 200);
 
-    // Spot-check a couple of canonical legacy names.
-    bool saw_conv1     = false;
-    bool saw_token_emb = false;
-    for (const auto & t : m.tensors) {
-        if (t.name == "encoder.conv1.weight") {
-            saw_conv1 = true;
-        }
-        if (t.name == "decoder.token_embedding.weight") {
-            saw_token_emb = true;
-        }
-    }
-    CHECK(saw_conv1);
-    CHECK(saw_token_emb);
+    // Spot-check canonical legacy names through the layout's name mapping.
+    CHECK(assets->source->has_tensor(assets->tensor_name("encoder.conv1.weight")));
+    CHECK(assets->source->has_tensor(assets->tensor_name("decoder.token_embedding.weight")));
+
+    // And the C ABI loads it.
+    CHECK(c_abi_load(path) == TRANSCRIBE_OK);
 }
 
 void test_missing_path() {
-    transcribe::bin_loader::WhisperBinModel m;
-    const auto rc = transcribe::bin_loader::parse_whisper_bin("/nonexistent/path/that/does/not/exist.bin", m);
-    CHECK(rc == TRANSCRIBE_ERR_FILE_NOT_FOUND);
+    CHECK(c_abi_load("/nonexistent/path/that/does/not/exist.bin") == TRANSCRIBE_ERR_FILE_NOT_FOUND);
 }
 
 // Write a minimal header-only .bin with the given hparams + mel
@@ -250,17 +278,33 @@ void test_bad_n_fft() {
     }
 
     // Whisper-shaped hparams but non-canonical n_fft (200 instead of
-    // 201). Parser must reject before we even get to the vocab phase.
+    // 201). The loader must reject at the mel gate, before the vocab.
     if (!write_synthetic_bin(path, 51865, 4, 4, 80, 80, 200)) {
         std::fprintf(stderr, "SKIP: failed to write synthetic .bin\n");
         ++g_skipped;
         remove_temp_file(path);
         return;
     }
-    const std::string                       path_utf8 = path.u8string();
-    transcribe::bin_loader::WhisperBinModel m;
-    const auto                              rc = transcribe::bin_loader::parse_whisper_bin(path_utf8.c_str(), m);
-    CHECK(rc == TRANSCRIBE_ERR_GGUF);
+    CHECK(contains(engine_load_error(path), "mel filterbank is 80x200"));
+    CHECK(c_abi_load(path.u8string()) == TRANSCRIBE_ERR_UNSUPPORTED_ARCH);
+    remove_temp_file(path);
+}
+
+void test_not_whisper_shaped() {
+    // ggml magic with hparams no Whisper has (n_mels 64): the Silero case,
+    // synthesized so it runs without the upstream artifact.
+    const std::filesystem::path path = make_temp_bin_path();
+    if (path.empty()) {
+        ++g_skipped;
+        return;
+    }
+    if (!write_synthetic_bin(path, 1000, 4, 4, 64, 64, 201)) {
+        ++g_skipped;
+        remove_temp_file(path);
+        return;
+    }
+    CHECK(contains(engine_load_error(path), "not Whisper-shaped"));
+    CHECK(c_abi_load(path.u8string()) == TRANSCRIBE_ERR_UNSUPPORTED_ARCH);
     remove_temp_file(path);
 }
 
@@ -280,14 +324,13 @@ void test_distil_layer_count_accepted() {
         remove_temp_file(path);
         return;
     }
-    const std::string                       path_utf8 = path.u8string();
-    transcribe::bin_loader::WhisperBinModel m;
-    const auto                              rc = transcribe::bin_loader::parse_whisper_bin(path_utf8.c_str(), m);
-    // Header + mel filters parse; we then run out of bytes for the
-    // vocab/tensor sections. The expected status is ERR_GGUF (with a
-    // "no tensors" / truncated diagnostic), NOT UNSUPPORTED_ARCH —
-    // that's the proof that the geometry gate accepts distil layers.
-    CHECK(rc == TRANSCRIBE_ERR_GGUF);
+    // Header + mel filters parse; we then run out of bytes at the vocab.
+    // A vocab-stage error, not the geometry gate's, is the proof that the
+    // gate accepts distil layers.
+    const std::string err = engine_load_error(path);
+    CHECK(contains(err, "vocab"));
+    CHECK(!contains(err, "not Whisper-shaped"));
+    CHECK(!contains(err, "mel filterbank"));
     remove_temp_file(path);
 }
 
@@ -296,6 +339,7 @@ void test_distil_layer_count_accepted() {
 int main() {
     test_missing_path();
     test_bad_n_fft();
+    test_not_whisper_shaped();
     test_distil_layer_count_accepted();
     test_silero_rejected();
     test_truncated_rejected();

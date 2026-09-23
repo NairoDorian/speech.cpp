@@ -5,11 +5,24 @@
 #include "transcribe-model.h"
 
 #include "transcribe-session.h"
+#include "transcribe-tokenizer.h"
 
 #include <utility>
 
 transcribe_model::~transcribe_model()     = default;
 transcribe_session::~transcribe_session() = default;
+
+std::optional<std::vector<int32_t>> transcribe_model::tokenize_text(const std::string & text) const {
+    const transcribe::Tokenizer * tok = tokenizer();
+    if (tok == nullptr) {
+        return std::nullopt;
+    }
+    std::vector<int32_t> ids;
+    if (tok->encode(text, ids) != TRANSCRIBE_OK) {
+        return std::nullopt;
+    }
+    return ids;
+}
 
 void transcribe_session::clear_result() {
     tokens.clear();
@@ -18,6 +31,7 @@ void transcribe_session::clear_result() {
     speaker_segments.clear();
     full_text.clear();
     raw_text.clear();
+    decode_traces.clear();
     detected_language.clear();
     result_kind = TRANSCRIBE_TIMESTAMPS_NONE;
     has_result  = false;

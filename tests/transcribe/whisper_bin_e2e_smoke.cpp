@@ -79,6 +79,17 @@ const char * env_or_null(const char * key) {
     return (v != nullptr && v[0] != '\0') ? v : nullptr;
 }
 
+// Integer from the environment, or `fallback` when unset / empty / not a number.
+int env_int_or(const char * key, int fallback) {
+    const char * v = env_or_null(key);
+    if (v == nullptr) {
+        return fallback;
+    }
+    char *     end    = nullptr;
+    const long parsed = std::strtol(v, &end, 10);
+    return (end != v && *end == '\0') ? static_cast<int>(parsed) : fallback;
+}
+
 void test_multilingual(const char * model_path) {
     std::vector<float> jfk;
     std::vector<float> german;
@@ -267,8 +278,14 @@ void test_multilingual(const char * model_path) {
             st        = transcribe_run(ctx, product_pcm.data(), static_cast<int>(product_pcm.size()), &rp);
             CHECK(st == TRANSCRIBE_OK);
             const int prompted_hits = product_hits(transcribe_full_text(ctx));
-            CHECK(prompted_hits >= 5);
-            CHECK(prompted_hits > unprompted_hits + 3);
+            // Model-capacity calibrated thresholds; see the same check in
+            // whisper_e2e_smoke.cpp. Defaults are the parent's.
+            const int min_hits   = env_int_or("TRANSCRIBE_WHISPER_GLOSSARY_MIN_HITS", 5);
+            const int min_margin = env_int_or("TRANSCRIBE_WHISPER_GLOSSARY_MIN_MARGIN", 3);
+            std::fprintf(stderr, "whisper_bin_e2e_smoke: glossary hits unprompted=%d prompted=%d (min %d, margin > %d)\n",
+                         unprompted_hits, prompted_hits, min_hits, min_margin);
+            CHECK(prompted_hits >= min_hits);
+            CHECK(prompted_hits > unprompted_hits + min_margin);
         }
     }
 

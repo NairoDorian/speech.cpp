@@ -2,7 +2,7 @@
 // The format omits generation_config, so the adapter must choose ids for the
 // tokenizer family and compute control-token shifts from the vocabulary size.
 
-#include "arch/whisper/bin_load.h"
+#include "engine/models/whisper/assets.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -53,7 +53,7 @@ template <size_t N> void check_exact(const std::vector<int32_t> & actual, const 
 }
 
 void test_english() {
-    const std::vector<int32_t> actual = transcribe::whisper::synthesize_bin_suppress_tokens(false, 51864);
+    const std::vector<int32_t> actual = engine::models::whisper::synthesize_bin_suppress_tokens(false, 51864);
     check_exact(actual, k_english_expected);
 
     // These ids are ordinary English word pieces under the multilingual list.
@@ -63,12 +63,12 @@ void test_english() {
 }
 
 void test_multilingual() {
-    const std::vector<int32_t> actual = transcribe::whisper::synthesize_bin_suppress_tokens(true, 51865);
+    const std::vector<int32_t> actual = engine::models::whisper::synthesize_bin_suppress_tokens(true, 51865);
     check_exact(actual, k_multilingual_expected);
 }
 
 void test_large_v3_special_shift() {
-    const std::vector<int32_t> actual = transcribe::whisper::synthesize_bin_suppress_tokens(true, 51866);
+    const std::vector<int32_t> actual = engine::models::whisper::synthesize_bin_suppress_tokens(true, 51866);
     CHECK(actual.size() == 88);
 
     const int32_t expected_tail[] = { 50258, 50359, 50360, 50361, 50362, 50363 };

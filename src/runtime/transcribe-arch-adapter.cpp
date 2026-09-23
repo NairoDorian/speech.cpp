@@ -38,6 +38,7 @@
 #include "transcribe/moonshine_streaming.h"
 #include "transcribe/sortformer.h"
 #include "transcribe/voxtral_realtime.h"
+#include "transcribe/whisper.h"
 
 #include "engine/framework/core/backend.h"
 #include "engine/framework/model_spec/metadata.h"
@@ -47,7 +48,9 @@
 #include "engine/framework/runtime/stream_chunker.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
@@ -72,6 +75,7 @@ using engine::runtime::StreamEvent;
 using engine::runtime::StreamingPolicy;
 using engine::runtime::TaskResult;
 using engine::runtime::TaskSpec;
+using engine::runtime::TimestampGranularity;
 using engine::runtime::TaskRequest;
 using engine::runtime::VoiceTaskKind;
 using engine::runtime::AudioBuffer;
@@ -80,6 +84,22 @@ using engine::runtime::build_preparation_request;
 using engine::runtime::make_default_registry;
 
 namespace transcribe {
+
+const char * adapter_tristate_bool_option(int mode) {
+    // TRANSCRIBE_PNC_MODE_* / TRANSCRIBE_ITN_MODE_* / TRANSCRIBE_DIARIZE_MODE_*
+    // share the DEFAULT = 0 / OFF = 1 / ON = 2 layout.
+    static_assert(TRANSCRIBE_PNC_MODE_OFF == TRANSCRIBE_ITN_MODE_OFF &&
+                      TRANSCRIBE_ITN_MODE_OFF == TRANSCRIBE_DIARIZE_MODE_OFF,
+                  "tri-state run knobs must share one OFF value");
+    static_assert(TRANSCRIBE_PNC_MODE_ON == TRANSCRIBE_ITN_MODE_ON &&
+                      TRANSCRIBE_ITN_MODE_ON == TRANSCRIBE_DIARIZE_MODE_ON,
+                  "tri-state run knobs must share one ON value");
+    switch (mode) {
+        case TRANSCRIBE_ITN_MODE_OFF: return "false";
+        case TRANSCRIBE_ITN_MODE_ON:  return "true";
+        default:                      return nullptr;  // DEFAULT (or unknown): family default
+    }
+}
 
 namespace {
 
@@ -258,8 +278,33 @@ static void map_result_into(transcribe_session * ctx, const TaskResult & result)
     ctx->full_text.clear();
     ctx->raw_text.clear();
     ctx->detected_language.clear();
+    ctx->decode_traces.clear();
     ctx->result_kind = TRANSCRIBE_TIMESTAMPS_NONE;
     ctx->has_result = false;
+
+    // transcribe_was_truncated(). The dispatcher resets the flag before every
+    // run / stream begin; a family reports truncation on its TaskResult.
+    // Until 2026-09-23 the adapter dropped it, so the moonshine pair (and
+    // every other engine family) always answered false through the C ABI.
+    if (result.truncated) {
+        ctx->was_truncated = true;
+    }
+
+    // Per-window decode telemetry (Whisper's temperature-fallback trace),
+    // read back by transcribe_get_whisper_chunk_count / _trace.
+    ctx->decode_traces.reserve(result.decode_telemetry.size());
+    for (const auto & t : result.decode_telemetry) {
+        transcribe_session::DecodeTraceEntry entry;
+        entry.t0_ms = t.t0_ms;
+        entry.t1_ms = t.t1_ms;
+        entry.temperature_used = t.temperature_used;
+        entry.compression_ratio = t.compression_ratio;
+        entry.avg_logprob = t.avg_logprob;
+        entry.no_speech_prob = t.no_speech_prob;
+        entry.no_speech_triggered = t.no_speech_triggered;
+        entry.n_fallbacks = t.n_fallbacks;
+        ctx->decode_traces.push_back(entry);
+    }
 
     if (result.text_output.has_value()) {
         ctx->full_text = result.text_output->text;
@@ -312,6 +357,41 @@ static void map_result_into(transcribe_session * ctx, const TaskResult & result)
                       (result.audio_output.has_value() && !result.audio_output->samples.empty());  // audio-only tasks (separation)
 }
 
+// The offline-result conventions the builtin transcribe.cpp arches follow
+// (whisper, cohere, granite, parakeet, ...) and the C ABI documents
+// (transcribe.h, "Timestamp policy"), applied after map_result_into() on the
+// transcribe_run / run_batch / abort paths, only when the family returned no
+// timed rows (map_result_into already chose the kind otherwise):
+//
+//   - A transcript without timed rows is published as one untimed segment
+//     (text == full_text, zero timings) and reports NONE: the run produced no
+//     timestamps, whatever was requested.
+//   - No transcript and no rows (silence, or an abort before the first window
+//     closed) reports the granularity the request resolved to - AUTO resolving
+//     to the model's max - with zero rows, as the retired Whisper arch did.
+//
+// `requested` is transcribe_run_params::timestamps (AUTO when params is NULL);
+// the dispatcher has already rejected requests finer than the model's max.
+static void apply_offline_result_conventions(transcribe_session * ctx, transcribe_timestamp_kind requested,
+                                             bool has_transcript) {
+    if (!ctx->words.empty() || !ctx->segments.empty()) {
+        return;
+    }
+    if (has_transcript && !ctx->full_text.empty()) {
+        transcribe_session::SegmentEntry entry;
+        entry.text = ctx->full_text;
+        ctx->segments.push_back(std::move(entry));
+        ctx->result_kind = TRANSCRIBE_TIMESTAMPS_NONE;
+        return;
+    }
+    ctx->result_kind =
+        requested == TRANSCRIBE_TIMESTAMPS_AUTO ? ctx->model->caps.max_timestamp_kind : requested;
+}
+
+static transcribe_timestamp_kind requested_timestamps(const transcribe_run_params * params) {
+    return params != nullptr ? params->timestamps : TRANSCRIBE_TIMESTAMPS_AUTO;
+}
+
 // Which typed extensions the adapter understands, per family and slot. The
 // framework itself has no ext mechanism - family knobs are TaskRequest options
 // - so every entry here is a translation, and a family with no entry keeps the
@@ -329,7 +409,32 @@ bool adapter_family_accepts_ext(const std::string & family, transcribe_ext_slot 
     if (family == "moonshine_streaming") {
         return slot == TRANSCRIBE_EXT_SLOT_STREAM && kind == TRANSCRIBE_EXT_KIND_MOONSHINE_STREAMING_STREAM;
     }
+    if (family == "whisper") {
+        // Offline only: the decoding recipe knobs ride the RUN slot.
+        return slot == TRANSCRIBE_EXT_SLOT_RUN && kind == TRANSCRIBE_EXT_KIND_WHISPER_RUN;
+    }
     return false;
+}
+
+// transcribe_whisper_prompt_condition -> the engine's prompt_condition value.
+static const char * whisper_prompt_condition_option_value(transcribe_whisper_prompt_condition condition) {
+    switch (condition) {
+        case TRANSCRIBE_WHISPER_PROMPT_FIRST_SEGMENT: return "first_segment";
+        case TRANSCRIBE_WHISPER_PROMPT_ALL_SEGMENTS:  return "all_segments";
+    }
+    return nullptr;
+}
+
+// Round-trip a float through a request option exactly. %.9g is enough digits
+// for any binary32; the _DISABLED sentinels (+/-INF) are spelled the way
+// std::stof, which the engine parses with, reads them back.
+static std::string float_option_value(float value) {
+    if (std::isinf(value)) {
+        return value > 0.0f ? "inf" : "-inf";
+    }
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.9g", static_cast<double>(value));
+    return buf;
 }
 
 // The preset name the engine session reads for each public enum value; the
@@ -364,6 +469,35 @@ transcribe_status adapter_check_run_ext(const std::string & family,
         const auto * sf = reinterpret_cast<const transcribe_sortformer_stream_ext *>(fam);
         return sortformer_preset_option_value(sf->preset) != nullptr ? TRANSCRIBE_OK : TRANSCRIBE_ERR_INVALID_ARG;
     }
+    if (family == "whisper") {
+        if (const transcribe_status st = transcribe_ext_check(
+                fam, TRANSCRIBE_EXT_KIND_WHISPER_RUN, sizeof(transcribe_whisper_run_ext));
+            st != TRANSCRIBE_OK) {
+            return st;
+        }
+        // The value rules that need no model state. The retired arch checked
+        // these inside run(), i.e. AFTER the previous result was cleared;
+        // checking them here keeps a bad request from destroying it. Rules
+        // that need the vocabulary (<|startofprev|> leading prompt_tokens,
+        // special-token literals in initial_prompt) are enforced by the engine
+        // session, whose std::invalid_argument maps to ERR_INVALID_ARG.
+        const auto * wx = reinterpret_cast<const transcribe_whisper_run_ext *>(fam);
+        if (whisper_prompt_condition_option_value(wx->prompt_condition) == nullptr) {
+            return TRANSCRIBE_ERR_INVALID_ARG;
+        }
+        // HF raises ValueError for all-segments without condition_on_prev_tokens.
+        if (wx->prompt_condition == TRANSCRIBE_WHISPER_PROMPT_ALL_SEGMENTS && !wx->condition_on_prev_tokens) {
+            transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
+                                "whisper run: prompt_condition=ALL_SEGMENTS requires "
+                                "condition_on_prev_tokens=true (HF parity)");
+            return TRANSCRIBE_ERR_INVALID_ARG;
+        }
+        if (wx->max_prev_context_tokens < 0 || std::isnan(wx->temperature) || std::isnan(wx->temperature_inc) ||
+            std::isnan(wx->max_initial_timestamp) || wx->temperature < 0.0f || wx->temperature_inc < 0.0f) {
+            return TRANSCRIBE_ERR_INVALID_ARG;
+        }
+        return TRANSCRIBE_OK;
+    }
     // An extension pointed at a family with no run-slot surface: the generic
     // contract says probe first, so reject rather than silently ignore it.
     return TRANSCRIBE_ERR_INVALID_ARG;
@@ -375,12 +509,47 @@ void adapter_apply_run_ext(TaskRequest & request,
                            const std::string & family,
                            const transcribe_run_params * run_params) {
     const transcribe_ext * fam = (run_params != nullptr) ? run_params->family : nullptr;
-    if (fam == nullptr || family != "sortformer_diar") {
+    if (fam == nullptr) {
         return;
     }
-    const auto * sf = reinterpret_cast<const transcribe_sortformer_stream_ext *>(fam);
-    if (const char * value = sortformer_preset_option_value(sf->preset)) {
-        request.options["stream_preset"] = value;
+    if (family == "sortformer_diar") {
+        const auto * sf = reinterpret_cast<const transcribe_sortformer_stream_ext *>(fam);
+        if (const char * value = sortformer_preset_option_value(sf->preset)) {
+            request.options["stream_preset"] = value;
+        }
+        return;
+    }
+    if (family == "whisper") {
+        // Every field is forwarded (the ext is complete by construction -
+        // transcribe_whisper_run_ext_init fills the recipe defaults), under the
+        // option names model_specs/whisper.json declares. A NULL ext sends
+        // nothing and the engine applies the same defaults.
+        const auto * wx = reinterpret_cast<const transcribe_whisper_run_ext *>(fam);
+        if (wx->prompt_tokens != nullptr && wx->n_prompt_tokens > 0) {
+            // prompt_tokens wins over initial_prompt (whisper.h contract).
+            std::string ids;
+            for (size_t i = 0; i < wx->n_prompt_tokens; ++i) {
+                if (i != 0) {
+                    ids += ',';
+                }
+                ids += std::to_string(wx->prompt_tokens[i]);
+            }
+            request.options["prompt_tokens"] = std::move(ids);
+        } else if (wx->initial_prompt != nullptr && wx->initial_prompt[0] != '\0') {
+            request.options["initial_prompt"] = wx->initial_prompt;
+        }
+        if (const char * value = whisper_prompt_condition_option_value(wx->prompt_condition)) {
+            request.options["prompt_condition"] = value;
+        }
+        request.options["condition_on_prev_tokens"] = wx->condition_on_prev_tokens ? "true" : "false";
+        request.options["max_prev_context_tokens"] = std::to_string(wx->max_prev_context_tokens);
+        request.options["temperature"] = float_option_value(wx->temperature);
+        request.options["temperature_inc"] = float_option_value(wx->temperature_inc);
+        request.options["compression_ratio_thold"] = float_option_value(wx->compression_ratio_thold);
+        request.options["logprob_thold"] = float_option_value(wx->logprob_thold);
+        request.options["no_speech_thold"] = float_option_value(wx->no_speech_thold);
+        request.options["seed"] = std::to_string(wx->seed);
+        request.options["max_initial_timestamp"] = float_option_value(wx->max_initial_timestamp);
     }
 }
 
@@ -495,15 +664,24 @@ static void apply_run_params(TaskRequest & request, const transcribe_run_params 
         case TRANSCRIBE_TASK_TRANSLATE:  request.options["task"] = "translate";  break;
     }
     request.options["timestamps"] = std::to_string(static_cast<int>(params->timestamps));
-    request.options["pnc"] = std::to_string(static_cast<int>(params->pnc));
-    request.options["itn"] = std::to_string(static_cast<int>(params->itn));
-    // Engine families expose these knobs under their model-spec names, which
-    // differ from the transcribe ABI spellings: sense_asr / fun_asr_nano
-    // declare "enable_itn", sense_asr declares "keep_tags". Set both
-    // spellings — prune_request_options_to_contract drops whichever the
-    // family's contract does not declare.
-    request.options["enable_itn"] = std::to_string(static_cast<int>(params->itn));
-    request.options["diarize"] = std::to_string(static_cast<int>(params->diarize));
+    // pnc / itn / diarize are tri-state in the ABI (DEFAULT / OFF / ON) but every
+    // engine family declares them as bools. Writing the raw enum number here
+    // (as this did until 2026-09-23) inverted them: DEFAULT (0) parsed as false,
+    // OFF (1) as true, and ON (2) threw in parse_bool_option. DEFAULT now leaves
+    // the key unset so the family's own spec default applies.
+    // Engine families expose ITN under their model-spec name, which differs from
+    // the ABI spelling: sense_asr / fun_asr_nano declare "enable_itn", sense_asr
+    // declares "keep_tags". Set both spellings — prune_request_options_to_contract
+    // drops whichever the family's contract does not declare.
+    const auto set_tristate = [&request](const char * key, int mode) {
+        if (const char * value = adapter_tristate_bool_option(mode)) {
+            request.options[key] = value;
+        }
+    };
+    set_tristate("pnc", static_cast<int>(params->pnc));
+    set_tristate("itn", static_cast<int>(params->itn));
+    set_tristate("enable_itn", static_cast<int>(params->itn));
+    set_tristate("diarize", static_cast<int>(params->diarize));
     request.options["keep_special_tags"] = params->keep_special_tags ? "true" : "false";
     request.options["keep_tags"] = params->keep_special_tags ? "true" : "false";
     request.options["spec_k_drafts"] = std::to_string(params->spec_k_drafts);
@@ -540,14 +718,22 @@ public:
         transcribe_capabilities_init(&this->caps);
         this->caps.struct_size = sizeof(transcribe_capabilities);
         this->caps.native_sample_rate = k_native_sample_rate;
-        this->caps.max_timestamp_kind =
-            caps_has_task(caps_, VoiceTaskKind::Asr) && caps_.supports_timestamps
-                ? TRANSCRIBE_TIMESTAMPS_WORD
-                : (caps_has_task(caps_, VoiceTaskKind::Vad)
-                       ? TRANSCRIBE_TIMESTAMPS_SEGMENT
-                       : TRANSCRIBE_TIMESTAMPS_NONE);
-        this->caps.supports_language_detect = !caps_.languages.empty();
-        this->caps.supports_translate = false;
+        // An ASR family publishes the finest timing it really returns; the
+        // dispatcher rejects finer requests (Whisper: segments only).
+        if (caps_has_task(caps_, VoiceTaskKind::Asr) && caps_.supports_timestamps) {
+            this->caps.max_timestamp_kind = caps_.timestamp_granularity == TimestampGranularity::Segment
+                ? TRANSCRIBE_TIMESTAMPS_SEGMENT
+                : TRANSCRIBE_TIMESTAMPS_WORD;
+        } else {
+            this->caps.max_timestamp_kind = caps_has_task(caps_, VoiceTaskKind::Vad)
+                ? TRANSCRIBE_TIMESTAMPS_SEGMENT
+                : TRANSCRIBE_TIMESTAMPS_NONE;
+        }
+        // A family that states detection explicitly wins; otherwise keep the
+        // historical inference (a language list implies detection).
+        this->caps.supports_language_detect =
+            caps_.supports_language_detection.value_or(!caps_.languages.empty());
+        this->caps.supports_translate = caps_.supports_translate;
         this->caps.supports_streaming = caps_supports_streaming(caps_);
         this->caps.supports_spec_decode = caps_.supports_speculative_decode;
         this->caps.max_audio_ms = 0;  // framework sessions chunk internally; treat as unbounded.
@@ -558,6 +744,15 @@ public:
         set_feature(this, TRANSCRIBE_FEATURE_CANCELLATION, caps_.supports_cancellation);
         set_feature(this, TRANSCRIBE_FEATURE_DIARIZATION,
                     caps_has_task(caps_, VoiceTaskKind::Diarization));
+        set_feature(this, TRANSCRIBE_FEATURE_INITIAL_PROMPT, caps_.supports_initial_prompt);
+        set_feature(this, TRANSCRIBE_FEATURE_TEMPERATURE_FALLBACK, caps_.supports_temperature_fallback);
+        set_feature(this, TRANSCRIBE_FEATURE_LONG_FORM, caps_.supports_long_form);
+    }
+
+    // transcribe_tokenize(): engine models have no transcribe::Tokenizer, so
+    // ask the framework model (Whisper: TokenizerHub, HF-exact ids).
+    std::optional<std::vector<int32_t>> tokenize_text(const std::string & text) const override {
+        return framework_model_ != nullptr ? framework_model_->tokenize(text) : std::nullopt;
     }
 
     ILoadedVoiceModel * framework_model() const noexcept { return framework_model_.get(); }
@@ -647,12 +842,39 @@ public:
             const TaskResult result = offline->run(request);
             clear_result();
             map_result_into(this, result);
+            apply_offline_result_conventions(this, requested_timestamps(params), result.text_output.has_value());
+            if (result.truncated) {
+                // transcribe.h: an offline run whose transcript was cut is a
+                // hard non-OK status (the partial result stays readable, and
+                // transcribe_was_truncated() is true exactly in this case).
+                transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_WARN,
+                                    "transcript truncated: the decode hit the model's token budget "
+                                    "before end-of-stream");
+                return TRANSCRIBE_ERR_OUTPUT_TRUNCATED;
+            }
             return TRANSCRIBE_OK;
-        } catch (const engine::runtime::ProgressCanceled &) {
-            // The transcribe abort callback fired (poll_abort set was_aborted);
-            // same contract as a builtin arch: ERR_ABORTED, no partial result.
+        } catch (const engine::runtime::ProgressCanceled & canceled) {
+            // The transcribe abort callback fired (poll_abort set was_aborted).
+            // The ERR_ABORTED contract (transcribe.h) keeps what completed
+            // before the abort readable through the normal accessors: a family
+            // that knows (Whisper: its decoded windows) attaches it to the
+            // exception; otherwise the result is empty but still committed.
+            // Until 2026-09-23 the adapter discarded it for every family.
             clear_result();
+            if (canceled.partial != nullptr) {
+                map_result_into(this, *canceled.partial);
+            }
+            apply_offline_result_conventions(this, requested_timestamps(params),
+                                             canceled.partial != nullptr && canceled.partial->text_output.has_value());
+            has_result = true;
             return TRANSCRIBE_ERR_ABORTED;
+        } catch (const std::invalid_argument & e) {
+            // A request the family rejects on its merits (an unknown language,
+            // a special token in a Whisper prompt, a malformed option value):
+            // a caller error, not a backend failure.
+            transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "adapter run rejected the request: %s", e.what());
+            clear_result();
+            return TRANSCRIBE_ERR_INVALID_ARG;
         } catch (const std::exception & e) {
             transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "adapter run failed: %s", e.what());
             return TRANSCRIBE_ERR_BACKEND;
@@ -699,14 +921,20 @@ public:
                 if (i < results.size()) {
                     clear_result();
                     map_result_into(this, results[i]);
+                    apply_offline_result_conventions(this, requested_timestamps(params),
+                                                     results[i].text_output.has_value());
                     rs.full_text = full_text;
                     rs.raw_text = raw_text;
+                    rs.detected_language = detected_language;
                     rs.segments = segments;
                     rs.words = words;
                     rs.tokens = tokens;
+                    rs.speaker_segments = speaker_segments;
                     rs.has_result = has_result;
                     rs.result_kind = result_kind;
-                    rs.status = TRANSCRIBE_OK;
+                    // Per-utterance, like the builtin arches: the batch call
+                    // itself stays OK (transcribe.h, OUTPUT_TRUNCATED).
+                    rs.status = results[i].truncated ? TRANSCRIBE_ERR_OUTPUT_TRUNCATED : TRANSCRIBE_OK;
                 } else {
                     rs.has_result = false;
                     rs.status = TRANSCRIBE_ERR_BACKEND;
@@ -714,13 +942,22 @@ public:
                 batch_results.push_back(std::move(rs));
             }
 
+            // Index 0 aliases the single-result accessors (transcribe.h, batch
+            // result accessors). Those accessors gate on has_result, which the
+            // copy used to leave cleared - the top level read empty after every
+            // adapter run_batch.
+            clear_result();
             if (!batch_results.empty() && batch_results[0].has_result) {
-                clear_result();
-                full_text = batch_results[0].full_text;
-                raw_text = full_text;
-                segments = batch_results[0].segments;
-                words = batch_results[0].words;
-                tokens = batch_results[0].tokens;
+                const ResultSet & first = batch_results[0];
+                full_text = first.full_text;
+                raw_text = first.raw_text;
+                detected_language = first.detected_language;
+                segments = first.segments;
+                words = first.words;
+                tokens = first.tokens;
+                speaker_segments = first.speaker_segments;
+                result_kind = first.result_kind;
+                has_result = true;
             }
 
             return TRANSCRIBE_OK;
@@ -728,6 +965,11 @@ public:
             clear_result();
             batch_results.clear();
             return TRANSCRIBE_ERR_ABORTED;
+        } catch (const std::invalid_argument & e) {
+            transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "adapter run_batch rejected the request: %s", e.what());
+            clear_result();
+            batch_results.clear();
+            return TRANSCRIBE_ERR_INVALID_ARG;
         } catch (const std::exception & e) {
             transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "adapter run_batch failed: %s", e.what());
             return TRANSCRIBE_ERR_BACKEND;
@@ -1297,10 +1539,28 @@ static const Arch adapter_archs[] = {
      &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
      &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
      &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    // B16c: the engine `whisper` package (transcribe.cpp GGUFs by
+    // general.architecture, whisper.cpp .bin files by the framework sniff).
+    {"whisper",             &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
 };
 constexpr size_t k_n_adapter_archs = sizeof(adapter_archs) / sizeof(adapter_archs[0]);
 
 }  // namespace
+
+transcribe_status adapter_validate_family_run_ext(const std::string & family,
+                                                  const transcribe_run_params * params) {
+    return adapter_check_run_ext(family, params);
+}
+
+std::unordered_map<std::string, std::string> adapter_family_run_ext_options(
+    const std::string & family, const transcribe_run_params * params) {
+    TaskRequest request;
+    adapter_apply_run_ext(request, family, params);
+    return request.options;
+}
 
 // Public entry point called by find_arch() (in transcribe-arch.cpp) after the
 // builtin transcribe.cpp families fail to match. `adapter_archs` lives in the

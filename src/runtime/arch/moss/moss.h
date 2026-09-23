@@ -5,7 +5,7 @@
 // merge + VQAdaptor + Qwen3-0.6B causal LM with audio-token injection).
 //
 // Reuses src/causal_lm/ for the Qwen3 decoder block math (identical to
-// arch/qwen3_asr) and a whisper-style encoder graph (arch/whisper). MOSS-
+// arch/qwen3_asr) and a whisper-style encoder graph (src/models/whisper). MOSS-
 // specific pieces: the 4x temporal merge + VQAdaptor bridge, the non-contiguous
 // audio-token injection (time-marker digits interleave the audio span), and the
 // fixed baked prompt.

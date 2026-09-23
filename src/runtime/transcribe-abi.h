@@ -1,7 +1,7 @@
 // transcribe-abi.h - internal helpers for the size-aware public ABI.
 //
 // Shared by the central dispatcher (transcribe.cpp) and per-family public
-// accessors (e.g. arch/whisper/public.cpp) so the struct_size validation
+// accessors (e.g. transcribe-family-ext.cpp) so the struct_size validation
 // and copy-out truncation logic lives in exactly one place. Not part of
 // the public API.
 
