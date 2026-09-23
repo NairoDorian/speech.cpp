@@ -1,6 +1,8 @@
 # Progress — Unified_Audio.cpp (speech.cpp ggml fork) merge & improve
 
-Status snapshot: **Upstream audio.cpp main fully merged and synchronized at `3eccab50` — 0 behind (30 commits merged from baseline `78d47706`). All conflicts resolved across CMakeLists.txt (fused client build toggles with upstream's opt-in `AUDIOCPP_BUILD_C_API` facade, mutually exclusive with the Universal C ABI `AUDIOCPP_BUILD_CAPI` — both define target `audiocpp`; upstream server frontend module wired into the gated `AUDIOCPP_BUILD_SERVER` block) and README.md (news fused). New in-tree header shadow resolved: upstream `include/audiocpp.h` facade vs Universal `capi/include/audiocpp.h` — `test_batch_dispatch` include order fixed. 100% CTest pass rate (110 passed, 2 clean fixture skips, 0 failed out of 112 on `build-cpu-core`). Client compact minimized preset re-verified post-merge.** Date: 2026-09-14
+Status snapshot (2026-09-23, later): **W2b.2 + B16c done — the Whisper arch is deleted and the C ABI runs the engine package** (all four transcribe.cpp C-ABI Whisper gates green, 3/69, byte-exact C-ABI parity); four adapter-wide result-mapping defects fixed; new `build-cpu-asr-abi` tree for model-backed C-ABI gates. `build-cpu-core` **113/113 (1 clean skip)**, `build-cpu-asr-abi` **108/108 (1 clean skip)**.
+
+Earlier snapshot (2026-09-23): **L13 dependency sync done; W2b.1 done (engine Whisper at arch parity, GGUF + .bin); working tree UNCOMMITTED** (AGENTS.md Git Hygiene — awaiting the user's go-ahead). ggml `36da5713` (0.22.0) → **`456172ec` (0.24.0)** with 11 tracked patches (4 newly captured audio.cpp deltas; 0007 replaced by transcribe.cpp's working CUDA pool trim); Windows CUDA build fixed; transcribe.cpp triaged to `0a67b65b` (ledger `docs/upstream/transcribe_cpp_triage.md`); audio.cpp `487800f5` trial-merged but blocked on ggml ops (`docs/upstream/audio_cpp_merge_487800f5.md`); premature B16c parked in `git stash`; Whisper C-ABI retirement gate registered; TokenizerHub made HF-faithful; eight no-op assert tests made live. **`build-cpu-core` 121/121** (1 clean skip).
 
 ## Repo layout (important, non-obvious)
 `Unified_Audio.cpp/` is a **plain container directory with no git repo of its
@@ -9,19 +11,21 @@ own**. It holds five independent repositories (three primary, two hardened refer
 | Folder | Role |
 |---|---|
 | `speech.cpp/` | the active development repo (the ggml/audio.cpp fork). **All merge work, and this log, live here.** Remote: `NairoDorian/speech.cpp`, upstream `0xShug0/audio.cpp`. |
-| `audio.cpp/` | **parent** — read from, never committed to (pulled to `6d530f4`, 2026-08-28). Has a git `upstream` remote here, so it is the only source that yields a merge-base. |
-| `transcribe.cpp/` | **parent, equally authoritative** — read from, never committed to (pulled to `2102bca`, 2026-08-26 — carried the ggml bump to `36da5713` / v0.22.0 that we then adopted). No remote here, so its drift is invisible to git and must be triaged by hand — that is a tooling limit, **not** a hierarchy. See AGENTS.md "Dual Parentage". |
+| `audio.cpp/` | **parent** — read from, never committed to (sibling checkout at `487800f5`, 2026-09-23; speech.cpp's `upstream/main` is 61 commits ahead of our last merge — see `docs/upstream/audio_cpp_merge_487800f5.md`). Has a git `upstream` remote here, so it is the only source that yields a merge-base. |
+| `transcribe.cpp/` | **parent, equally authoritative** — read from, never committed to (checkout at `0a67b65b`, 2026-09-23; **triage watermark `0a67b65b`** in `docs/upstream/transcribe_cpp_triage.md` — the ledger is the merge-base git cannot give us). No remote here, so its drift is invisible to git and must be triaged by hand — that is a tooling limit, **not** a hierarchy. See AGENTS.md "Dual Parentage". |
 | `audio_cunba/` (pulled to `8cf5136`) & `transcribe_cunba/` (pulled to `2345350`) | hardened reference trees containing allocator fixes, VAD chunk planning, shared weights, batched decoders, C ABI, and build acceleration. |
 
-Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
-`sp_bridge` (CPU, full model set, unified ABI + arches, tests), `sp_cuda`
-(CUDA, core set, ABI/arches OFF), `audiocpp_flashsr` (audio.cpp reference),
-`build-cpu-core` (local MSVC CPU core test suite), `build-cpu-asr` (local MSVC ASR test/executable build).
+Build trees live in the repo (the old `Temp/opencode/` scratch trees are gone): `build-cpu-core` (suite of record: Ninja + MSVC,
+`MODEL_SET=core`, UNIFIED_ABI + TRANSCRIBE_ARCHES + tests; links **no** engine models, so retired families have no
+C-ABI path there), `build-cpu-asr-abi` (created 2026-09-23 for B16c: `MODEL_SET=asr` + UNIFIED_ABI + TRANSCRIBE_ARCHES
++ tests, server off — where the Whisper / moonshine / sense_asr / qwen3 / fun_asr_nano C-ABI gates actually run), `build-cuda-core` (same, `GGML_CUDA=ON`,
+`CMAKE_CUDA_ARCHITECTURES=89-real`, server off — created 2026-09-23), `build-cpu-qwen3` (custom set for engine-family
+C-ABI gates), `build-cpu-full`, `build-cpu-asr`, `build-client-compact-minimized-cpu`.
 
 ## Overall progress (toward "Unified_Audio transcribes on CPU")
 | Area | Status | % |
 |---|---|---|
-| Dependency: ggml pin `36da5713` (v0.22.0) + patches 0001–0007, matched to parent transcribe.cpp | Done 2026-08-26 — **CPU 102/102 + CUDA 57/57 green**, re-sync reproduces exactly (0 paths) | 100% |
+| Dependency: ggml pin `456172ec` (v0.24.0) + patches 0001–0011, matched to parent transcribe.cpp | Done 2026-09-23 — **CPU 114/114 + CUDA 86/86 green**, `sync-ggml.sh --check` exact; all ASR gates at exact baselines | 100% |
 | Gates: Whisper arch baseline locked (`asr_e2e_whisper_wer_test`, pinned `ggml-tiny.en.bin`) | Done 2026-08-26 — **corpus WER 4.34783% (3/69), RTF 0.047**; the bar the W2 engine port must match | 100% |
 | Doctrine: dual parentage (transcribe.cpp is a co-parent) + `scripts/sync-deps.sh` routine | Done 2026-08-26 (AGENTS.md, tracker Rule 7) | 100% |
 | Merge: Upstream audio.cpp main synchronization (`6d530f4`) | Done — 0 behind, 88 ahead, all 35 commits dispositioned & merged | 100% |
@@ -39,15 +43,116 @@ Build trees are scratch dirs under `C:/Users/Z/AppData/Local/Temp/opencode/`:
 | **Phase 11 W1a: Native Engine Moonshine (offline)** | **Done & Verified (`moonshine_engine_smoke_test`: engine-path WER 1.449% == arch 1/69 edits; batch + abort contracts)** | **100%** |
 | **Phase 11 W1b: Native Engine Moonshine-Streaming** | **Done & Verified (`moonshine_streaming_engine_smoke_test`: streamed 4.348% == offline 4.348% == arch baseline 3/69, divergence 0; lifecycle + abort contracts)** | **100%** |
 | **Phase 11 W2a: Native Engine Whisper (offline core)** | **Done & Verified (`whisper_engine_smoke_test`: 4.34783% == arch baseline 3/69, RTF 0.155; legacy `.bin` loader + unified MelExtractor)** | **100%** |
+| **Phase 11 W2b.2 + B16c: Whisper C-ABI takeover, arch deleted** | **Done 2026-09-23 — 4 transcribe.cpp C-ABI Whisper gates green on the engine, 3/69, `whisper_c_abi_parity_test` byte-exact in 6 modes; 7,602 lines deleted** | **100%** |
+| **Phase 11 W2b.1: Engine Whisper full recipe + GGUF** | **Done 2026-09-23 — GGUF and `.bin` 3/69 == arch; `whisper_engine_arch_parity_test`: word-identical to the arch across detection, translate, timestamps, prompt, 83 s long-form** | **100%** |
 | Specs: Phase 6 Whisper & Moonshine Model Spec Catalogs | Moonshine spec corrected + backed by native loader. **Whisper: `whisper.json` is catalog-only in the strong sense — its 16 packages point at `Whisper-*-GGUF` paths that do NOT exist in `audio-cpp/audio.cpp-gguf` (no Whisper dir at all), so none are downloadable.** Family now gated via the legacy `.bin` instead (see W2 prerequisite). | ~70% |
 | ABI offline + streaming surface | Verified, real CTest gates | 100% |
 | End-to-end ASR **offline text** (WER gate) | Done — 1.45% corpus WER (arch path); engine path now also 1/69 edits | 100% |
 | **End-to-end ASR streaming text** | **Done — streamed 4.35% == offline 4.35%, divergence 0** | **100%** |
 | Test suite status | **110/110 green** on `build-cpu-core`; `build-cpu-full` unlocked (firered_audio fix) — ASR smoke tests (`whisper`, `moonshine`, `moonshine_streaming`, `qwen3_asr`, `voxtral_realtime`, `hviske_asr`, `nemotron_asr`) + WER gates (`whisper`, `qwen3_asr`) green | **100%** |
 | **Completed increment** | **Wave W1 Retirement (B16a: Moonshine & B16b: Moonshine-Streaming deleted, C ABI adapter routing live, 100% C ABI parity verified)** | **DONE** |
-| **Next increment** | **Wave W2b: Whisper full scope (temperature fallback, telemetry, timestamps) & Whisper arch retirement (B16c)** | **READY** |
+| **Completed increment** | **L13 dependency sync (ggml 0.24.0, 4 captured patches, CUDA build fixes, transcribe.cpp triage + 3 adoptions, audio.cpp trial merge) + Whisper C-ABI retirement gate** | **DONE (uncommitted)** |
+| **Completed increment** | **W2b.2 + B16c: Whisper C-ABI takeover, arch + parallel `.bin` parser deleted, adapter-wide result-mapping fixes** | **DONE (uncommitted)** |
+| **Next increment** | **audio.cpp merge `487800f5` (ggml ops as patches 0012+ first), then transcribe.cpp ledger items; W2b.3 (Whisper batched decode / static step graph) as performance work** | **READY — awaiting user review (pause rule)** |
 
 ## DONE this session
+
+### W2b.2 + B16c — Whisper C-ABI takeover, arch retired (2026-09-23, uncommitted)
+
+- **Adapter** (`src/runtime/transcribe-arch-adapter.cpp`): Whisper run ext validated pre-clear and forwarded field
+  by field; capability mapping from the new `CapabilitySet` fields; traces → `decode_traces`; `tokenize_text`
+  override; `std::invalid_argument` → `ERR_INVALID_ARG`. Exposed `adapter_validate_family_run_ext` /
+  `adapter_family_run_ext_options` for `test_adapter_run_params` (now also covers the Whisper ext).
+- **Adapter-wide fixes**: truncation flag, abort partial results (`ProgressCanceled::partial`), batch index-0
+  aliasing + per-utterance language / speakers, untimed-transcript segment convention.
+- **B16c**: `src/runtime/arch/whisper/` and `src/runtime/transcribe-bin-loader.*` deleted (copies in the session
+  scratchpad; git has them); `whisper` added to `adapter_archs`; `.bin` routed through the framework sniff, with
+  unclaimed ggml files → `ERR_UNSUPPORTED_ARCH`; public Whisper functions in `transcribe-family-ext.cpp`.
+- **Tests**: `whisper_engine_arch_parity_test` → `whisper_c_abi_parity_test` (byte-exact + C-ABI contract);
+  `whisper_bin_parser_unit` ported to the engine loader + C-ABI statuses (synthetic non-Whisper `.bin` case added,
+  pinned `ggml-tiny.bin` wired in); `whisper_bin_suppress_unit` → engine function. Whisper C-ABI tests guarded on
+  the `whisper` model being linked; sense_asr gates given a `WORKING_DIRECTORY`.
+- **Measured** (`build-cpu-asr-abi`): all Whisper gates green — `transcribe_whisper_e2e_smoke`,
+  `_tokenize_parity`, `_bin_e2e_smoke`, `_bin_tokenize_parity`, `_bin_parser_unit`, `_bin_suppress_unit`,
+  `asr_e2e_whisper_wer_test` (3/69), `whisper_c_abi_parity_test` (6/6 byte-exact); moonshine, streaming, qwen3,
+  fun_asr_nano and sense_asr gates at their baselines.
+- **Why a new tree**: `core` links no engine models; before B16c the arch gave `build-cpu-core` a Whisper C-ABI
+  path, after it only a model-linked tree can run those gates.
+
+### L13 dependency sync + Whisper retirement gate (2026-09-23, uncommitted)
+
+**Found on arrival.** An uncommitted B16c had deleted `src/runtime/arch/whisper/` and routed Whisper to the
+engine package — which reads only the legacy `.bin`, decodes one 30 s window greedily, hard-codes `<|en|>`, and has no
+timestamps, fallback or prompts. The adapter also accepted `transcribe_whisper_run_ext` and translated none of its
+fields. Parked in `git stash` (message starts "B16c premature…"); the tracker's W2 block records why.
+
+**ggml → 0.24.0, patch invariant repaired first.**
+- A pin + patches round trip at `36da5713` showed ~1,800 lines in 26 files that no patch carried: audio.cpp merges
+  had edited `external/ggml` directly (VibeASR INT8 #447, Breeze bf16 #393/#431, CUDA #320/#321/#340/#346, Vulkan
+  #508/#542). Split by hunk into **0008 cuda-stream-priority-and-backend-fixes, 0009 bf16-rounding-and-conversion,
+  0010 vibeasr-int8-cpu-pipeline, 0011 vulkan-large-dispatch-fixes**; round trip exact except one deliberately dropped
+  dead declaration (`ggml_backend_cuda_split_buffer_type`: no definition, no caller).
+- Rebased all 11 onto `456172ec` with git 3-way merges on LF-normalized trees (3 adjacency conflicts, documented in
+  the patch headers); 0011 lost 3 of 4 hunks because upstream now ships #508. No type/op id collisions (0.24.0 only
+  appended `GGML_GLU_OP_SWIGLU_CLAMP`).
+- **0007 replaced by transcribe.cpp's `patches/ggml/0002`**: ours added `ggml_cuda_pool::clear()` as a no-op and
+  never overrode it, so `ggml_backend_cuda_trim_pools` freed nothing; theirs trims the legacy and VMM pools. 0008 gained
+  NULL-backend guards to match.
+- Verified: CPU 114/114, CUDA 86/86, whisper arch + engine 3/69, moonshine 1/69, moonshine_streaming 3/69 div 0,
+  `lint_teardown` clean, `sync-ggml.sh --check` exact.
+
+**Windows CUDA build fixed** (it failed for every MSVC + `GGML_CUDA` Release build): `AUDIOCPP_STRIP_DEAD_CODE`'s
+`/Gy /Gw /GF` reached nvcc (parsed as extra input files) — now `COMPILE_LANGUAGE:C,CXX`-scoped; four Phase 7/9 tests
+linked the `engine_core` OBJECT library directly and missed the CUDA iSTFT / torch-random kernels — now link
+`engine_runtime`, as audio.cpp's own targets do.
+
+**transcribe.cpp triaged `2102bca..0a67b65b`** (54 commits; ledger + watermark in
+`docs/upstream/transcribe_cpp_triage.md`). Adopted now:
+- **C-ABI tri-state inversion (live bug)**: `apply_run_params` wrote the raw PNC / ITN / DIARIZE enum into bool
+  options — DEFAULT parsed false, OFF true, ON threw — inverting ITN for `sense_asr` / `fun_asr_nano` and PNC for
+  `canary_asr` / `cohere_asr`. Fixed via `adapter_tristate_bool_option()`; `test_adapter_run_params`.
+- **#165 decode budget** (fixed 256-token cap truncated long transcripts silently): runtime arches canary /
+  canary_qwen / cohere / granite / moss / voxtral + `transcribe_decode_budget_unit`. Engine halves still open.
+- **`sync-ggml.sh --check`** (from 48b1f911), wired into `sync-deps.sh --verify-ggml`.
+- **Parent regression bisected**: transcribe.cpp `6c767184` turns on the static step-decode graph on CPU, after which
+  its Whisper decodes garbage on this machine for GGUF and `.bin` alike (varies run to run even at 1 thread →
+  uninitialized memory); `TRANSCRIBE_DISABLE_STATIC_DECODE=1` restores the transcript. Do not adopt that hunk.
+
+**audio.cpp `c0b26a50..487800f5` (61 commits) trial-merged** in a scratch clone by a subagent: 45 clean, 6 resolved,
+8 blocked on audio.cpp ggml ops that upstream engine code now calls → `docs/upstream/audio_cpp_merge_487800f5.md`.
+
+**Whisper C-ABI retirement gate.** `whisper_e2e_smoke`, `whisper_tokenize_parity` and their `.bin` twins had been
+vendored in Phase 7.1 and never registered. Now registered against pinned models (`whisper-tiny{,.en}-Q8_0.gguf` from
+`handy-computer/*` — the family's real distribution — and `ggml-tiny{,.en}.bin`) and green on the arch. The glossary
+prompt check is capacity-calibrated: the parent's own build misses it with tiny / base / small, so the thresholds are
+env-configurable (parent defaults kept) and tiny is held to the arch's measured 0 → 2 hits.
+
+**W2b.1 — engine Whisper at arch parity.** GGUF + `.bin` through `TensorSource` (private `.bin` streamer removed);
+the full HF recipe as a graph-agnostic policy (`src/models/whisper/decoding.*`, `whisper_decoding_test`); results carry
+segments, per-window telemetry, language and honest truncation. GGUF and `.bin` both 3/69 == arch;
+`whisper_engine_arch_parity_test` shows engine == arch word-for-word in six modes incl. 83 s long-form (25 segments,
+3 windows). A KV-cache dtype experiment (arch's F16 policy) flipped more near-ties than F32, so F32 stays default.
+Framework fixes found on the way: any-rank `require_tensor_as_shape`; `WhisperBinTensorSource` no longer reads the
+whole file into RAM.
+
+**W2b building blocks (shared, not Whisper-private).**
+- `framework/asr/sampling.{h,cpp}`: `argmax_with_logprob`, `token_logprob` (HF rescale), seeded `sample_logits`,
+  `token_compression_ratio` — lifted verbatim from the arch, which now calls them (all 8 Whisper gates unchanged).
+  miniz moved `src/runtime/third_party/` → `external/miniz/`, compiled once into `engine_core`.
+- `framework/assets/gguf_metadata.{h,cpp}`: typed GGUF KV reader.
+- **TokenizerHub made HF-faithful** (3 latent bugs: no pretokenizer, broken UTF-8 byte tables → non-ASCII
+  mojibake, greedy instead of rank BPE for raw-bytes vocabs; plus SentencePiece vocab detection). New gate
+  `whisper_tokenizer_hub_test`: HF ids on the GGUF and the `.bin`.
+
+**Test-suite integrity.** Eight assert()-based tests were silently compiled out under Release `NDEBUG` (129
+checks), and the three Phase-8 contract tests were never built. All now live and registered; two Phase-9 tests then
+failed and were fixed (tokenizer defect; a wrong mel bound). Phase 8/9 "verified" claims before this date rested
+partly on tests that could not fail.
+
+**Tooling.** `sync-deps.sh` fetches remote refs by default (it had printed "0 behind" at 61 behind), reads the
+transcribe.cpp watermark, and gained `--verify-ggml` / `--offline`; `sync-ggml.sh` dry-run compares content, not
+bytes, and names differing files; `engine/framework/assets/gguf_metadata.h` is the shared typed GGUF KV reader (W2b's
+first building block; moonshine's private copy can migrate onto it).
 
 ### Phase 11b Wave W1 Retirement — B16a (Moonshine) & B16b (Moonshine-Streaming) (2026-09-17)
 

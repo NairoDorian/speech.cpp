@@ -9,7 +9,109 @@ Dates are the work-session dates recorded in the plan.
 
 ## [Unreleased]
 
+### Removed
+
+- **The transcribe.cpp Whisper arch is retired (B16c, Phase 11 W2b, 2026-09-23)**: `src/runtime/arch/whisper/`
+  (12 files, 7,045 lines) and the arch's parallel `.bin` parser `src/runtime/transcribe-bin-loader.{h,cpp}`
+  (557 lines). Whisper through the C ABI is now the engine `whisper` package behind the ArchAdapter, for both the
+  transcribe.cpp GGUF and the whisper.cpp `.bin`. The public Whisper functions (`transcribe_whisper_run_ext_init`,
+  `transcribe_whisper_chunk_trace_init`, `transcribe_get_whisper_chunk_count` / `_trace`) moved to
+  `src/runtime/transcribe-family-ext.cpp`, so they now ship in every build (they used to need the arches).
+  Gate held: the four transcribe.cpp C-ABI Whisper tests, `asr_e2e_whisper_wer_test` 3/69, and
+  `whisper_c_abi_parity_test` — C ABI vs engine, byte-exact across detection, translate, segment timestamps,
+  prompts and 83 s long-form.
+
+### Changed
+
+- **Whisper through the ArchAdapter (W2b.2, 2026-09-23)**: `transcribe_whisper_run_ext` is validated before the
+  previous result is cleared and all 12 fields reach the engine (floats bit-exact, ±INF sentinels, full-range u32
+  `seed`); `CapabilitySet` gains `timestamp_granularity`, `supports_translate`, an explicit
+  `supports_language_detection`, and the initial-prompt / temperature-fallback / long-form features (→
+  `TRANSCRIBE_FEATURE_*`); `DecodeTelemetry` feeds the chunk-trace accessors; `transcribe_tokenize` works on
+  adapter models through the new `ILoadedVoiceModel::tokenize`.
+- **C-ABI status contract for `.bin` files**: a ggml container no linked family claims returns
+  `ERR_UNSUPPORTED_ARCH` (as the Whisper arch did); a Whisper-shaped but malformed `.bin` now also returns
+  `ERR_UNSUPPORTED_ARCH` (was `ERR_GGUF`), the adapter convention every engine family follows.
+- **Build trees**: the Whisper C-ABI tests need the `whisper` model linked and run in the new
+  `build-cpu-asr-abi` (`MODEL_SET=asr` + unified ABI + tests); the `core` set links no engine models.
+- `.bin` Whisper variants are named `whisper-tiny`, `whisper-tiny.en`, … like the GGUF `stt.variant`.
+
+- **ggml `36da5713` (0.22.0) → `456172ec` (0.24.0), matching parent transcribe.cpp (2026-09-23)**:
+  - Before the bump, a pin + patches round trip found ~1,800 lines in 26 `external/ggml` files carried by **no**
+    patch — audio.cpp fork deltas that arrived inside merges. Captured by hunk as `patches/ggml/0008`–`0011` (CUDA
+    stream priority + MMQ fixup zeroing + HIP, bf16 rounding + f16↔bf16 copies, VibeASR INT8/ternary CPU pipeline,
+    Vulkan large-dispatch fixes), each with a provenance header; one dead declaration dropped.
+  - All 11 patches rebased onto 0.24.0; 3 of 0011's 4 hunks retired (upstream converged on audio.cpp #508).
+  - `patches/ggml/0007` is now parent transcribe.cpp's CUDA pool-trim / graph-evict patch. The previous 0007 declared
+    `ggml_cuda_pool::clear()` as a no-op and never overrode it, so `ggml_backend_cuda_trim_pools` released nothing.
+  - Verified CPU 114/114 and CUDA 86/86 with every ASR gate at its exact baseline.
+
+### Fixed
+
+- **ArchAdapter result mapping, all engine families (2026-09-23)**, found while moving Whisper onto it:
+  - A truncated transcript came back as `TRANSCRIBE_OK` with `transcribe_was_truncated()` false (moonshine pair
+    since B16a/b). `transcribe.h` makes it a hard status: the run now returns `TRANSCRIBE_ERR_OUTPUT_TRUNCATED`
+    (per utterance in a batch) with the partial result readable and the flag set. Whisper reports truncation only
+    when text is actually lost — a window cut by its token budget that re-enters at its last closed timestamp pair
+    is decoded again by the next window, as in HF.
+  - An aborted `transcribe_run` discarded everything, though `transcribe.h` promises the part completed before the
+    abort stays readable. `ProgressCanceled` can now carry a partial `TaskResult`; Whisper attaches its decoded
+    windows; the result is committed (`has_result`) either way.
+  - `transcribe_run_batch`: the index-0 aliases of the single-result accessors were left with `has_result = false`
+    (read empty), and each utterance lost its `detected_language` and speaker segments.
+  - A family's `std::invalid_argument` (unknown language, special token in a prompt, malformed option) surfaced as
+    `ERR_BACKEND`; it is `ERR_INVALID_ARG` now.
+  - A transcript without timed rows is published as one untimed segment reporting NONE; a run with neither (silence,
+    early abort) reports the requested granularity — the builtin arches' conventions.
+- **`asr_*_sense_asr_*` gates only passed from the repo root**: `sense_asr` defaults to VAD chunking and its spec's
+  Silero VAD path is CWD-relative. The gates now set `WORKING_DIRECTORY`; the path itself is an open item.
+- **C ABI: PNC / ITN / DIARIZE were inverted for engine families (2026-09-23)**: `apply_run_params` stringified the
+  tri-state enum into bool request options, so `*_MODE_DEFAULT` parsed as false, `*_OFF` as true and `*_ON` threw
+  (ITN on `sense_asr` / `fun_asr_nano`, PNC on `canary_asr` / `cohere_asr`). DEFAULT now leaves the option unset so
+  the family's spec default applies. Test: `test_adapter_run_params`. Found while triaging transcribe.cpp `9eed7f09`.
+- **Decode budget scales with audio length** (transcribe.cpp `ed3468f3`, #165): the runtime arches canary,
+  canary_qwen, cohere, granite, moss and voxtral no longer truncate long transcripts at a fixed 256 tokens.
+- **TokenizerHub encode/decode was not HF-faithful (2026-09-23)** — three latent defects in
+  `src/framework/text/tokenizer_hub.cpp`, found while making it Whisper's tokenizer: (1) byte-level BPE ran over the
+  whole string with no GPT-2 pretokenizer (merges crossed word boundaries; `tokenizer.ggml.pre` was never read);
+  (2) the GPT-2 byte↔unicode tables stored bytes 0xA1–0xFF as raw single bytes instead of the UTF-8 of U+00A1…, so
+  every non-ASCII piece was unmatchable on encode and decoded as mojibake (`"Ã©"` for `"é"`); (3) raw-bytes
+  (tiktoken) vocabs used a greedy longest-prefix match instead of rank-ordered byte-pair merge. Also: tokens-only
+  SentencePiece vocabs were decoded as byte-level (literal `▁`). Pretokenization now uses llama.cpp's HF-verified
+  `unicode_regex_split` (GPT-2 / Qwen2). Gate: `whisper_tokenizer_hub_test` — HF ids on both Whisper formats.
+- **Eight assert()-based tests were no-ops, three were never built (2026-09-23)**: the suite builds Release, so
+  `NDEBUG` compiled out all 129 checks in `test_streaming_session_base`, `test_stream_chunker`,
+  `test_capi_exception_containment`, `test_frontend_parity`, `test_tokenizer_parity`, `test_run_control`,
+  `test_frontend_contract` and `test-omtd`; the Phase-8 trio (`streaming_session_base` / `stream_chunker` /
+  `run_control`) was not even compiled. With the checks live, two Phase-9 tests failed: the tokenizer case above and
+  a wrong Whisper-mel bound (now the real invariant: dynamic range ≤ 2.0).
+- **Windows CUDA builds**: `AUDIOCPP_STRIP_DEAD_CODE` passed MSVC `/Gy /Gw /GF` to nvcc (fatal "a single input file
+  is required"); four engine tests linked the `engine_core` OBJECT library directly and could not resolve the CUDA
+  iSTFT / torch-random kernels. Both broke every MSVC + `GGML_CUDA` Release build.
+
 ### Added
+
+- **Engine Whisper at arch parity — Phase 11 W2b.1 (2026-09-23)**: the native package now loads parent
+  transcribe.cpp's Whisper GGUFs (the family's real distribution, `handy-computer/whisper-*-gguf`) as well as
+  whisper.cpp `.bin`, and runs the full recipe instead of one greedy 30 s window: long-form seek (no truncation),
+  segment timestamps, language detection, translate, initial prompts / `condition_on_prev_tokens`, the
+  temperature-fallback ladder with compression-ratio / logprob / no-speech gates, and per-window telemetry. The recipe
+  is a graph-agnostic policy (`src/models/whisper/decoding.{h,cpp}`, `whisper_decoding_test` under a scripted fake
+  decoder); token sampling and the compression-ratio metric moved to `framework/asr/sampling` and the arch calls them
+  too. Gates: `whisper_engine_gguf_smoke_test` (3/69 == arch), `whisper_engine_arch_parity_test` (engine == arch
+  word-for-word across detection, translate, timestamps, prompt and 83 s long-form).
+- **Framework**: `TensorSource::require_tensor_as_shape` gained a run-time-shape overload and
+  `BackendWeightStore` now reshapes any rank pair with equal element counts (it hand-enumerated pairs and rejected
+  `[C, 1] → [C]`); `WhisperBinTensorSource` streams payloads per tensor instead of reading the whole file into RAM.
+- **Whisper C-ABI contract gates registered (2026-09-23)**: `transcribe_whisper_e2e_smoke`,
+  `transcribe_whisper_tokenize_parity`, `transcribe_whisper_bin_e2e_smoke`, `transcribe_whisper_bin_tokenize_parity`
+  (vendored since Phase 7.1, never registered), against newly pinned `whisper-tiny{,.en}-Q8_0.gguf`
+  (`handy-computer/*`, the family's GGUF distribution) and `ggml-tiny.bin`. They gate the Whisper arch retirement.
+- **Dependency tooling (2026-09-23)**: `scripts/sync-ggml.sh --check` (round-trip gate, from transcribe.cpp
+  `48b1f911`); `scripts/sync-deps.sh` fetches remote refs by default, reports the transcribe.cpp triage watermark
+  (`docs/upstream/transcribe_cpp_triage.md`) and gained `--verify-ggml` / `--offline`.
+- **`engine/framework/assets/gguf_metadata.h`**: shared typed GGUF key/value reader (absent → `nullopt`, wrong type →
+  throw) for families reading `stt.*` / `audiocpp.*` metadata.
 
 - **Phase 11b Wave W1 Retirement — Retire Legacy Moonshine & Moonshine-Streaming Arches (2026-09-17)**:
   - Retired duplicate legacy transcribe.cpp implementations `src/runtime/arch/moonshine/` and `src/runtime/arch/moonshine_streaming/` (~7,136 LOC removed, Appendix B rows B16a & B16b).

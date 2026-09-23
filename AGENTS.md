@@ -41,8 +41,9 @@ Consequences that are easy to get wrong:
 **all three** sources, in this order, then verify:
 
 ```bash
-scripts/sync-deps.sh              # report drift on all three (read-only)
-scripts/sync-deps.sh --fetch      # + fetch/ff the sibling reference repos
+scripts/sync-deps.sh                # drift on all three (fetches remote REFS; never touches the tree)
+scripts/sync-deps.sh --fetch        # + fast-forward the sibling reference repos
+scripts/sync-deps.sh --verify-ggml  # + prove external/ggml == pin + tracked patches
 ```
 
 1. **audio.cpp** (parent, `upstream` remote) — `git fetch upstream`, then
@@ -50,7 +51,12 @@ scripts/sync-deps.sh --fetch      # + fetch/ff the sibling reference repos
    Never `git pull` this repo. See Operating Rule 6 in the tracker.
 2. **transcribe.cpp** (parent, no git remote here — the sibling checkout
    `../transcribe.cpp` tracks `NairoDorian/transcribe.cpp`) — pull the sibling,
-   then triage its new commits against this tree by hand.
+   then triage its new commits against this tree by hand and record one
+   disposition row per commit in `docs/upstream/transcribe_cpp_triage.md`. Its
+   `Triage watermark:` line is our stand-in for a merge-base; `sync-deps.sh`
+   counts the commits past it. Never take a parent commit wholesale because of
+   its subject line: `6c767184` ("VAD") also flips Whisper onto a CPU decode
+   path that produces garbage.
 3. **ggml** (vendored at `external/ggml/`, pinned in `external/ggml/UPSTREAM`) —
    ```bash
    scripts/sync-ggml.sh master --dry-run   # preview + patch-stack check
@@ -58,6 +64,11 @@ scripts/sync-deps.sh --fetch      # + fetch/ff the sibling reference repos
    ```
    A **short SHA is not a fetchable ref** — pass the full 40 characters, or a
    branch/tag. Keep our pin at or above transcribe.cpp's `ggml/UPSTREAM` sha.
+   **Before any sync, and after every audio.cpp merge**, run
+   `scripts/sync-ggml.sh --check`: audio.cpp vendors its own hand-edited ggml,
+   so its ggml changes only ever arrive as untracked edits inside a merge.
+   Anything `--check` reports must become a `patches/ggml/NNNN-*.patch` first,
+   or the next sync deletes it silently.
 
 Post-sync verification is mandatory:
 
@@ -92,39 +103,55 @@ uv run --project scripts/envs/<family> scripts/<script>.py ...
 
 ## Build
 
-- After C++ changes, run:
+- After C++ changes, build and test the suite of record (from PowerShell; the
+  bat wrapper loads the VS 18 x64 environment):
 
-```bash
-cmake --build build --target transcribe-cli
+```powershell
+.\build_env.bat cmake --build build-cpu-core --config Release -j 12
+& "C:\Program Files\CMake\bin\ctest.exe" --test-dir build-cpu-core -C Release -j 8
 ```
+
+  Call `ctest.exe` directly rather than through `build_env.bat`: the bat's
+  `%*` mangles the `|` in a `-R "a|b"` regex.
+
+- `build-cpu-core` links **no** engine models (`MODEL_SET=core`), so a family whose
+  transcribe.cpp arch has been retired (moonshine, moonshine_streaming, whisper, ...)
+  has no C-ABI path there and its C-ABI gates are not even registered. Run those in
+  `build-cpu-asr-abi` (`-DAUDIOCPP_MODEL_SET=asr -DENGINE_BUILD_TESTS=ON
+  -DSPEECHCPP_ENABLE_UNIFIED_ABI=ON -DSPEECHCPP_ENABLE_TRANSCRIBE_ARCHES=ON
+  -DAUDIOCPP_BUILD_SERVER=OFF`, Ninja Release), same build / ctest commands.
+  Routine testing is CPU only; rebuild `build-cuda-core` only for CUDA-specific changes.
+
+- The CLI is `audiocpp_cli` (engine API). transcribe.cpp's `transcribe-cli`
+  is not built here. CUDA changes: `build-cuda-core` (`GGML_CUDA=ON`,
+  `CMAKE_CUDA_ARCHITECTURES=89-real`).
 
 ## Formatting
 
-- Format our C/C++ before committing. The formatter is pinned and fetched via
-  `uvx`, so do not rely on a system clang-format:
-
-```bash
-scripts/ci/clang-format.sh            # format our tree in place (default)
-scripts/ci/clang-format.sh --check    # verify, no changes
-```
-
-- Scope is our code only. Vendored trees (`ggml/`, `src/third_party/`) and
-  verbatim upstream copies (`src/transcribe-unicode-data.cpp`) are never
-  formatted. CI gates our C/C++ in
-  `.github/workflows/clang-format.yml`.
+- **Known gap (verified 2026-09-23):** transcribe.cpp's pinned formatter,
+  `scripts/ci/clang-format.sh` (fetched via `uvx`), and its `.clang-format`
+  were never vendored here — yet `.github/workflows/clang-format.yml` still
+  calls the script, so that CI job cannot pass. Until a formatting policy is
+  decided for the two inherited styles (engine code under `src/framework` /
+  `src/models` is 2-space LLVM-like; `src/runtime` is transcribe.cpp's 4-space
+  style), **format by hand to the style of the file you are editing** and do
+  not mass-reformat.
+- Whatever policy lands, vendored trees (`external/ggml/`,
+  `src/runtime/third_party/`) and verbatim upstream copies
+  (`src/runtime/transcribe-unicode-data.cpp`) are never formatted.
 
 ## C ABI Exception Discipline
 
 No C++ exception may escape a public entry point.
 
 - A new public entry point must either route through an `api_guard_*`
-  wrapper (`src/transcribe.cpp`) or be nothrow by construction. Device and
+  wrapper (`src/runtime/transcribe.cpp`) or be nothrow by construction. Device and
   registry queries are not pure reads; guard them.
 - Entry points with ownership out-params enforce "non-OK => `*out == NULL`,
   nothing leaked" in their forwarders on every error return.
 - Teardown never uses raw `ggml_backend_free` / `ggml_backend_buffer_free` /
   `ggml_backend_sched_free` in library code: use `transcribe::safe_*` from
-  `src/transcribe-backend.h`. `tests/lint_teardown.cmake` fails CI on
+  `src/runtime/transcribe-backend.h`. `tests/lint_teardown.cmake` fails CI on
   violations.
 - Host log callbacks are contained at the emission site
   (`transcribe_log_invoke`).
@@ -158,7 +185,9 @@ uv run scripts/preflight.py --family <f> [--variant <v>]
 
 ## Porting a New Model
 
-Use the `porting-*` skills in `.claude/skills/`. Stage skills are independent
+Follow the staged guides in `docs/porting/` (`0-porting.md` onward; the
+`porting-*` skills transcribe.cpp ships under `.claude/skills/` are not vendored
+here). Stages are independent
 and run in order:
 
 ```text
