@@ -191,6 +191,12 @@ VoxtralRealtimeRequest VoxtralRealtimeSession::make_request(
     // extension (transcribe_voxtral_realtime_stream_ext::num_delay_tokens)
     // arrives here as this option.
     out.num_delay_tokens = request_num_delay_tokens(request.options);
+    // Offline inference has no latency tradeoff, so when nobody chose a delay
+    // it uses the best evaluated one (transcribe.cpp e2f82cb6). Streaming
+    // keeps the model's low-latency default; at the same delay the two agree.
+    if (!streaming && out.num_delay_tokens == kVoxtralRealtimeDelayUnset) {
+        out.num_delay_tokens = kVoxtralRealtimeOfflineNumDelayTokens;
+    }
     return out;
 }
 

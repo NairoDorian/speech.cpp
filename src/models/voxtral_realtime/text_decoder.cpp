@@ -484,6 +484,9 @@ public:
         positions_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, capacity_);
         mask_ = ggml_new_tensor_4d(ctx_.get(), GGML_TYPE_F16, capacity_, capacity_, 1, 1);
         step_index_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, 1);
+        for (ggml_tensor * input : {token_ids_, audio_embeddings_, time_embedding_, positions_, mask_, step_index_}) {
+            ggml_set_input(input);
+        }
         auto ids = core::wrap_tensor(token_ids_, core::TensorShape::from_dims({capacity_}), GGML_TYPE_I32);
         auto x = modules::EmbeddingModule({config.vocab_size, config.hidden_size}).build(ctx, ids, weights_->token_embedding);
         auto audio = core::wrap_tensor(audio_embeddings_, core::TensorShape::from_dims({capacity_, config.hidden_size}), GGML_TYPE_F32);
@@ -546,10 +549,8 @@ public:
             !ggml_gallocr_alloc_graph(gallocr_.get(), graph_)) {
             throw std::runtime_error("failed to allocate VoxTral text decoder graph");
         }
-        const auto positions_values = modules::qwen_position_ids(capacity_);
-        ggml_backend_tensor_set(positions_, positions_values.data(), 0, positions_values.size() * sizeof(int32_t));
-        auto mask_values = make_text_mask(capacity_, config.sliding_window);
-        ggml_backend_tensor_set(mask_, mask_values.data(), 0, mask_values.size() * sizeof(ggml_fp16_t));
+        positions_values_ = modules::qwen_position_ids(capacity_);
+        mask_values_ = make_text_mask(capacity_, config.sliding_window);
         engine::debug::timing_log_scalar(
             "voxtral_realtime.text_prefill.graph_build_ms",
             engine::debug::elapsed_ms(build_start));
@@ -592,6 +593,11 @@ public:
         ggml_backend_tensor_set(token_ids_, padded_ids.data(), 0, padded_ids.size() * sizeof(int32_t));
         ggml_backend_tensor_set(audio_embeddings_, padded_audio.data(), 0, padded_audio.size() * sizeof(float));
         ggml_backend_tensor_set(time_embedding_, t.data(), 0, t.size() * sizeof(float));
+        // The prefill graph is cached while shapes match and re-run; constant
+        // inputs uploaded only at construction did not survive a compute, and
+        // every reuse decoded garbage ("." for the same clip twice, 2026-09-24).
+        ggml_backend_tensor_set(positions_, positions_values_.data(), 0, positions_values_.size() * sizeof(int32_t));
+        ggml_backend_tensor_set(mask_, mask_values_.data(), 0, mask_values_.size() * sizeof(ggml_fp16_t));
         const int32_t step_index = static_cast<int32_t>(token_ids.empty() ? 0 : token_ids.size() - 1);
         ggml_backend_tensor_set(step_index_, &step_index, 0, sizeof(step_index));
         engine::debug::timing_log_scalar(
@@ -661,6 +667,9 @@ private:
     ggml_tensor * time_embedding_ = nullptr;
     ggml_tensor * positions_ = nullptr;
     ggml_tensor * mask_ = nullptr;
+    // Host copies of the constant inputs, re-uploaded every run (see run()).
+    std::vector<int32_t> positions_values_;
+    std::vector<ggml_fp16_t> mask_values_;
     ggml_tensor * step_index_ = nullptr;
     ggml_tensor * logits_ = nullptr;
     ggml_tensor * selected_logits_ = nullptr;

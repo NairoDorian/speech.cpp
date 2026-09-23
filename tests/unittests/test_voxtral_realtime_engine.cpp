@@ -8,7 +8,10 @@
 //      held to the corpus edit count measured when this gate landed.
 //   2. Streaming vs offline. The family's whole point is realtime decoding;
 //      the streamed transcript is compared word-for-word against the offline
-//      one on the same audio.
+//      one on the same audio AT THE SAME DELAY. Since transcribe.cpp e2f82cb6
+//      an offline request with no delay uses 30 (the best evaluated) while
+//      streaming keeps the model's 6, so the comparison pins 6 on both sides,
+//      and the offline default is checked to equal an explicit 30.
 //   3. The merged feature: num_delay_tokens, which transcribe.cpp exposed
 //      through a typed stream extension and the engine hardwired. Asking for
 //      the model default explicitly must reproduce the default run exactly,
@@ -92,6 +95,20 @@ AudioBuffer read_audio(const std::filesystem::path &wav_path) {
 const std::vector<size_t> &odd_chunk_sizes() {
   static const std::vector<size_t> sizes = {1600, 4001, 977, 8000};
   return sizes;
+}
+
+// Offline transcript of `audio` at an explicit delay, normalized.
+std::vector<std::string> normalize_offline(IOfflineVoiceTaskSession &offline,
+                                           const AudioBuffer &audio,
+                                           const std::string &num_delay_tokens) {
+  offline.prepare(build_preparation_request(audio));
+  TaskRequest request;
+  request.audio_input = audio;
+  request.options["num_delay_tokens"] = num_delay_tokens;
+  const auto result = offline.run(request);
+  return result.text_output.has_value()
+             ? asr_test::normalize_words(result.text_output->text)
+             : std::vector<std::string>{};
 }
 
 std::string stream_audio(IStreamingVoiceTaskSession &streaming,
@@ -286,14 +303,34 @@ int main(int argc, char **argv) {
     streaming->prepare(build_preparation_request(short_audio));
 
     // ---------------- 2. streaming vs offline ----------------
+    // The offline default is the best evaluated delay (30) ...
+    if (normalize_offline(*offline, short_audio, "30") != short_offline_words) {
+      std::cerr << "FAIL: an offline request with no delay did not match "
+                   "num_delay_tokens=30\n";
+      return 1;
+    }
+    // ... and a second identical run, which reuses the cached encoder and
+    // prefill graphs (same shapes), must agree. Until 2026-09-24 it returned
+    // garbage here: both graphs uploaded their positions / masks only at
+    // construction, and those buffers did not survive a compute (the graph
+    // allocator may reuse an input's memory in place), so every reuse ran on
+    // stale inputs. Found by transcribe_stream_offline_interleave_smoke.
+    if (normalize_offline(*offline, short_audio, "30") != short_offline_words) {
+      std::cerr << "FAIL: a repeated offline run on the same session changed "
+                   "the transcript (cached graph reuse)\n";
+      return 1;
+    }
+    // ... while streaming defaults to the model's 6; compare at that delay.
+    const auto short_offline_words_at_stream_delay =
+        normalize_offline(*offline, short_audio, "6");
     const std::string streamed = stream_audio(*streaming, short_audio, "");
     const auto streamed_words = asr_test::normalize_words(streamed);
     if (streamed_words.empty()) {
       std::cerr << "FAIL: empty streamed transcript\n";
       return 1;
     }
-    const size_t divergence =
-        asr_test::word_edit_distance(short_offline_words, streamed_words);
+    const size_t divergence = asr_test::word_edit_distance(
+        short_offline_words_at_stream_delay, streamed_words);
     std::cout << "  streamed: " << streamed << "\n"
               << "  streamed-vs-offline divergence: " << divergence
               << " word(s)\n";

@@ -388,6 +388,9 @@ public:
         }
         positions_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, encoder_steps);
         mask_ = ggml_new_tensor_4d(ctx_.get(), GGML_TYPE_F16, encoder_steps, encoder_steps, 1, 1);
+        ggml_set_input(input_);
+        ggml_set_input(positions_);
+        ggml_set_input(mask_);
         auto positions = core::wrap_tensor(positions_, core::TensorShape::from_dims({encoder_steps}), GGML_TYPE_I32);
         auto mask = core::wrap_tensor(mask_, core::TensorShape::from_dims({1, 1, encoder_steps, encoder_steps}), GGML_TYPE_F16);
         for (const auto & layer : weights_->layers) {
@@ -420,10 +423,8 @@ public:
             !ggml_gallocr_alloc_graph(gallocr_.get(), graph_)) {
             throw std::runtime_error("failed to allocate VoxTral audio encoder graph");
         }
-        const auto positions_values = modules::qwen_position_ids(encoder_steps);
-        ggml_backend_tensor_set(positions_, positions_values.data(), 0, positions_values.size() * sizeof(int32_t));
-        auto mask_values = make_causal_sliding_mask(encoder_steps, config.audio.sliding_window);
-        ggml_backend_tensor_set(mask_, mask_values.data(), 0, mask_values.size() * sizeof(ggml_fp16_t));
+        positions_values_ = modules::qwen_position_ids(encoder_steps);
+        mask_values_ = make_causal_sliding_mask(encoder_steps, config.audio.sliding_window);
         engine::debug::timing_log_scalar(
             "voxtral_realtime.audio_encoder.graph_build_ms",
             engine::debug::elapsed_ms(build_start));
@@ -445,6 +446,11 @@ public:
         }
         const auto upload_start = Clock::now();
         core::write_tensor_f32(core::wrap_tensor(input_, core::TensorShape::from_dims({1, config.frontend.feature_size, feature_frames_}), GGML_TYPE_F32), features.values);
+        // The graph is cached per frame count and re-run, and its buffers do
+        // not keep constant inputs between computes: uploading positions / mask
+        // only at construction made every reuse decode garbage (2026-09-24).
+        ggml_backend_tensor_set(positions_, positions_values_.data(), 0, positions_values_.size() * sizeof(int32_t));
+        ggml_backend_tensor_set(mask_, mask_values_.data(), 0, mask_values_.size() * sizeof(ggml_fp16_t));
         engine::debug::timing_log_scalar(
             "voxtral_realtime.audio_encoder.input_upload_ms",
             engine::debug::elapsed_ms(upload_start));
@@ -484,6 +490,9 @@ private:
     ggml_tensor * input_ = nullptr;
     ggml_tensor * positions_ = nullptr;
     ggml_tensor * mask_ = nullptr;
+    // Host copies of the constant inputs, re-uploaded every run (see run()).
+    std::vector<int32_t> positions_values_;
+    std::vector<ggml_fp16_t> mask_values_;
     ggml_tensor * output_ = nullptr;
     ggml_cgraph * graph_ = nullptr;
 };

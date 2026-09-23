@@ -23,6 +23,10 @@ namespace engine::models::voxtral_realtime {
 // (VoxtralRealtimeConfig::default_num_delay_tokens, 6 on the published
 // checkpoint).
 constexpr int64_t kVoxtralRealtimeDelayUnset = -1;
+// The delay an offline request gets when neither it nor the session chose
+// one: the best evaluated delay (transcribe.cpp e2f82cb6, "patch offline
+// voxtral"). Streaming defaults to the model's own, lower-latency value.
+constexpr int64_t kVoxtralRealtimeOfflineNumDelayTokens = 30;
 constexpr int64_t kVoxtralRealtimeMaxContiguousDelayTokens = 15;
 constexpr int64_t kVoxtralRealtimeLongDelayTokens = 30;
 
