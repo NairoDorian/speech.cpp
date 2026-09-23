@@ -114,6 +114,35 @@ if (SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES)
             ENVIRONMENT "TRANSCRIBE_WHISPER_GGUF_TINY=${_whisper_models}/whisper-tiny-Q8_0.gguf;TRANSCRIBE_WHISPER_BIN_TINY_Q8_0=${_whisper_models}/ggml-tiny.bin")
     endif()
 
+    # Parakeet buffered-stream tail loss (transcribe.cpp 63baefe6, #145): the
+    # final RNN-T emissions must survive finalize, including the exact
+    # C+R+k*C cut where no unread samples remain. Needs the unified model, the
+    # only parakeet on the buffered path; exits 77 (SKIP) while it is absent.
+    add_transcribe_test(transcribe_parakeet_buffered_stream_eos_smoke tests/transcribe/parakeet_buffered_stream_eos_smoke.cpp)
+    if (ENGINE_BUILD_TESTS)
+        set_tests_properties(transcribe_parakeet_buffered_stream_eos_smoke PROPERTIES
+            ENVIRONMENT "TRANSCRIBE_PARAKEET_UNIFIED_GGUF=${CMAKE_CURRENT_SOURCE_DIR}/models/parakeet-unified-en-0.6b-Q4_K_M.gguf")
+    endif()
+
+    # Streaming and offline runs interleaved on ONE session must match fresh
+    # sessions (transcribe.cpp 9aa6599f, #150: offline runs release the compute
+    # scheduler, streams re-create it lazily). Each family's model is set only
+    # where the family can load - a set but unloadable model is a failure -
+    # so moonshine_streaming / voxtral_realtime (engine families behind the
+    # adapter) join in model-linked trees such as build-cpu-asr-abi.
+    add_transcribe_test(transcribe_stream_offline_interleave_smoke tests/transcribe/stream_offline_interleave_smoke.cpp)
+    if (ENGINE_BUILD_TESTS)
+        set(_interleave_env "TRANSCRIBE_PARAKEET_UNIFIED_GGUF=${CMAKE_CURRENT_SOURCE_DIR}/models/parakeet-unified-en-0.6b-Q4_K_M.gguf")
+        if ("moonshine_streaming" IN_LIST AUDIOCPP_LINKED_MODELS)
+            list(APPEND _interleave_env "TRANSCRIBE_MOONSHINE_STREAMING_TINY_GGUF=${CMAKE_CURRENT_SOURCE_DIR}/models/moonshine-streaming-tiny-Q8_0.gguf")
+        endif()
+        if ("voxtral_realtime" IN_LIST AUDIOCPP_LINKED_MODELS)
+            list(APPEND _interleave_env "TRANSCRIBE_VOXTRAL_REALTIME_GGUF=${CMAKE_CURRENT_SOURCE_DIR}/models/voxtral-mini-4b-realtime-2602-q4_k.gguf")
+        endif()
+        set_tests_properties(transcribe_stream_offline_interleave_smoke PROPERTIES
+            ENVIRONMENT "${_interleave_env}")
+    endif()
+
     # Phase 7 new unit tests
     add_transcribe_test(test_adapter_sniff_dispatch tests/unittests/test_adapter_sniff_dispatch.cpp)
     add_transcribe_test(test_adapter_run_params tests/unittests/test_adapter_run_params.cpp)

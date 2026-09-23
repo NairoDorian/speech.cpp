@@ -4,13 +4,24 @@
 
 #include "transcribe-model.h"
 
+#include "transcribe-backend.h"
 #include "transcribe-session.h"
 #include "transcribe-tokenizer.h"
 
 #include <utility>
 
-transcribe_model::~transcribe_model()     = default;
-transcribe_session::~transcribe_session() = default;
+transcribe_model::~transcribe_model() = default;
+
+// Scheduler first, then the compute context (release_compute_scratch keeps
+// that order). Runs after the derived destructor; see the header note.
+transcribe_session::~transcribe_session() {
+    transcribe::release_compute_scratch(sched, compute_ctx);
+}
+
+void transcribe_session::release_scratch() noexcept {
+    transcribe::release_compute_scratch(sched, compute_ctx);
+    on_scratch_released();
+}
 
 std::optional<std::vector<int32_t>> transcribe_model::tokenize_text(const std::string & text) const {
     const transcribe::Tokenizer * tok = tokenizer();

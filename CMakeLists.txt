@@ -2739,6 +2739,22 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
                 set_tests_properties(asr_e2e_fun_asr_nano_wer_test PROPERTIES SKIP_RETURN_CODE 2)
             endif()
 
+            # Parakeet through its transcribe.cpp arch (canonical in speech.cpp),
+            # on the smallest published package (parakeet-tdt_ctc-110m Q8_0).
+            # The first local model for the shared src/runtime/conformer/ blocks:
+            # it gated the S3 conformer memory chain (2026-09-23: transcripts
+            # byte-identical on the 4 fixtures + jfk + 83 s whole-earth, peak
+            # working set 579 -> 463 MB). Held to its measured baseline, 2/69
+            # (both edits the I AM -> I'M contraction), not the 10% default.
+            if (SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES)
+                add_test(NAME asr_e2e_parakeet_wer_test
+                         COMMAND asr_e2e_wer_test
+                             "${CMAKE_CURRENT_SOURCE_DIR}/models/parakeet-tdt_ctc-110m-Q8_0.gguf"
+                             "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech"
+                             2.9)
+                set_tests_properties(asr_e2e_parakeet_wer_test PROPERTIES SKIP_RETURN_CODE 2)
+            endif()
+
             # The extension surface resolves only where the product links the
             # family, for the same reason: the GGUF reaches the engine through
             # the framework registry, never a transcribe arch.

@@ -13,6 +13,9 @@
 //   asr_e2e_wer_test <model.gguf> <fixture_dir> [max_corpus_wer_pct]
 // or the SPEECHCPP_ASR_E2E_MODEL / SPEECHCPP_ASR_E2E_FIXTURES /
 // SPEECHCPP_ASR_E2E_MAX_WER environment variables.
+// SPEECHCPP_ASR_E2E_PRINT_HYP=1 prints every raw transcript (not only the
+// ones with edits), for exact before/after comparisons of a change that must
+// not move numerics - WER hides a near-tie flipping case or punctuation.
 //
 // The fixture directory is scanned for *.wav files with a sibling .txt
 // reference (assets/asr_validation/librispeech ships four). The gate is
@@ -81,6 +84,8 @@ void require(bool condition, const std::string & message) {
 
 int main(int argc, char ** argv) {
     try {
+        const char * print_env        = std::getenv("SPEECHCPP_ASR_E2E_PRINT_HYP");
+        const bool   print_hypotheses = print_env != nullptr && print_env[0] == '1';
         const std::string model_path = env_or_arg(argc, argv, 1, "SPEECHCPP_ASR_E2E_MODEL");
         if (model_path.empty()) {
             std::cerr << "asr_e2e_wer_test: skipped (no model path; pass argv[1] or "
@@ -177,6 +182,9 @@ int main(int argc, char ** argv) {
             if (edits != 0) {
                 std::cout << "    ref: " << asr_test::join_words(ref_words) << "\n"
                           << "    hyp: " << asr_test::join_words(hyp_words) << "\n";
+            }
+            if (print_hypotheses) {
+                std::cout << "    raw: " << hypothesis << "\n";
             }
         }
 

@@ -13,10 +13,12 @@
 #include "transcribe-env.h"
 #include "transcribe-log.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 namespace transcribe::conformer {
 
@@ -275,6 +277,15 @@ ggml_tensor * add_conv_bias(ggml_context * ctx, ggml_tensor * conv_out, ggml_ten
     const int64_t channels = bias_1d->ne[0];
     ggml_tensor * bias_4d  = ggml_reshape_4d(ctx, bias_1d, 1, 1, channels, 1);
     return ggml_add(ctx, conv_out, bias_4d);
+}
+
+ggml_tensor * add_conv_bias_inplace(ggml_context * ctx, ggml_tensor * conv_out, ggml_tensor * bias_1d) {
+    if (bias_1d == nullptr) {
+        return conv_out;
+    }
+    const int64_t channels = bias_1d->ne[0];
+    ggml_tensor * bias_4d  = ggml_reshape_4d(ctx, bias_1d, 1, 1, channels, 1);
+    return ggml_add_inplace(ctx, conv_out, bias_4d);
 }
 
 bool resolve_conv_direct(const char * direct_env, const char * no_direct_env, bool backend_default) {
@@ -623,88 +634,96 @@ ggml_tensor * rel_pos_mhsa(ggml_context *      ctx,
         p = pos_proj;
     }
 
-    // Position mask / bias: matrix_bd = rel_shift(q_v @ p^T), truncated.
-    ggml_tensor * matrix_bd = ggml_mul_mat(ctx, p, q_v);
+    auto shifted_view = [&](ggml_tensor * scores, int64_t heads) {
+        // The relative shift followed by the T_kv slice maps
+        // out[k, q] = in[k - q + T_q - 1, q]. Advancing q therefore
+        // moves one source row forward and one position backward.
+        // At T_q == 1, nb[1] is unused, but CUDA binbcast derives the head
+        // stride from it while collapsing this singleton axis. Keep it
+        // canonical to avoid indexing heads T_kv-1 elements apart.
+        const size_t query_stride =
+            T_q == 1 ? static_cast<size_t>(T_kv) * scores->nb[0] : scores->nb[1] - scores->nb[0];
+        return ggml_view_4d(ctx, scores, T_kv, T_q, heads, B, query_stride, scores->nb[2], scores->nb[3],
+                            /*offset=*/(T_q - 1) * scores->nb[0]);
+    };
 
-    // Local-attention pad/slice. The standard rel_shift trick assumes
-    // matrix_bd has shape [2T_q-1, T_q]: row r corresponds to relative
-    // offset (T_q-1-r). For local attention pos_emb is shorter
-    // ([W_left+W_right+1]) where row r corresponds to offset (W_left-r).
-    // Bring matrix_bd back to the [2T_q-1, T_q] shape by:
-    //   - prepending (T_q-1-W_left) rows of -INF (or slicing them off
-    //     when the audio is so short the window already covers it),
-    //   - appending  (T_q-1-W_right) rows of -INF (or slicing).
-    // After this, rel_shift + the existing T_q×T_q view land each
-    // out-of-window position at -INF, which softmax zeroes out. With
-    // both window sides == -1 (full attention) this block is skipped.
-    if (is_local) {
-        const int top_pad = static_cast<int>(T_q) - 1 - W_left;
-        if (top_pad > 0) {
-            ggml_tensor * top_template = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, top_pad, T_q, n_head, B);
-            ggml_tensor * top          = ggml_fill(ctx, top_template, -INFINITY);
-            matrix_bd                  = ggml_concat(ctx, top, matrix_bd, /*dim=*/0);
-        } else if (top_pad < 0) {
-            const int kept = static_cast<int>(matrix_bd->ne[0]) + top_pad;
-            matrix_bd      = ggml_view_4d(ctx, matrix_bd, kept, T_q, n_head, B, matrix_bd->nb[1], matrix_bd->nb[2],
-                                          matrix_bd->nb[3], (-top_pad) * matrix_bd->nb[0]);
-            matrix_bd      = ggml_cont(ctx, matrix_bd);
+    // A full-attention flash mask has an independent relative-position
+    // matmul for each head. Build and narrow those one head at a time so
+    // the allocator never needs the [2*T-1, T, H] F32 result at once.
+    // Masked/local cases retain the common path below.
+    const bool    split_flash_mask = flash && !is_local && !is_chunked && params.attn_pad_mask == nullptr;
+    ggml_tensor * matrix_bd        = nullptr;
+    if (split_flash_mask) {
+        for (int h = 0; h < n_head; ++h) {
+            ggml_tensor * p_h       = ggml_view_4d(ctx, p, head_dim, pos_len, 1, 1, p->nb[1], p->nb[2], p->nb[3],
+                                                   static_cast<size_t>(h) * p->nb[2]);
+            ggml_tensor * q_v_h     = ggml_view_4d(ctx, q_v, head_dim, T_q, 1, B, q_v->nb[1], q_v->nb[2], q_v->nb[3],
+                                                   static_cast<size_t>(h) * q_v->nb[2]);
+            ggml_tensor * head_mask = ggml_mul_mat(ctx, p_h, q_v_h);
+            head_mask               = shifted_view(head_mask, 1);
+            head_mask               = ggml_cont(ctx, head_mask);
+            head_mask               = ggml_scale(ctx, head_mask, scale);
+            head_mask               = ggml_cast(ctx, head_mask, GGML_TYPE_F16);
+            matrix_bd = matrix_bd == nullptr ? head_mask : ggml_concat(ctx, matrix_bd, head_mask, /*dim=*/2);
         }
-        const int bot_pad = static_cast<int>(T_q) - 1 - W_right;
-        if (bot_pad > 0) {
-            ggml_tensor * bot_template = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, bot_pad, T_q, n_head, B);
-            ggml_tensor * bot          = ggml_fill(ctx, bot_template, -INFINITY);
-            matrix_bd                  = ggml_concat(ctx, matrix_bd, bot, /*dim=*/0);
-        } else if (bot_pad < 0) {
-            const int kept = static_cast<int>(matrix_bd->ne[0]) + bot_pad;
-            matrix_bd      = ggml_view_4d(ctx, matrix_bd, kept, T_q, n_head, B, matrix_bd->nb[1], matrix_bd->nb[2],
-                                          matrix_bd->nb[3], /*offset=*/0);
-            matrix_bd      = ggml_cont(ctx, matrix_bd);
+    } else {
+        // Compute position scores; shifted_view narrows and shifts them below.
+        matrix_bd = ggml_mul_mat(ctx, p, q_v);
+
+        // Local-attention pad/slice. The standard rel_shift trick assumes
+        // matrix_bd has shape [2T_q-1, T_q]: row r corresponds to relative
+        // offset (T_q-1-r). For local attention pos_emb is shorter
+        // ([W_left+W_right+1]) where row r corresponds to offset (W_left-r).
+        // Bring matrix_bd back to the [2T_q-1, T_q] shape by padding or
+        // slicing both ends. Out-of-window positions then land at -INF.
+        if (is_local) {
+            const int top_pad = static_cast<int>(T_q) - 1 - W_left;
+            if (top_pad > 0) {
+                ggml_tensor * top_template = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, top_pad, T_q, n_head, B);
+                ggml_tensor * top          = ggml_fill(ctx, top_template, -INFINITY);
+                matrix_bd                  = ggml_concat(ctx, top, matrix_bd, /*dim=*/0);
+            } else if (top_pad < 0) {
+                const int kept = static_cast<int>(matrix_bd->ne[0]) + top_pad;
+                matrix_bd      = ggml_view_4d(ctx, matrix_bd, kept, T_q, n_head, B, matrix_bd->nb[1], matrix_bd->nb[2],
+                                              matrix_bd->nb[3], (-top_pad) * matrix_bd->nb[0]);
+                matrix_bd      = ggml_cont(ctx, matrix_bd);
+            }
+            const int bot_pad = static_cast<int>(T_q) - 1 - W_right;
+            if (bot_pad > 0) {
+                ggml_tensor * bot_template = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, bot_pad, T_q, n_head, B);
+                ggml_tensor * bot          = ggml_fill(ctx, bot_template, -INFINITY);
+                matrix_bd                  = ggml_concat(ctx, matrix_bd, bot, /*dim=*/0);
+            } else if (bot_pad < 0) {
+                const int kept = static_cast<int>(matrix_bd->ne[0]) + bot_pad;
+                matrix_bd      = ggml_view_4d(ctx, matrix_bd, kept, T_q, n_head, B, matrix_bd->nb[1], matrix_bd->nb[2],
+                                              matrix_bd->nb[3], /*offset=*/0);
+                matrix_bd      = ggml_cont(ctx, matrix_bd);
+            }
         }
-    }
 
-    // rel_shift generalizes to the rectangular case: with input
-    // [T_q + T_kv - 1, T_q] it yields out[k, q] = in[k - q + T_q - 1, q],
-    // i.e. row k holds the score of key k against query q for relative
-    // offset (T_kv - 1) - (k - q + T_q - 1) = (T_kv - T_q) + q - k —
-    // exactly the query-at-absolute-position (T_kv - T_q + q) semantics
-    // the streaming x_q path needs. The square offline case is the
-    // T_q == T_kv specialization. The zero column injected by the trick
-    // only lands at k >= T_kv, which the view below slices off.
-    matrix_bd = rel_shift(ctx, matrix_bd);
-    matrix_bd = ggml_view_4d(ctx, matrix_bd, T_kv, T_q, n_head, B, matrix_bd->nb[1], matrix_bd->nb[2], matrix_bd->nb[3],
-                             /*offset=*/0);
-    // The view is non-contiguous (nb[1] stays at parent's
-    // pos_len*es), but it IS contiguous-rows. The flash path calls
-    // ggml_scale which wants full contiguity, so cont there. The
-    // manual path only feeds matrix_bd into ggml_add(kq, matrix_bd),
-    // which handles contiguous-rows inputs on both CPU and Metal.
-    if (flash) {
-        matrix_bd = ggml_cont(ctx, matrix_bd);
-    }
+        matrix_bd = shifted_view(matrix_bd, n_head);
+        // The manual path accepts contiguous rows. Flash needs a fully
+        // contiguous mask before scaling and narrowing it below.
+        if (flash) {
+            matrix_bd = ggml_cont(ctx, matrix_bd);
+        }
 
-    // ChunkedLimited mask. Caller provided a [T_q, T_q, 1, 1] F32
-    // tensor with 0 on allowed (q, k) pairs and -INF outside the
-    // [q_chunk - left_chunks, q_chunk] band. Broadcasts across n_head.
-    // -INF and 0 are scale-invariant so this can be added before the
-    // pre-scale that the flash path applies below.
-    if (is_chunked && params.attn_chunked_mask != nullptr) {
-        matrix_bd = ggml_add(ctx, matrix_bd, params.attn_chunked_mask);
-    }
-
-    // Variable-length batch key-padding mask. [T_k, 1, 1, B] additive
-    // (-INF on padded keys) broadcasts over queries and heads. Added here
-    // so it applies on both the flash and manual paths (matrix_bd is the
-    // flash mask and the manual additive bias alike). -INF / 0 are
-    // scale-invariant, so adding before the flash pre-scale is fine.
-    if (params.attn_pad_mask != nullptr) {
-        matrix_bd = ggml_add(ctx, matrix_bd, params.attn_pad_mask);
+        // Chunked and key-padding masks broadcast over heads and queries.
+        if (is_chunked && params.attn_chunked_mask != nullptr) {
+            matrix_bd = ggml_add(ctx, matrix_bd, params.attn_chunked_mask);
+        }
+        if (params.attn_pad_mask != nullptr) {
+            matrix_bd = ggml_add(ctx, matrix_bd, params.attn_pad_mask);
+        }
     }
 
     ggml_tensor * o;
 
     if (flash) {
-        matrix_bd = ggml_scale(ctx, matrix_bd, scale);
-        matrix_bd = ggml_cast(ctx, matrix_bd, GGML_TYPE_F16);
+        if (!split_flash_mask) {
+            matrix_bd = ggml_scale(ctx, matrix_bd, scale);
+            matrix_bd = ggml_cast(ctx, matrix_bd, GGML_TYPE_F16);
+        }
 
         // Optionally cast K/V activations to a narrower type to
         // reduce bandwidth in the attention kernel. GGML_TYPE_COUNT
@@ -928,6 +947,88 @@ ggml_tensor * name_prefixed(ggml_tensor * t, const char * prefix, const char * s
 
 }  // namespace
 
+// Retain the regular im2col depthwise kernel while bounding its expanded
+// output-time axis. Each slice includes its complete source receptive field.
+ggml_tensor * regular_dw_2d_time_chunked(ggml_context * ctx,
+                                         ggml_tensor *  kernel,
+                                         ggml_tensor *  data,
+                                         int64_t        time_chunk) {
+    constexpr int64_t kStride = 2;
+
+    const int64_t extent   = kernel->ne[1];
+    const int64_t pad      = (extent - 1) / 2;
+    const int64_t time_out = (data->ne[1] + 2 * pad - extent) / kStride + 1;
+    if (time_out <= time_chunk) {
+        return conv_2d_dw_f32(ctx, kernel, data, kStride, kStride, pad, pad, /*d0=*/1, /*d1=*/1);
+    }
+
+    std::vector<ggml_tensor *> chunks;
+    chunks.reserve(static_cast<size_t>((time_out + time_chunk - 1) / time_chunk));
+    for (int64_t out0 = 0; out0 < time_out; out0 += time_chunk) {
+        const int64_t n_out   = std::min<int64_t>(time_chunk, time_out - out0);
+        const int64_t src0    = out0 * kStride - pad;
+        const int64_t src1    = src0 + (n_out - 1) * kStride + extent;
+        const int64_t view0   = std::max<int64_t>(0, src0);
+        const int64_t view1   = std::min<int64_t>(data->ne[1], src1);
+        const int64_t pad_top = view0 - src0;
+        const int64_t pad_bot = src1 - view1;
+        ggml_tensor * input = ggml_view_4d(ctx, data, data->ne[0], view1 - view0, data->ne[2], data->ne[3], data->nb[1],
+                                           data->nb[2], data->nb[3], view0 * data->nb[1]);
+        input               = ggml_pad_ext(ctx, input, 0, 0, pad_top, pad_bot, 0, 0, 0, 0);
+        chunks.push_back(conv_2d_dw_f32(ctx, kernel, input, kStride, kStride, pad, /*p1=*/0, /*d0=*/1, /*d1=*/1));
+    }
+
+    while (chunks.size() > 1) {
+        std::vector<ggml_tensor *> next;
+        next.reserve((chunks.size() + 1) / 2);
+        for (size_t i = 0; i < chunks.size(); i += 2) {
+            next.push_back(i + 1 < chunks.size() ? ggml_concat(ctx, chunks[i], chunks[i + 1], /*dim=*/1) : chunks[i]);
+        }
+        chunks.swap(next);
+    }
+    return chunks.front();
+}
+
+// Causal depthwise subsampling pads [kernel-1, stride-1] on both spatial
+// axes. Slice the output-time axis so only a bounded padded view is live.
+ggml_tensor * causal_dw_2d_time_chunked(ggml_context * ctx, ggml_tensor * kernel, ggml_tensor * data) {
+    constexpr int64_t kTimeChunk = 512;
+    constexpr int64_t kStride    = 2;
+
+    const int64_t extent    = kernel->ne[1];
+    const int64_t pad_left  = extent - 1;
+    const int64_t pad_right = kStride - 1;
+    const int64_t time_out  = (data->ne[1] + pad_left + pad_right - extent) / kStride + 1;
+    kernel                  = dw_kernel_for_direct(ctx, kernel);
+
+    std::vector<ggml_tensor *> chunks;
+    chunks.reserve(static_cast<size_t>((time_out + kTimeChunk - 1) / kTimeChunk));
+    for (int64_t out0 = 0; out0 < time_out; out0 += kTimeChunk) {
+        const int64_t n_out   = std::min<int64_t>(kTimeChunk, time_out - out0);
+        const int64_t src0    = out0 * kStride - pad_left;
+        const int64_t src1    = src0 + (n_out - 1) * kStride + extent;
+        const int64_t view0   = std::max<int64_t>(0, src0);
+        const int64_t view1   = std::min<int64_t>(data->ne[1], src1);
+        const int64_t pad_top = view0 - src0;
+        const int64_t pad_bot = src1 - view1;
+        ggml_tensor * input = ggml_view_4d(ctx, data, data->ne[0], view1 - view0, data->ne[2], data->ne[3], data->nb[1],
+                                           data->nb[2], data->nb[3], view0 * data->nb[1]);
+        input               = ggml_pad_ext(ctx, input, pad_left, pad_right, pad_top, pad_bot, 0, 0, 0, 0);
+        chunks.push_back(ggml_conv_2d_dw_direct(ctx, kernel, input, kStride, kStride,
+                                                /*p0=*/0, /*p1=*/0, /*d0=*/1, /*d1=*/1));
+    }
+
+    while (chunks.size() > 1) {
+        std::vector<ggml_tensor *> next;
+        next.reserve((chunks.size() + 1) / 2);
+        for (size_t i = 0; i < chunks.size(); i += 2) {
+            next.push_back(i + 1 < chunks.size() ? ggml_concat(ctx, chunks[i], chunks[i + 1], /*dim=*/1) : chunks[i]);
+        }
+        chunks.swap(next);
+    }
+    return chunks.front();
+}
+
 // Pre-encode subsampling stack. Op order matches NeMo's
 // DwStridingSubsampling (conformer.py:206-328):
 //
@@ -976,9 +1077,16 @@ ggml_tensor * build_pre_encode(ggml_context *        ctx,
     // Causal pre_encode: NeMo's CausalConv2D pads (left=k-1, right=stride-1)
     // on both spatial axes before the conv (p=0). Offline variants take the
     // op-side (k-1)/2 symmetric padding instead.
-    const bool causal_pe  = policy.causal_pre_encode;
-    const int  pe_p_op    = causal_pe ? 0 : 1;
-    auto       pad_causal = [&](ggml_tensor * t) {
+    const bool causal_pe           = policy.causal_pre_encode;
+    const bool inplace_pe          = causal_pe || policy.inplace_pre_encode;
+    const int  pe_p_op             = causal_pe ? 0 : 1;
+    auto       add_pre_encode_bias = [ctx, inplace_pe](ggml_tensor * value, ggml_tensor * bias) {
+        return inplace_pe ? add_conv_bias_inplace(ctx, value, bias) : add_conv_bias(ctx, value, bias);
+    };
+    auto pre_encode_relu = [ctx, inplace_pe](ggml_tensor * value) {
+        return inplace_pe ? ggml_relu_inplace(ctx, value) : ggml_relu(ctx, value);
+    };
+    auto pad_causal = [&](ggml_tensor * t) {
         if (!causal_pe) {
             return t;
         }
@@ -1006,31 +1114,44 @@ ggml_tensor * build_pre_encode(ggml_context *        ctx,
 
     // conv0 (standard 2D conv: 1 in, channels out, k=3 s=2)
     x = pad_causal(x);
-    x = ggml_conv_2d(ctx, pe.conv0_w, x,
-                     /*s0=*/2, /*s1=*/2,
-                     /*p0=*/pe_p_op, /*p1=*/pe_p_op,
-                     /*d0=*/1, /*d1=*/1);
-    x = add_conv_bias(ctx, x, pe.conv0_b);
+    if (policy.direct_conv0_in_pre_encode) {
+        x = ggml_conv_2d_direct(ctx, pe.conv0_w, x,
+                                /*s0=*/2, /*s1=*/2,
+                                /*p0=*/pe_p_op, /*p1=*/pe_p_op,
+                                /*d0=*/1, /*d1=*/1);
+    } else {
+        x = ggml_conv_2d(ctx, pe.conv0_w, x,
+                         /*s0=*/2, /*s1=*/2,
+                         /*p0=*/pe_p_op, /*p1=*/pe_p_op,
+                         /*d0=*/1, /*d1=*/1);
+    }
+    x = add_pre_encode_bias(x, pe.conv0_b);
     x = name_prefixed(x, name_prefix, "conv0");
-    x = ggml_relu(ctx, x);
+    x = pre_encode_relu(x);
     x = name_prefixed(x, name_prefix, "relu0");
     x = apply_valid_mask(x, valid_masks ? &valid_masks->mask_s1 : nullptr, "pre_encode.valid_mask.s1");
 
     // conv2 (depthwise: channels -> channels, groups=channels, k=3 s=2).
     // im2col path (conv_2d_dw_f32) when direct_dw_in_pre_encode is false.
-    x = pad_causal(x);
-    if (policy.direct_dw_in_pre_encode) {
-        x = ggml_conv_2d_dw_direct(ctx, dw_kernel_for_direct(ctx, pe.conv2_w), x,
-                                   /*s0=*/2, /*s1=*/2,
-                                   /*p0=*/pe_p_op, /*p1=*/pe_p_op,
-                                   /*d0=*/1, /*d1=*/1);
+    if (policy.direct_dw_in_pre_encode && causal_pe) {
+        x = causal_dw_2d_time_chunked(ctx, pe.conv2_w, x);
     } else {
-        x = conv_2d_dw_f32(ctx, pe.conv2_w, x,
-                           /*s0=*/2, /*s1=*/2,
-                           /*p0=*/pe_p_op, /*p1=*/pe_p_op,
-                           /*d0=*/1, /*d1=*/1);
+        x = pad_causal(x);
+        if (policy.direct_dw_in_pre_encode) {
+            x = ggml_conv_2d_dw_direct(ctx, dw_kernel_for_direct(ctx, pe.conv2_w), x,
+                                       /*s0=*/2, /*s1=*/2,
+                                       /*p0=*/pe_p_op, /*p1=*/pe_p_op,
+                                       /*d0=*/1, /*d1=*/1);
+        } else if (!causal_pe && policy.pre_encode_dw_time_chunk > 0) {
+            x = regular_dw_2d_time_chunked(ctx, pe.conv2_w, x, policy.pre_encode_dw_time_chunk);
+        } else {
+            x = conv_2d_dw_f32(ctx, pe.conv2_w, x,
+                               /*s0=*/2, /*s1=*/2,
+                               /*p0=*/pe_p_op, /*p1=*/pe_p_op,
+                               /*d0=*/1, /*d1=*/1);
+        }
     }
-    x = add_conv_bias(ctx, x, pe.conv2_b);
+    x = add_pre_encode_bias(x, pe.conv2_b);
     x = name_prefixed(x, name_prefix, "conv2");
 
     // conv3 (pointwise: channels -> channels, k=1 s=1 p=0)
@@ -1038,35 +1159,41 @@ ggml_tensor * build_pre_encode(ggml_context *        ctx,
                      /*s0=*/1, /*s1=*/1,
                      /*p0=*/0, /*p1=*/0,
                      /*d0=*/1, /*d1=*/1);
-    x = add_conv_bias(ctx, x, pe.conv3_b);
+    x = add_pre_encode_bias(x, pe.conv3_b);
     x = name_prefixed(x, name_prefix, "conv3");
-    x = ggml_relu(ctx, x);
+    x = pre_encode_relu(x);
     x = name_prefixed(x, name_prefix, "relu3");
     x = apply_valid_mask(x, valid_masks ? &valid_masks->mask_s2 : nullptr, "pre_encode.valid_mask.s2");
 
     // conv5 (depthwise) -> conv6 (pointwise) -> ReLU
-    x = pad_causal(x);
-    if (policy.direct_dw_in_pre_encode) {
-        x = ggml_conv_2d_dw_direct(ctx, dw_kernel_for_direct(ctx, pe.conv5_w), x,
-                                   /*s0=*/2, /*s1=*/2,
-                                   /*p0=*/pe_p_op, /*p1=*/pe_p_op,
-                                   /*d0=*/1, /*d1=*/1);
+    if (policy.direct_dw_in_pre_encode && causal_pe) {
+        x = causal_dw_2d_time_chunked(ctx, pe.conv5_w, x);
     } else {
-        x = conv_2d_dw_f32(ctx, pe.conv5_w, x,
-                           /*s0=*/2, /*s1=*/2,
-                           /*p0=*/pe_p_op, /*p1=*/pe_p_op,
-                           /*d0=*/1, /*d1=*/1);
+        x = pad_causal(x);
+        if (policy.direct_dw_in_pre_encode) {
+            x = ggml_conv_2d_dw_direct(ctx, dw_kernel_for_direct(ctx, pe.conv5_w), x,
+                                       /*s0=*/2, /*s1=*/2,
+                                       /*p0=*/pe_p_op, /*p1=*/pe_p_op,
+                                       /*d0=*/1, /*d1=*/1);
+        } else if (!causal_pe && policy.pre_encode_dw_time_chunk > 0) {
+            x = regular_dw_2d_time_chunked(ctx, pe.conv5_w, x, policy.pre_encode_dw_time_chunk);
+        } else {
+            x = conv_2d_dw_f32(ctx, pe.conv5_w, x,
+                               /*s0=*/2, /*s1=*/2,
+                               /*p0=*/pe_p_op, /*p1=*/pe_p_op,
+                               /*d0=*/1, /*d1=*/1);
+        }
     }
-    x = add_conv_bias(ctx, x, pe.conv5_b);
+    x = add_pre_encode_bias(x, pe.conv5_b);
     x = name_prefixed(x, name_prefix, "conv5");
 
     x = ggml_conv_2d(ctx, pe.conv6_w, x,
                      /*s0=*/1, /*s1=*/1,
                      /*p0=*/0, /*p1=*/0,
                      /*d0=*/1, /*d1=*/1);
-    x = add_conv_bias(ctx, x, pe.conv6_b);
+    x = add_pre_encode_bias(x, pe.conv6_b);
     x = name_prefixed(x, name_prefix, "conv6");
-    x = ggml_relu(ctx, x);
+    x = pre_encode_relu(x);
     x = name_prefixed(x, name_prefix, "relu6");
     x = apply_valid_mask(x, valid_masks ? &valid_masks->mask_s3 : nullptr, "pre_encode.valid_mask.s3");
 

@@ -156,6 +156,33 @@ PINNED_MODELS = (
         sha256="8cafef18ea3e4cad81da8ffc4e72b69d2eab2c159c2e68428e2e088accbfc7f8",
         size=3_097_662_432,
     ),
+    # The smallest published parakeet (FastConformer TDT+CTC, 114M params), in
+    # the transcribe.cpp layout its canonical C-ABI arch reads. Gates the
+    # shared src/runtime/conformer/ blocks - the S3 conformer memory chain from
+    # transcribe.cpp (docs/upstream/transcribe_cpp_triage.md) had no local model
+    # until this pin.
+    PinnedModel(
+        filename="parakeet-tdt_ctc-110m-Q8_0.gguf",
+        url=(
+            "https://huggingface.co/handy-computer/parakeet-tdt_ctc-110m-gguf/resolve/"
+            "766f172fe70eb66785e3371664f53762e0fbafaa/parakeet-tdt_ctc-110m-Q8_0.gguf"
+        ),
+        sha256="7dd44c74a331d788a4e5f8b16913b3feb29ced22cf5613aad0e0f6cd30516296",
+        size=135_373_280,
+    ),
+    # parakeet-unified-en-0.6b: the only parakeet on the buffered streaming
+    # path (chunked_limited_with_rc), which transcribe.cpp 63baefe6's
+    # tail-loss fix and its parakeet_buffered_stream_eos_smoke exercise. Q4_K_M,
+    # the smallest published quant - the test checks the tail, not accuracy.
+    PinnedModel(
+        filename="parakeet-unified-en-0.6b-Q4_K_M.gguf",
+        url=(
+            "https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf/resolve/"
+            "d5249700b2382bf5c5024c2421d101b8db54a629/parakeet-unified-en-0.6b-Q4_K_M.gguf"
+        ),
+        sha256="a8bf3de2b393bd14ead5a858c3748d5e3b07a20fdeabdd3b498fba4f463fa929",
+        size=477_274_496,
+    ),
 )
 
 
