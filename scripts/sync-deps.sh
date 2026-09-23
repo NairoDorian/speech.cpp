@@ -12,28 +12,47 @@
 # MULTI_AGENT_FUSION_PLAN_AND_TRACKER.md Operating Rules 6 and 7.
 #
 # Usage:
-#   scripts/sync-deps.sh            # read-only drift report (default)
-#   scripts/sync-deps.sh --fetch    # + fetch and fast-forward the sibling repos
+#   scripts/sync-deps.sh                # drift report (fetches remote REFS only)
+#   scripts/sync-deps.sh --fetch        # + fast-forward the sibling checkouts
+#   scripts/sync-deps.sh --verify-ggml  # + prove external/ggml == pin + patches
+#   scripts/sync-deps.sh --offline      # no network: report against cached refs
 #   scripts/sync-deps.sh --help
 #
-# This script NEVER modifies speech.cpp: it does not pull, merge, or re-vendor.
+# This script NEVER modifies speech.cpp's working tree: it does not pull,
+# merge, or re-vendor. It does `git fetch` remote-tracking refs by default,
+# because a report computed against stale refs is worse than none: on
+# 2026-09-23 it printed "0 behind" while upstream/main was 61 commits ahead.
 # It tells you what is stale and prints the exact command to fix each one.
 # Adopting upstream changes stays a human/agent decision with an audit trail.
+#
+# transcribe.cpp has no merge-base here, so its "what have we absorbed" line is
+# a hand-maintained watermark: the `Triage watermark:` line in
+# docs/upstream/transcribe_cpp_triage.md. Advance it only after every commit up
+# to it has a disposition row in that ledger.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SIBLINGS="$(cd "${REPO_ROOT}/.." && pwd)"
+TRIAGE_LEDGER="${REPO_ROOT}/docs/upstream/transcribe_cpp_triage.md"
 
 DO_FETCH=0
+DO_VERIFY_GGML=0
+OFFLINE=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --fetch) DO_FETCH=1; shift ;;
-        -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --verify-ggml) DO_VERIFY_GGML=1; shift ;;
+        --offline) OFFLINE=1; shift ;;
+        -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown flag: $1" >&2; exit 2 ;;
     esac
 done
+if [ "$OFFLINE" -eq 1 ] && { [ "$DO_FETCH" -eq 1 ] || [ "$DO_VERIFY_GGML" -eq 1 ]; }; then
+    echo "--offline cannot be combined with --fetch or --verify-ggml" >&2
+    exit 2
+fi
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 warn() { printf '  \033[33m! %s\033[0m\n' "$*"; }
@@ -44,8 +63,12 @@ STALE=0
 # ---------------------------------------------------------------- parent 1/2
 bold "[1/3] audio.cpp  (parent — git remote 'upstream')"
 if git -C "$REPO_ROOT" remote get-url upstream >/dev/null 2>&1; then
-    if [ "$DO_FETCH" -eq 1 ]; then
-        git -C "$REPO_ROOT" fetch --quiet upstream --prune || true
+    if [ "$OFFLINE" -eq 0 ]; then
+        # Refs only: safe on the WIP repo, and the only way the count is real.
+        git -C "$REPO_ROOT" fetch --quiet upstream --prune \
+            || warn "fetch of 'upstream' failed — the count below uses cached refs"
+    else
+        warn "offline: the count below uses cached refs and may be stale"
     fi
     BEHIND="$(git -C "$REPO_ROOT" rev-list --count HEAD..upstream/main 2>/dev/null || echo '?')"
     AHEAD="$(git -C "$REPO_ROOT" rev-list --count upstream/main..HEAD 2>/dev/null || echo '?')"
@@ -67,8 +90,11 @@ echo
 bold "[2/3] transcribe.cpp  (parent — sibling checkout, no remote here)"
 TC="${SIBLINGS}/transcribe.cpp"
 if [ -d "$TC/.git" ]; then
+    if [ "$OFFLINE" -eq 0 ]; then
+        git -C "$TC" fetch --quiet origin --prune \
+            || warn "fetch of transcribe.cpp origin failed — using cached refs"
+    fi
     if [ "$DO_FETCH" -eq 1 ]; then
-        git -C "$TC" fetch --quiet origin --prune || true
         git -C "$TC" merge --ff-only origin/main >/dev/null 2>&1 || warn "could not fast-forward (local work?)"
     fi
     TC_HEAD="$(git -C "$TC" log --oneline -1 2>/dev/null || echo '?')"
@@ -80,9 +106,32 @@ if [ -d "$TC/.git" ]; then
         STALE=1
         warn "sibling checkout is ${TC_BEHIND} behind its origin/main — re-run with --fetch"
     fi
-    echo "       -> transcribe.cpp drift is NOT tracked by git here. Triage its new"
-    echo "          commits against this tree by hand; they are as authoritative as"
-    echo "          audio.cpp's. Useful: git -C ../transcribe.cpp log --oneline -20"
+
+    # What WE have absorbed: the ledger's watermark, not the sibling's HEAD.
+    WATERMARK=""
+    if [ -f "$TRIAGE_LEDGER" ]; then
+        WATERMARK="$(sed -n 's/^Triage watermark:[[:space:]]*`\{0,1\}\([0-9a-f]\{7,40\}\).*/\1/p' "$TRIAGE_LEDGER" | head -1)"
+    fi
+    if [ -z "$WATERMARK" ]; then
+        STALE=1
+        warn "no 'Triage watermark:' line in ${TRIAGE_LEDGER#"$REPO_ROOT"/}"
+    elif ! git -C "$TC" cat-file -e "${WATERMARK}^{commit}" 2>/dev/null; then
+        STALE=1
+        warn "triage watermark ${WATERMARK} is not a commit in the sibling checkout"
+    else
+        UNTRIAGED="$(git -C "$TC" rev-list --count --no-merges "${WATERMARK}..origin/main" 2>/dev/null || echo '?')"
+        echo "  triaged up to : ${WATERMARK:0:8}  (docs/upstream/transcribe_cpp_triage.md)"
+        if [ "$UNTRIAGED" = "0" ]; then
+            ok "every transcribe.cpp commit up to origin/main has a disposition"
+        else
+            STALE=1
+            warn "${UNTRIAGED} transcribe.cpp commit(s) past the triage watermark"
+            git -C "$TC" log --no-merges --oneline --reverse "${WATERMARK}..origin/main" 2>/dev/null \
+                | head -25 | sed 's/^/       /'
+            echo "       -> audit each BY CONTENT against this tree, record a disposition row,"
+            echo "          then advance the watermark (same discipline as Rule 6)."
+        fi
+    fi
 else
     warn "sibling checkout not found at ${TC}"
 fi
@@ -111,7 +160,20 @@ if [ -f "$UPSTREAM_FILE" ]; then
         fi
     fi
 
-    if [ "$DO_FETCH" -eq 1 ] && [ -n "$GGML_REPO" ]; then
+    if [ "$DO_VERIFY_GGML" -eq 1 ]; then
+        # The invariant is the patch stack, not the tree. Merges from audio.cpp
+        # (which vendors its own hand-edited ggml) are how ~1,800 untracked lines
+        # got in before 2026-09-23; only a real pin + patches regeneration shows it.
+        if bash "${SCRIPT_DIR}/sync-ggml.sh" "$OUR_SHA" --check >&2; then
+            ok "external/ggml == pin + tracked patches (round-trip verified)"
+        else
+            STALE=1
+            warn "external/ggml does NOT equal pin + patches — an untracked delta exists"
+            echo "       -> capture it as patches/ggml/NNNN-*.patch before ANY sync (see UPSTREAM notes)"
+        fi
+    fi
+
+    if [ "$OFFLINE" -eq 0 ] && [ -n "$GGML_REPO" ]; then
         HEAD_SHA="$(git ls-remote "$GGML_REPO" HEAD 2>/dev/null | awk '{print $1}')"
         if [ -n "$HEAD_SHA" ]; then
             echo "  upstream HEAD : ${HEAD_SHA:0:12}"
