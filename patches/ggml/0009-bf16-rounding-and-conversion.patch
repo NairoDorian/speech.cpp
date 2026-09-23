@@ -1,0 +1,564 @@
+audio.cpp fork delta: a fused bf16 rounding unary op plus f16<->bf16 copy
+pipelines, captured 2026-09-23 (previously untracked in external/ggml - see
+0008's header for why that matters). Source commits: audio.cpp #393 (ff38f154,
+Breeze-TTS 2 weight packing + fused bf16 rounding) and #431 (8a9cb757, Breeze
+encoder chunked VRAM).
+
+  - GGML_UNARY_OP_ROUND_BF16 / ggml_round_bf16(ctx, a): rounds every element to
+    bf16 precision and keeps it in f32 - the same values as an f32 -> bf16 ->
+    f32 cast pair, as one node and without the bf16 intermediate. Appended at
+    the tail of ggml_unary_op so existing values do not move.
+      CPU   : ops.cpp dispatch + unary-ops.{h,cpp}.
+      CUDA  : unary.{cu,cuh}, contiguous and strided kernels, dispatched and
+              advertised from ggml-cuda.cu.
+      Vulkan: round_bf16.comp / round_bf16_strided.comp for f32/f16/bf16 input.
+  - Vulkan cpy/contig_cpy pipelines for f16 -> bf16 and bf16 -> f16 (the
+    backend only had f32 <-> bf16). The copy shaders' bf16 read is split into a
+    named temporary so the bf16 -> f16 variant compiles.
+
+Consumers: families that emulate bf16 checkpoints on f32 compute (Breeze-TTS 2,
+the Breeze ASR encoder). Retire when upstream ggml gains an equivalent op.
+
+Rebased onto ggml 0.24.0 (456172ec) on 2026-09-23: upstream registers its
+new fused unary-mul pipelines (CREATE_UNARY_MUL) where this patch registers
+the round_bf16 pipelines in ggml_vk_load_shaders; both are kept.
+
+diff --git a/include/ggml.h b/include/ggml.h
+index c1c479e..d05868d 100644
+--- a/include/ggml.h
++++ b/include/ggml.h
+@@ -636,6 +636,7 @@ extern "C" {
+         GGML_UNARY_OP_CEIL,
+         GGML_UNARY_OP_ROUND,
+         GGML_UNARY_OP_TRUNC,
++        GGML_UNARY_OP_ROUND_BF16,
+ 
+         GGML_UNARY_OP_COUNT,
+     };
+@@ -1284,6 +1285,12 @@ extern "C" {
+             struct ggml_context * ctx,
+             struct ggml_tensor  * a);
+ 
++    // Rounds each element to bf16 precision, stored as f32. Equivalent to a
++    // cast f32 -> bf16 -> f32 round trip, but fused into a single op.
++    GGML_API struct ggml_tensor * ggml_round_bf16(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * a);
++
+ 
+ 
+     // xIELU activation function
+diff --git a/src/ggml-cpu/ggml-cpu.c b/src/ggml-cpu/ggml-cpu.c
+index 6f34f6e..f22579d 100644
+--- a/src/ggml-cpu/ggml-cpu.c
++++ b/src/ggml-cpu/ggml-cpu.c
+@@ -2359,6 +2359,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
+                 case GGML_UNARY_OP_CEIL:
+                 case GGML_UNARY_OP_ROUND:
+                 case GGML_UNARY_OP_TRUNC:
++                case GGML_UNARY_OP_ROUND_BF16:
+                     {
+                         n_tasks = 1;
+                     } break;
+diff --git a/src/ggml-cpu/ops.cpp b/src/ggml-cpu/ops.cpp
+index 26e71ac..2d27842 100644
+--- a/src/ggml-cpu/ops.cpp
++++ b/src/ggml-cpu/ops.cpp
+@@ -10323,6 +10323,10 @@ void ggml_compute_forward_unary(
+             {
+                 ggml_compute_forward_trunc(params, dst);
+             } break;
++        case GGML_UNARY_OP_ROUND_BF16:
++            {
++                ggml_compute_forward_round_bf16(params, dst);
++            } break;
+         case GGML_UNARY_OP_XIELU:
+             {
+                 ggml_compute_forward_xielu(params, dst);
+diff --git a/src/ggml-cpu/unary-ops.cpp b/src/ggml-cpu/unary-ops.cpp
+index 1d83444..ab74cb6 100644
+--- a/src/ggml-cpu/unary-ops.cpp
++++ b/src/ggml-cpu/unary-ops.cpp
+@@ -97,6 +97,10 @@ static inline float op_trunc(float x) {
+     return truncf(x);
+ }
+ 
++static inline float op_round_bf16(float x) {
++    return bf16_to_f32(f32_to_bf16(x));
++}
++
+ template <float (*op)(float), typename src0_t, typename dst_t>
+ static inline void vec_unary_op(int64_t n, dst_t * y, const src0_t * x) {
+     constexpr auto src0_to_f32 = type_conversion_table<src0_t>::to_f32;
+@@ -322,6 +326,10 @@ void ggml_compute_forward_trunc(const ggml_compute_params * params, ggml_tensor
+     unary_op<op_trunc>(params, dst);
+ }
+ 
++void ggml_compute_forward_round_bf16(const ggml_compute_params * params, ggml_tensor * dst) {
++    unary_op<op_round_bf16>(params, dst);
++}
++
+ void ggml_compute_forward_xielu(const ggml_compute_params * params, ggml_tensor * dst) {
+     const float alpha_n = ggml_get_op_params_f32(dst, 1);
+     const float alpha_p = ggml_get_op_params_f32(dst, 2);
+diff --git a/src/ggml-cpu/unary-ops.h b/src/ggml-cpu/unary-ops.h
+index bcad5a3..c877ac7 100644
+--- a/src/ggml-cpu/unary-ops.h
++++ b/src/ggml-cpu/unary-ops.h
+@@ -28,6 +28,7 @@ void ggml_compute_forward_floor(const struct ggml_compute_params * params, struc
+ void ggml_compute_forward_ceil(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_round(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_trunc(const struct ggml_compute_params * params, struct ggml_tensor * dst);
++void ggml_compute_forward_round_bf16(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_xielu(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ 
+ #ifdef __cplusplus
+diff --git a/src/ggml-cuda/unary.cu b/src/ggml-cuda/unary.cu
+index d3e5948..bc13bec 100644
+--- a/src/ggml-cuda/unary.cu
++++ b/src/ggml-cuda/unary.cu
+@@ -114,6 +114,11 @@ static __device__ __forceinline__ float op_trunc(float x) {
+     return trunc(x);
+ }
+ 
++static __device__ __forceinline__ float op_round_bf16(float x) {
++    // Matches the f32 -> bf16 -> f32 cpy round trip.
++    return __bfloat162float(__float2bfloat16(x));
++}
++
+ template <float (*op)(float), typename T>
+ static __global__ void unary_op_kernel(const T * x, T * dst, const int k) {
+     ggml_cuda_pdl_lc();
+@@ -127,6 +132,75 @@ static __global__ void unary_op_kernel(const T * x, T * dst, const int k) {
+     dst[i] = (T)op((float)x[i]);
+ }
+ 
++// Variant for a src with contiguous rows but arbitrary row strides; dst must be contiguous.
++template <float (*op)(float), typename T>
++static __global__ void unary_op_kernel_strided(
++    const char * cx, T * dst, const int64_t k,
++    const int64_t ne0, const int64_t ne1, const int64_t ne2,
++    const int64_t nb01, const int64_t nb02, const int64_t nb03) {
++    const int64_t i = (int64_t)blockDim.x*blockIdx.x + threadIdx.x;
++
++    if (i >= k) {
++        return;
++    }
++
++    const int64_t i0 = i % ne0;
++    const int64_t i1 = (i / ne0) % ne1;
++    const int64_t i2 = (i / (ne0*ne1)) % ne2;
++    const int64_t i3 = i / (ne0*ne1*ne2);
++
++    const T * x = (const T *) (cx + i1*nb01 + i2*nb02 + i3*nb03);
++    dst[i] = (T)op((float)x[i0]);
++}
++
++// round-to-bf16 kernels: any of f32/f16/bf16 in, always f32 out.
++template <typename T>
++static __global__ void round_bf16_kernel(const T * x, float * dst, const int64_t k) {
++    const int64_t i = (int64_t)blockDim.x*blockIdx.x + threadIdx.x;
++
++    if (i >= k) {
++        return;
++    }
++
++    dst[i] = op_round_bf16((float)x[i]);
++}
++
++template <typename T>
++static __global__ void round_bf16_kernel_strided(
++    const char * cx, float * dst, const int64_t k,
++    const int64_t ne0, const int64_t ne1, const int64_t ne2,
++    const int64_t nb01, const int64_t nb02, const int64_t nb03) {
++    const int64_t i = (int64_t)blockDim.x*blockIdx.x + threadIdx.x;
++
++    if (i >= k) {
++        return;
++    }
++
++    const int64_t i0 = i % ne0;
++    const int64_t i1 = (i / ne0) % ne1;
++    const int64_t i2 = (i / (ne0*ne1)) % ne2;
++    const int64_t i3 = i / (ne0*ne1*ne2);
++
++    const T * x = (const T *) (cx + i1*nb01 + i2*nb02 + i3*nb03);
++    dst[i] = op_round_bf16((float)x[i0]);
++}
++
++template <typename T>
++static void round_bf16_cuda(const ggml_tensor * src0, float * dst, cudaStream_t stream) {
++    const int64_t k = ggml_nelements(src0);
++    const int64_t num_blocks = (k + CUDA_NEG_BLOCK_SIZE - 1) / CUDA_NEG_BLOCK_SIZE;
++    GGML_ASSERT(num_blocks < UINT_MAX);
++
++    if (ggml_is_contiguous(src0)) {
++        round_bf16_kernel<T><<<(unsigned int) num_blocks, CUDA_NEG_BLOCK_SIZE, 0, stream>>>(
++            (const T *) src0->data, dst, k);
++    } else {
++        round_bf16_kernel_strided<T><<<(unsigned int) num_blocks, CUDA_NEG_BLOCK_SIZE, 0, stream>>>(
++            (const char *) src0->data, dst, k, src0->ne[0], src0->ne[1], src0->ne[2],
++            src0->nb[1], src0->nb[2], src0->nb[3]);
++    }
++}
++
+ template <float (*op)(float), typename T>
+ static void unary_cuda(const T * x, T * dst, const int k, cudaStream_t stream) {
+     const int num_blocks = (k + CUDA_NEG_BLOCK_SIZE - 1) / CUDA_NEG_BLOCK_SIZE;
+@@ -250,6 +324,31 @@ void ggml_cuda_op_trunc(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+     ggml_cuda_op_unary<op_trunc>(ctx, dst);
+ }
+ 
++void ggml_cuda_op_round_bf16(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    const ggml_tensor * src0 = dst->src[0];
++
++    // ggml_round_bf16 always produces a contiguous f32 dst; src may be
++    // f32/f16/bf16 with contiguous rows.
++    GGML_ASSERT(dst->type == GGML_TYPE_F32);
++    GGML_ASSERT(ggml_is_contiguous(dst));
++    GGML_ASSERT(ggml_is_contiguous_rows(src0));
++
++    cudaStream_t stream = ctx.stream();
++    switch (src0->type) {
++        case GGML_TYPE_F32:
++            round_bf16_cuda<float>(src0, (float *) dst->data, stream);
++            break;
++        case GGML_TYPE_F16:
++            round_bf16_cuda<half>(src0, (float *) dst->data, stream);
++            break;
++        case GGML_TYPE_BF16:
++            round_bf16_cuda<nv_bfloat16>(src0, (float *) dst->data, stream);
++            break;
++        default:
++            GGML_ABORT("%s: unsupported src type %s", __func__, ggml_type_name(src0->type));
++    }
++}
++
+ void ggml_cuda_op_expm1(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+     ggml_cuda_op_unary<op_expm1>(ctx, dst);
+ }
+diff --git a/src/ggml-cuda/unary.cuh b/src/ggml-cuda/unary.cuh
+index 04f3af6..dee3139 100644
+--- a/src/ggml-cuda/unary.cuh
++++ b/src/ggml-cuda/unary.cuh
+@@ -75,6 +75,8 @@ void ggml_cuda_op_round(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+ 
+ void ggml_cuda_op_trunc(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+ 
++void ggml_cuda_op_round_bf16(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
++
+ void ggml_cuda_op_reglu(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+ 
+ void ggml_cuda_op_geglu(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+diff --git a/src/ggml-vulkan/ggml-vulkan.cpp b/src/ggml-vulkan/ggml-vulkan.cpp
+index 0dfa44d..9415a77 100644
+--- a/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -1024,8 +1024,8 @@ struct vk_device_struct {
+     vk_pipeline pipeline_roll_f32;
+     vk_pipeline pipeline_repeat_i32, pipeline_repeat_back_f32;
+     vk_pipeline pipeline_repeat_i16;
+-    vk_pipeline pipeline_cpy_f32_f32, pipeline_cpy_f32_f16, pipeline_cpy_f16_f16, pipeline_cpy_f16_f32, pipeline_cpy_f32_bf16, pipeline_cpy_bf16_f32, pipeline_cpy_f32_i32, pipeline_cpy_i32_f32;
+-    vk_pipeline pipeline_contig_cpy_f32_f32, pipeline_contig_cpy_f32_f16, pipeline_contig_cpy_f16_f16, pipeline_contig_cpy_f16_f32, pipeline_contig_cpy_f32_bf16, pipeline_contig_cpy_bf16_f32, pipeline_contig_cpy_f32_i32, pipeline_contig_cpy_i32_f32;
++    vk_pipeline pipeline_cpy_f32_f32, pipeline_cpy_f32_f16, pipeline_cpy_f16_f16, pipeline_cpy_f16_f32, pipeline_cpy_f32_bf16, pipeline_cpy_bf16_f32, pipeline_cpy_f16_bf16, pipeline_cpy_bf16_f16, pipeline_cpy_f32_i32, pipeline_cpy_i32_f32;
++    vk_pipeline pipeline_contig_cpy_f32_f32, pipeline_contig_cpy_f32_f16, pipeline_contig_cpy_f16_f16, pipeline_contig_cpy_f16_f32, pipeline_contig_cpy_f32_bf16, pipeline_contig_cpy_bf16_f32, pipeline_contig_cpy_f16_bf16, pipeline_contig_cpy_bf16_f16, pipeline_contig_cpy_f32_i32, pipeline_contig_cpy_i32_f32;
+     vk_pipeline pipeline_cpy_f32_quant[GGML_TYPE_COUNT];
+     vk_pipeline pipeline_cpy_quant_f32[GGML_TYPE_COUNT];
+     vk_pipeline pipeline_cpy_transpose_16, pipeline_cpy_transpose_32;
+@@ -1073,6 +1073,8 @@ struct vk_device_struct {
+     vk_pipeline pipeline_softplus[2];
+     vk_pipeline pipeline_step[2];
+     vk_pipeline pipeline_round[2];
++    vk_pipeline pipeline_round_bf16[3];
++    vk_pipeline pipeline_round_bf16_strided[3];
+     vk_pipeline pipeline_ceil[2];
+     vk_pipeline pipeline_floor[2];
+     vk_pipeline pipeline_trunc[2];
+@@ -5826,6 +5828,8 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+     ggml_vk_create_pipeline(device, device->pipeline_cpy_f16_f32, "cpy_f16_f32", cpy_f16_f32_len, cpy_f16_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
+     ggml_vk_create_pipeline(device, device->pipeline_cpy_f32_bf16,"cpy_f32_bf16",cpy_f32_bf16_len,cpy_f32_bf16_data,"main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
+     ggml_vk_create_pipeline(device, device->pipeline_cpy_bf16_f32,"cpy_bf16_f32",cpy_bf16_f32_len,cpy_bf16_f32_data,"main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
++    ggml_vk_create_pipeline(device, device->pipeline_cpy_f16_bf16,"cpy_f16_bf16",cpy_f16_bf16_len,cpy_f16_bf16_data,"main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
++    ggml_vk_create_pipeline(device, device->pipeline_cpy_bf16_f16,"cpy_bf16_f16",cpy_bf16_f16_len,cpy_bf16_f16_data,"main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
+     ggml_vk_create_pipeline(device, device->pipeline_cpy_i32_f32, "cpy_i32_f32", cpy_i32_f32_len, cpy_i32_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
+     ggml_vk_create_pipeline(device, device->pipeline_cpy_f32_i32, "cpy_f32_i32", cpy_f32_i32_len, cpy_f32_i32_data, "main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
+ 
+@@ -5835,6 +5839,8 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+     ggml_vk_create_pipeline(device, device->pipeline_contig_cpy_f16_f32, "contig_cpy_f16_f32", contig_cpy_f16_f32_len, contig_cpy_f16_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
+     ggml_vk_create_pipeline(device, device->pipeline_contig_cpy_f32_bf16,"contig_cpy_f32_bf16",contig_cpy_f32_bf16_len,contig_cpy_f32_bf16_data,"main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
+     ggml_vk_create_pipeline(device, device->pipeline_contig_cpy_bf16_f32,"contig_cpy_bf16_f32",contig_cpy_bf16_f32_len,contig_cpy_bf16_f32_data,"main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
++    ggml_vk_create_pipeline(device, device->pipeline_contig_cpy_f16_bf16,"contig_cpy_f16_bf16",contig_cpy_f16_bf16_len,contig_cpy_f16_bf16_data,"main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
++    ggml_vk_create_pipeline(device, device->pipeline_contig_cpy_bf16_f16,"contig_cpy_bf16_f16",contig_cpy_bf16_f16_len,contig_cpy_bf16_f16_data,"main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
+     ggml_vk_create_pipeline(device, device->pipeline_contig_cpy_i32_f32, "contig_cpy_i32_f32", contig_cpy_i32_f32_len, contig_cpy_i32_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
+     ggml_vk_create_pipeline(device, device->pipeline_contig_cpy_f32_i32, "contig_cpy_f32_i32", contig_cpy_f32_i32_len, contig_cpy_f32_i32_data, "main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
+ 
+@@ -6004,6 +6010,15 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+     CREATE_UNARY_MUL(softplus, 3)
+ #undef CREATE_UNARY_MUL
+ 
++    // round-to-bf16: f32/f16/bf16 in, always f32 out (index by src type).
++    ggml_vk_create_pipeline(device, device->pipeline_round_bf16[0], "round_bf16_f32", round_bf16_f32_len, round_bf16_f32_data, "main", 2, sizeof(vk_op_push_constants), {512, 1, 1}, {}, 1);
++    ggml_vk_create_pipeline(device, device->pipeline_round_bf16[1], "round_bf16_f16", round_bf16_f16_len, round_bf16_f16_data, "main", 2, sizeof(vk_op_push_constants), {512, 1, 1}, {}, 1);
++    ggml_vk_create_pipeline(device, device->pipeline_round_bf16[2], "round_bf16_bf16", round_bf16_bf16_len, round_bf16_bf16_data, "main", 2, sizeof(vk_op_push_constants), {512, 1, 1}, {}, 1);
++    // strided variant for non-contiguous (e.g. row-strided view) inputs.
++    ggml_vk_create_pipeline(device, device->pipeline_round_bf16_strided[0], "round_bf16_strided_f32", round_bf16_strided_f32_len, round_bf16_strided_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
++    ggml_vk_create_pipeline(device, device->pipeline_round_bf16_strided[1], "round_bf16_strided_f16", round_bf16_strided_f16_len, round_bf16_strided_f16_data, "main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
++    ggml_vk_create_pipeline(device, device->pipeline_round_bf16_strided[2], "round_bf16_strided_bf16", round_bf16_strided_bf16_len, round_bf16_strided_bf16_data, "main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
++
+     ggml_vk_create_pipeline(device, device->pipeline_add1_f16_f16, "add1_f16_f16", add1_f16_f16_len, add1_f16_f16_data, "main", 3, sizeof(vk_op_binary_push_constants), {512, 1, 1}, {}, 1);
+     ggml_vk_create_pipeline(device, device->pipeline_add1_f16_f32, "add1_f16_f32", add1_f16_f32_len, add1_f16_f32_data, "main", 3, sizeof(vk_op_binary_push_constants), {512, 1, 1}, {}, 1);
+     ggml_vk_create_pipeline(device, device->pipeline_add1_f32_f32, "add1_f32_f32", add1_f32_f32_len, add1_f32_f32_data, "main", 3, sizeof(vk_op_binary_push_constants), {512, 1, 1}, {}, 1);
+@@ -9274,6 +9289,20 @@ static vk_pipeline ggml_vk_get_cpy_pipeline(ggml_backend_vk_context * ctx, const
+             return ctx->device->pipeline_cpy_bf16_f32;
+         }
+     }
++    if (src->type == GGML_TYPE_F16 && to == GGML_TYPE_BF16) {
++        if (contig) {
++            return ctx->device->pipeline_contig_cpy_f16_bf16;
++        } else {
++            return ctx->device->pipeline_cpy_f16_bf16;
++        }
++    }
++    if (src->type == GGML_TYPE_BF16 && to == GGML_TYPE_F16) {
++        if (contig) {
++            return ctx->device->pipeline_contig_cpy_bf16_f16;
++        } else {
++            return ctx->device->pipeline_cpy_bf16_f16;
++        }
++    }
+     if (src->type == GGML_TYPE_F32 && to == GGML_TYPE_I32) {
+         if (contig) {
+             return ctx->device->pipeline_contig_cpy_f32_i32;
+@@ -11821,6 +11850,19 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const
+         }
+         return nullptr;
+     case GGML_OP_UNARY:
++        // ROUND_BF16 widens to f32: src may be f32/f16/bf16 while dst is f32.
++        if (ggml_get_unary_op(dst) == GGML_UNARY_OP_ROUND_BF16) {
++            if (dst->type != GGML_TYPE_F32) {
++                return nullptr;
++            }
++            const bool strided = !ggml_is_contiguous(src0) || !ggml_is_contiguous(dst);
++            switch (src0->type) {
++                case GGML_TYPE_F32:  return strided ? ctx->device->pipeline_round_bf16_strided[0] : ctx->device->pipeline_round_bf16[0];
++                case GGML_TYPE_F16:  return strided ? ctx->device->pipeline_round_bf16_strided[1] : ctx->device->pipeline_round_bf16[1];
++                case GGML_TYPE_BF16: return strided ? ctx->device->pipeline_round_bf16_strided[2] : ctx->device->pipeline_round_bf16[2];
++                default:             return nullptr;
++            }
++        }
+         if ((src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16) ||
+             (dst->type != GGML_TYPE_F32 && dst->type != GGML_TYPE_F16) ||
+             (src0->type != dst->type)) {
+@@ -14028,6 +14070,11 @@ static void ggml_vk_unary(ggml_backend_vk_context * ctx, vk_context& subctx, con
+     ggml_vk_op_f32(ctx, subctx, src0, nullptr, nullptr, nullptr, dst, GGML_OP_UNARY, vk_op_unary_push_constants_init(src0, dst));
+ }
+ 
++static void ggml_vk_round_bf16_strided(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst) {
++    vk_op_unary_push_constants p = vk_op_unary_push_constants_init(src0, dst);
++    ggml_vk_op_f32(ctx, subctx, src0, nullptr, nullptr, nullptr, dst, GGML_OP_UNARY, std::move(p));
++}
++
+ static void ggml_vk_xielu(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst) {
+     float * op_params = (float *)dst->op_params;
+     vk_op_unary_push_constants p = vk_op_unary_push_constants_init(src0, dst);
+@@ -16312,6 +16359,13 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
+         case GGML_UNARY_OP_SGN:
+             ggml_vk_unary(ctx, compute_ctx, src0, node);
+             break;
++        case GGML_UNARY_OP_ROUND_BF16:
++            if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(node)) {
++                ggml_vk_round_bf16_strided(ctx, compute_ctx, src0, node);
++                break;
++            }
++            ggml_vk_unary(ctx, compute_ctx, src0, node);
++            break;
+         case GGML_UNARY_OP_XIELU:
+             ggml_vk_xielu(ctx, compute_ctx, src0, node);
+             break;
+@@ -19197,6 +19251,9 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
+                     return (op->src[0]->type == GGML_TYPE_F32 || op->src[0]->type == GGML_TYPE_F16) &&
+                            (op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16) &&
+                            (op->src[0]->type == op->type);
++                case GGML_UNARY_OP_ROUND_BF16:
++                    return (op->src[0]->type == GGML_TYPE_F32 || op->src[0]->type == GGML_TYPE_F16 || op->src[0]->type == GGML_TYPE_BF16) &&
++                           (op->type == GGML_TYPE_F32);
+                 default:
+                     return false;
+             }
+diff --git a/src/ggml-vulkan/vulkan-shaders/contig_copy.comp b/src/ggml-vulkan/vulkan-shaders/contig_copy.comp
+index b3b182f..9d2352b 100644
+--- a/src/ggml-vulkan/vulkan-shaders/contig_copy.comp
++++ b/src/ggml-vulkan/vulkan-shaders/contig_copy.comp
+@@ -20,7 +20,8 @@ void main() {
+         [[unroll]] for (uint i = 0; i < num_iter; ++i) {
+ 
+ #if defined(DATA_A_BF16)
+-            data_d[get_doffset() + idx] = D_TYPE(bf16_to_fp32(uint32_t(data_a[get_aoffset() + idx])));
++            float f = bf16_to_fp32(uint32_t(data_a[get_aoffset() + idx]));
++            data_d[get_doffset() + idx] = D_TYPE(f);
+ #elif defined(DATA_D_BF16)
+             float f = float(data_a[get_aoffset() + idx]);
+             data_d[get_doffset() + idx] = D_TYPE(fp32_to_bf16(f));
+@@ -38,7 +39,8 @@ void main() {
+             }
+ 
+ #if defined(DATA_A_BF16)
+-            data_d[get_doffset() + idx] = D_TYPE(bf16_to_fp32(uint32_t(data_a[get_aoffset() + idx])));
++            float f = bf16_to_fp32(uint32_t(data_a[get_aoffset() + idx]));
++            data_d[get_doffset() + idx] = D_TYPE(f);
+ #elif defined(DATA_D_BF16)
+             float f = float(data_a[get_aoffset() + idx]);
+             data_d[get_doffset() + idx] = D_TYPE(fp32_to_bf16(f));
+diff --git a/src/ggml-vulkan/vulkan-shaders/copy.comp b/src/ggml-vulkan/vulkan-shaders/copy.comp
+index d55e132..2a6b203 100644
+--- a/src/ggml-vulkan/vulkan-shaders/copy.comp
++++ b/src/ggml-vulkan/vulkan-shaders/copy.comp
+@@ -13,7 +13,8 @@ void main() {
+     }
+ 
+ #if defined(DATA_A_BF16)
+-    data_d[get_doffset() + dst_idx(idx)] = D_TYPE(bf16_to_fp32(uint32_t(data_a[get_aoffset() + src0_idx(idx)])));
++    float f = bf16_to_fp32(uint32_t(data_a[get_aoffset() + src0_idx(idx)]));
++    data_d[get_doffset() + dst_idx(idx)] = D_TYPE(f);
+ #elif defined(DATA_D_BF16)
+     float f = float(data_a[get_aoffset() + src0_idx(idx)]);
+     data_d[get_doffset() + dst_idx(idx)] = D_TYPE(fp32_to_bf16(f));
+diff --git a/src/ggml-vulkan/vulkan-shaders/round_bf16.comp b/src/ggml-vulkan/vulkan-shaders/round_bf16.comp
+new file mode 100644
+index 0000000..b92937b
+--- /dev/null
++++ b/src/ggml-vulkan/vulkan-shaders/round_bf16.comp
+@@ -0,0 +1,26 @@
++#version 450
++
++#include "generic_head.glsl"
++#include "types.glsl"
++
++layout(local_size_x = 512, local_size_y = 1, local_size_z = 1) in;
++
++layout (binding = 0) readonly buffer X {A_TYPE data_a[];};
++layout (binding = 1) writeonly buffer D {D_TYPE data_d[];};
++
++void main() {
++    const uint i = gl_GlobalInvocationID.z * 262144 + gl_GlobalInvocationID.y * 512 + gl_GlobalInvocationID.x;
++
++    if (i >= p.KX) {
++        return;
++    }
++
++#if defined(DATA_A_BF16)
++    const float x = bf16_to_fp32(uint32_t(data_a[i]));
++#else
++    const float x = float(data_a[i]);
++#endif
++    // Round to bf16 precision and widen back to f32, matching the
++    // f32 -> bf16 -> f32 cast round trip.
++    data_d[i] = D_TYPE(bf16_to_fp32(fp32_to_bf16(x)));
++}
+diff --git a/src/ggml-vulkan/vulkan-shaders/round_bf16_strided.comp b/src/ggml-vulkan/vulkan-shaders/round_bf16_strided.comp
+new file mode 100644
+index 0000000..d5eaa50
+--- /dev/null
++++ b/src/ggml-vulkan/vulkan-shaders/round_bf16_strided.comp
+@@ -0,0 +1,23 @@
++#version 450
++
++#include "types.glsl"
++#include "generic_unary_head.glsl"
++
++layout(local_size_x = 512, local_size_y = 1, local_size_z = 1) in;
++
++void main() {
++    const uint idx = get_idx();
++
++    if (idx >= p.ne) {
++        return;
++    }
++
++#if defined(DATA_A_BF16)
++    const float x = bf16_to_fp32(uint32_t(data_a[get_aoffset() + src0_idx(idx)]));
++#else
++    const float x = float(data_a[get_aoffset() + src0_idx(idx)]);
++#endif
++    // Round to bf16 precision and widen back to f32, matching the
++    // f32 -> bf16 -> f32 cast round trip.
++    data_d[get_doffset() + dst_idx(idx)] = D_TYPE(bf16_to_fp32(fp32_to_bf16(x)));
++}
+diff --git a/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp b/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+index 30fe088..08feee4 100644
+--- a/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
++++ b/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+@@ -863,6 +863,8 @@ void process_shaders() {
+     string_to_spv("cpy_f16_f32", "copy.comp", {{"A_TYPE", "float16_t"}, {"D_TYPE", "float"}, {"OPTIMIZATION_ERROR_WORKAROUND", "1"}});
+     string_to_spv("cpy_f32_bf16","copy.comp", {{"A_TYPE", "float"}, {"D_TYPE", "uint16_t"}, {"DATA_D_BF16", "1"}});
+     string_to_spv("cpy_bf16_f32","copy.comp", {{"A_TYPE", "uint16_t"}, {"D_TYPE", "float"}, {"DATA_A_BF16", "1"}});
++    string_to_spv("cpy_f16_bf16","copy.comp", {{"A_TYPE", "float16_t"}, {"D_TYPE", "uint16_t"}, {"DATA_D_BF16", "1"}});
++    string_to_spv("cpy_bf16_f16","copy.comp", {{"A_TYPE", "uint16_t"}, {"D_TYPE", "float16_t"}, {"DATA_A_BF16", "1"}});
+     string_to_spv("contig_cpy_f32_f32", "contig_copy.comp", {{"A_TYPE", "float"}, {"D_TYPE", "float"}});
+     string_to_spv("contig_cpy_f32_i32", "contig_copy.comp", {{"A_TYPE", "float"}, {"D_TYPE", "int"}});
+     string_to_spv("contig_cpy_i32_f32", "contig_copy.comp", {{"A_TYPE", "int"}, {"D_TYPE", "float"}});
+@@ -871,6 +873,8 @@ void process_shaders() {
+     string_to_spv("contig_cpy_f16_f32", "contig_copy.comp", {{"A_TYPE", "float16_t"}, {"D_TYPE", "float"}, {"OPTIMIZATION_ERROR_WORKAROUND", "1"}});
+     string_to_spv("contig_cpy_f32_bf16","contig_copy.comp",{{"A_TYPE", "float"}, {"D_TYPE", "uint16_t"}, {"DATA_D_BF16", "1"}});
+     string_to_spv("contig_cpy_bf16_f32","contig_copy.comp",{{"A_TYPE", "uint16_t"}, {"D_TYPE", "float"}, {"DATA_A_BF16", "1"}});
++    string_to_spv("contig_cpy_f16_bf16","contig_copy.comp",{{"A_TYPE", "float16_t"}, {"D_TYPE", "uint16_t"}, {"DATA_D_BF16", "1"}});
++    string_to_spv("contig_cpy_bf16_f16","contig_copy.comp",{{"A_TYPE", "uint16_t"}, {"D_TYPE", "float16_t"}, {"DATA_A_BF16", "1"}});
+     string_to_spv("cpy_f32_i32", "copy.comp", {{"A_TYPE", "float"}, {"D_TYPE", "int"}});
+     string_to_spv("cpy_i32_f32", "copy.comp", {{"A_TYPE", "int"}, {"D_TYPE", "float"}});
+ 
+@@ -1026,6 +1030,12 @@ void process_shaders() {
+     string_to_spv("step_f32",       "unary.comp",       {{"A_TYPE", "float"},       {"D_TYPE", "float"},     {"OP", "op_step"}});
+     string_to_spv("round_f16",      "unary.comp",       {{"A_TYPE", "float16_t"},   {"D_TYPE", "float16_t"}, {"OP", "op_round"}});
+     string_to_spv("round_f32",      "unary.comp",       {{"A_TYPE", "float"},       {"D_TYPE", "float"},     {"OP", "op_round"}});
++    string_to_spv("round_bf16_f32",  "round_bf16.comp", {{"A_TYPE", "float"},       {"D_TYPE", "float"}});
++    string_to_spv("round_bf16_f16",  "round_bf16.comp", {{"A_TYPE", "float16_t"},   {"D_TYPE", "float"}});
++    string_to_spv("round_bf16_bf16", "round_bf16.comp", {{"A_TYPE", "uint16_t"},    {"D_TYPE", "float"}, {"DATA_A_BF16", "1"}});
++    string_to_spv("round_bf16_strided_f32",  "round_bf16_strided.comp", {{"A_TYPE", "float"},     {"D_TYPE", "float"}});
++    string_to_spv("round_bf16_strided_f16",  "round_bf16_strided.comp", {{"A_TYPE", "float16_t"}, {"D_TYPE", "float"}});
++    string_to_spv("round_bf16_strided_bf16", "round_bf16_strided.comp", {{"A_TYPE", "uint16_t"},  {"D_TYPE", "float"}, {"DATA_A_BF16", "1"}});
+     string_to_spv("ceil_f16",       "unary.comp",       {{"A_TYPE", "float16_t"},   {"D_TYPE", "float16_t"}, {"OP", "op_ceil"}});
+     string_to_spv("ceil_f32",       "unary.comp",       {{"A_TYPE", "float"},       {"D_TYPE", "float"},     {"OP", "op_ceil"}});
+     string_to_spv("floor_f16",      "unary.comp",       {{"A_TYPE", "float16_t"},   {"D_TYPE", "float16_t"}, {"OP", "op_floor"}});
+diff --git a/src/ggml.c b/src/ggml.c
+index 1fabffb..3857cec 100644
+--- a/src/ggml.c
++++ b/src/ggml.c
+@@ -1251,9 +1251,10 @@ static const char * GGML_UNARY_OP_NAME[GGML_UNARY_OP_COUNT] = {
+     "CEIL",
+     "ROUND",
+     "TRUNC",
++    "ROUND_BF16",
+ };
+ 
+-static_assert(GGML_UNARY_OP_COUNT == 22, "GGML_UNARY_OP_COUNT != 22");
++static_assert(GGML_UNARY_OP_COUNT == 23, "GGML_UNARY_OP_COUNT != 23");
+ 
+ static const char * GGML_GLU_OP_NAME[GGML_GLU_OP_COUNT] = {
+     "REGLU",
+@@ -2994,6 +2995,26 @@ struct ggml_tensor * ggml_trunc_inplace(
+     return ggml_unary_inplace(ctx, a, GGML_UNARY_OP_TRUNC);
+ }
+ 
++//ggml_round_bf16
++
++struct ggml_tensor * ggml_round_bf16(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * a) {
++    GGML_ASSERT(a->type == GGML_TYPE_F32 || a->type == GGML_TYPE_F16 || a->type == GGML_TYPE_BF16);
++    GGML_ASSERT(ggml_is_contiguous_rows(a));
++
++    // Unlike ggml_unary, the result is always f32: bf16/f16 inputs are widened
++    // while rounding, matching an f32 -> bf16 -> f32 cast round trip.
++    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, GGML_MAX_DIMS, a->ne);
++
++    ggml_set_op_params_i32(result, 0, (int32_t) GGML_UNARY_OP_ROUND_BF16);
++
++    result->op     = GGML_OP_UNARY;
++    result->src[0] = a;
++
++    return result;
++}
++
+ struct ggml_tensor * ggml_glu(
+         struct ggml_context * ctx,
+         struct ggml_tensor  * a,

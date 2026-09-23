@@ -1,5 +1,5 @@
 repo: https://github.com/ggml-org/ggml.git
-sha:  36da57138425487184aa1da2eee2cde155909c6f
+sha:  456172ec733a135778adcd32d00e576a58232e45
 patches:
   patches/ggml/0001-fix-threadpool-oversubscription.patch
   patches/ggml/0002-converge-audio-cpp-fork-apis.patch
@@ -8,6 +8,10 @@ patches:
   patches/ggml/0005-cpu-concat-fastpath.patch
   patches/ggml/0006-conv-im2col-in-weight-type.patch
   patches/ggml/0007-cuda-trim-pools-and-clear-graph.patch
+  patches/ggml/0008-cuda-stream-priority-and-backend-fixes.patch
+  patches/ggml/0009-bf16-rounding-and-conversion.patch
+  patches/ggml/0010-vibeasr-int8-cpu-pipeline.patch
+  patches/ggml/0011-vulkan-large-dispatch-fixes.patch
 
 This directory is generated from the upstream ggml tree at the SHA above, minus
 .github/ and .pi/, with the listed downstream patches applied in order. Do not
@@ -15,8 +19,47 @@ edit it by hand. Run scripts/sync-ggml.sh <ref> from the repo root to reproduce
 or upgrade it; the script rewrites this file.
 
 PIN HISTORY:
+  36da5713 (ggml 0.22.0) -> 456172ec (ggml 0.24.0), 2026-09-23.
   8c63e709 (ggml 0.20.2) -> 36da5713 (ggml 0.22.0), 2026-08-26.
-Bumped to match parent transcribe.cpp, which moved to 36da5713 in its commit
+
+2026-09-23 -- FOUR UNTRACKED FORK DELTAS CAPTURED, THEN THE 0.24.0 BUMP.
+Before bumping, a pin + patches round-trip at 36da5713 showed ~1,800 lines in
+26 files that were in this tree but in NO patch: audio.cpp merges after the
+0.22.0 bump (VibeASR #447, Breeze-TTS #393/#431, CUDA #320/#321/#340/#346,
+Vulkan #508/#542) had edited external/ggml directly. That is the same failure
+mode as 0004 below, repeated at scale by merges rather than by hand edits. They
+were split by hunk into 0008-0011 (provenance in each header) and round-trip
+verified at 36da5713 BEFORE the bump: `git diff --ignore-cr-at-eol` showed only
+the deliberately dropped dead declaration (see 0008). RULE: after every
+audio.cpp merge that touches external/ggml, re-run
+`scripts/sync-ggml.sh <current full sha> --force` and treat any non-EOL diff as
+an untracked delta to capture -- audio.cpp vendors its OWN hand-edited ggml
+(0.12.0 fork), so its ggml commits can only reach us as untracked edits.
+
+What the 0.24.0 bump cost (191 upstream commits; rebased with git's 3-way merge
+on LF-normalized trees, then verified vendored == rebased stack):
+  0002  adjacency conflict in include/ggml.h (upstream added
+        ggml_flash_attn_ext_set_n_kv_max at the insertion point); both kept.
+  0003  src/ggml-cuda/CMakeLists.txt: upstream replaced the fattn-vec instance
+        block with ggml_cuda_fattn_vec_instances() and dropped the unused
+        GGML_CUDA_PEER_MAX_BATCH_SIZE define; the SageAttention2 gate moved
+        around the new call.
+  0007  REPLACED by parent transcribe.cpp's implementation (its
+        patches/ggml/0002), which is at the same pin. Ours had added
+        ggml_cuda_pool::clear() as a default no-op and never overridden it, so
+        ggml_backend_cuda_trim_pools freed nothing on either pool class.
+  0009  adjacency conflict in ggml_vk_load_shaders (upstream's new fused
+        unary-mul pipelines); both kept.
+  0010  no type/op id collision: 0.24.0 appended only GGML_GLU_OP_SWIGLU_CLAMP,
+        so I8_S/I2_S stay 43/44 and GGML_OP_COUNT stays 109.
+  0011  3 of 4 hunks RETIRED: upstream now carries audio.cpp #508's FILL
+        dispatch fix verbatim. Only the COL2IM_1D clamp remains.
+  0001, 0004-0006, 0008  applied unchanged.
+Verified: build-cpu-core 108/108 with every ASR gate at its exact baseline
+(whisper arch + engine 3/69, moonshine 1/69, moonshine_streaming 3/69 with
+divergence 0).
+
+0.22.0 bump: bumped to match parent transcribe.cpp, which moved to 36da5713 in its commit
 2102bca. speech.cpp is equally a child of audio.cpp and transcribe.cpp, so a
 dependency floor moving in EITHER parent moves ours (AGENTS.md "Dual
 Parentage"; tracker Operating Rule 7). Our pin must stay at or above

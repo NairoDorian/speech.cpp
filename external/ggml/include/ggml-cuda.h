@@ -23,24 +23,12 @@ extern "C" {
 GGML_BACKEND_API ggml_backend_t ggml_backend_cuda_init(int device);
 
 GGML_BACKEND_API bool ggml_backend_is_cuda(ggml_backend_t backend);
-GGML_BACKEND_API void ggml_backend_cuda_trim_pools(ggml_backend_t backend);
-// Sets the CUDA scheduling priority used for this backend instance's lazily
-// created streams (lower = higher priority, 0 = default). Scoped to the
-// instance; already-created streams keep their priority.
-GGML_BACKEND_API void ggml_backend_cuda_set_stream_priority(ggml_backend_t backend, int priority);
-// Returns the backend's current compute CUDA stream (cudaStream_t) so host
-// code can enqueue its own kernels/copies ordered with graph computes.
-GGML_BACKEND_API void * ggml_backend_cuda_get_stream(ggml_backend_t backend);
-GGML_BACKEND_API void ggml_backend_cuda_clear_graph(ggml_backend_t backend, const struct ggml_cgraph * graph);
 
 // device buffer
 GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_cuda_buffer_type(int device);
 
 // conduct allreduce operation between devices
 GGML_BACKEND_API bool ggml_backend_cuda_allreduce_tensor(ggml_backend_t * backends, struct ggml_tensor ** tensors, size_t n_backends);
-
-// split tensor buffer that splits matrices by rows across multiple devices
-GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_cuda_split_buffer_type(int main_device, const float * tensor_split);
 
 // pinned host buffer for use with the CPU backend for faster copies between CPU and GPU
 GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_cuda_host_buffer_type(void);
@@ -51,6 +39,26 @@ GGML_BACKEND_API void ggml_backend_cuda_get_device_memory(int device, size_t * f
 
 GGML_BACKEND_API bool ggml_backend_cuda_register_host_buffer(void * buffer, size_t size);
 GGML_BACKEND_API void ggml_backend_cuda_unregister_host_buffer(void * buffer);
+
+// Return every device/stream pool of this context's cached, idle device memory
+// to the driver. Cheap no-op when nothing is cached. Safe to call mid-process on
+// an idle backend; callers must not have work in flight on it.
+GGML_BACKEND_API void ggml_backend_cuda_trim_pools(ggml_backend_t backend);
+
+// Drop this context's cached compiled-graph state for `graph` (no-op unless the
+// backend was built with CUDA/HIP graphs enabled). Call once the graph is done
+// with, to stop a rebuilt same-shape graph from inheriting the device memory the
+// cached instance holds.
+GGML_BACKEND_API void ggml_backend_cuda_clear_graph(ggml_backend_t backend, const struct ggml_cgraph * graph);
+
+// Sets the CUDA scheduling priority used for this backend instance's lazily
+// created streams (lower = higher priority, 0 = default). Scoped to the
+// instance; already-created streams keep their priority.
+GGML_BACKEND_API void ggml_backend_cuda_set_stream_priority(ggml_backend_t backend, int priority);
+
+// Returns the backend's current compute CUDA stream (cudaStream_t) so host
+// code can enqueue its own kernels/copies ordered with graph computes.
+GGML_BACKEND_API void * ggml_backend_cuda_get_stream(ggml_backend_t backend);
 
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_cuda_reg(void);
 

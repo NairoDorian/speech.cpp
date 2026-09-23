@@ -1,8 +1,17 @@
+
+
+Rebased onto ggml 0.24.0 (456172ec) on 2026-09-23: upstream replaced the
+fattn-vec template-instance block in src/ggml-cuda/CMakeLists.txt with
+ggml_cuda_fattn_vec_instances() and dropped the (unused)
+GGML_CUDA_PEER_MAX_BATCH_SIZE definition. The SageAttention2 sm_89 arch gate
+now sits before upstream's new call and its PRIVATE compile definition after
+ggml_add_backend_library; the peer-batch line follows upstream out.
+
 diff --git a/src/ggml-backend-meta.cpp b/src/ggml-backend-meta.cpp
-index defe4b6..7c59428 100644
+index 3ec40fb..4af4c2e 100644
 --- a/src/ggml-backend-meta.cpp
 +++ b/src/ggml-backend-meta.cpp
-@@ -872,12 +872,16 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
+@@ -918,12 +918,16 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
                  split_state = handle_per_row(src_ss);
              } break;
              case GGML_OP_MUL_MAT:
@@ -19,7 +28,7 @@ index defe4b6..7c59428 100644
              case GGML_OP_SCALE: {
                  split_state = handle_generic(src_ss, /*scalar_only =*/ false);
              } break;
-@@ -966,6 +970,9 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
+@@ -1012,6 +1016,9 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
              case GGML_OP_FLASH_ATTN_EXT: {
                  split_state = handle_flash_attn_ext(src_ss);
              } break;
@@ -30,10 +39,10 @@ index defe4b6..7c59428 100644
                  split_state = handle_generic(src_ss, /*scalar_only =*/ true);
              } break;
 diff --git a/src/ggml-cpu/ggml-cpu.c b/src/ggml-cpu/ggml-cpu.c
-index 1bb6e2f..b2b6ac7 100644
+index 8821d98..6f34f6e 100644
 --- a/src/ggml-cpu/ggml-cpu.c
 +++ b/src/ggml-cpu/ggml-cpu.c
-@@ -2036,6 +2036,18 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
+@@ -2061,6 +2061,18 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
              {
                  ggml_compute_forward_flash_attn_ext(params, tensor);
              } break;
@@ -52,7 +61,7 @@ index 1bb6e2f..b2b6ac7 100644
          case GGML_OP_FLASH_ATTN_BACK:
              {
                  int32_t t = ggml_get_op_params_i32(tensor, 0);
-@@ -2363,8 +2375,11 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
+@@ -2389,8 +2401,11 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
          case GGML_OP_GROUP_NORM:
          case GGML_OP_CONCAT:
          case GGML_OP_MUL_MAT:
@@ -64,7 +73,7 @@ index 1bb6e2f..b2b6ac7 100644
              {
                  n_tasks = n_threads;
              } break;
-@@ -2886,6 +2901,7 @@ struct ggml_cplan ggml_graph_plan(
+@@ -2912,6 +2927,7 @@ struct ggml_cplan ggml_graph_plan(
                          cur = ggml_type_size(node->type)*n_tasks;
                      } break;
                  case GGML_OP_MUL_MAT:
@@ -72,7 +81,7 @@ index 1bb6e2f..b2b6ac7 100644
                      {
                          const enum ggml_type vec_dot_type = type_traits_cpu[node->src[0]->type].vec_dot_type;
  
-@@ -3000,6 +3016,20 @@ struct ggml_cplan ggml_graph_plan(
+@@ -3036,6 +3052,20 @@ struct ggml_cplan ggml_graph_plan(
  
                          cur += MAX(prefill, decode);
                      } break;
@@ -94,7 +103,7 @@ index 1bb6e2f..b2b6ac7 100644
                      {
                          const int64_t    D = node->src[0]->ne[0];
 diff --git a/src/ggml-cpu/ggml-cpu.cpp b/src/ggml-cpu/ggml-cpu.cpp
-index ce5dacb..a30c73b 100644
+index 8cece71..debe3e8 100644
 --- a/src/ggml-cpu/ggml-cpu.cpp
 +++ b/src/ggml-cpu/ggml-cpu.cpp
 @@ -451,7 +451,29 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
@@ -128,10 +137,10 @@ index ce5dacb..a30c73b 100644
              if (op->src[0]->type != GGML_TYPE_F32 || op->src[1]->type != GGML_TYPE_F32) {
                  return false;
 diff --git a/src/ggml-cpu/ops.cpp b/src/ggml-cpu/ops.cpp
-index 84a8b48..f789291 100644
+index 266261c..ebddbfd 100644
 --- a/src/ggml-cpu/ops.cpp
 +++ b/src/ggml-cpu/ops.cpp
-@@ -12012,3 +12012,272 @@ void ggml_compute_forward_lightning_indexer(
+@@ -12162,3 +12162,272 @@ void ggml_compute_forward_lightning_indexer(
          }
      }
  }
@@ -405,10 +414,10 @@ index 84a8b48..f789291 100644
 +    }
 +}
 diff --git a/src/ggml-cpu/ops.h b/src/ggml-cpu/ops.h
-index 28a7fca..e2ee432 100644
+index 2728b08..981a6c5 100644
 --- a/src/ggml-cpu/ops.h
 +++ b/src/ggml-cpu/ops.h
-@@ -117,6 +117,8 @@ void ggml_compute_forward_cross_entropy_loss(const struct ggml_compute_params *
+@@ -116,6 +116,8 @@ void ggml_compute_forward_cross_entropy_loss(const struct ggml_compute_params *
  void ggml_compute_forward_cross_entropy_loss_back(const struct ggml_compute_params * params, struct ggml_tensor * dst);
  void ggml_compute_forward_opt_step_adamw(const struct ggml_compute_params * params, struct ggml_tensor * dst);
  void ggml_compute_forward_mul_mat(const struct ggml_compute_params * params, struct ggml_tensor * dst);
@@ -418,7 +427,7 @@ index 28a7fca..e2ee432 100644
  void ggml_compute_forward_opt_step_sgd(const struct ggml_compute_params * params, struct ggml_tensor * dst);
  #ifdef __cplusplus
 diff --git a/src/ggml-cuda/CMakeLists.txt b/src/ggml-cuda/CMakeLists.txt
-index 74e6b19..2cd998f 100644
+index 2254090..967f833 100644
 --- a/src/ggml-cuda/CMakeLists.txt
 +++ b/src/ggml-cuda/CMakeLists.txt
 @@ -112,6 +112,21 @@ if (CUDAToolkit_FOUND)
@@ -440,10 +449,10 @@ index 74e6b19..2cd998f 100644
 +        message(STATUS "CUDA SageAttention2 disabled for CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES}")
 +    endif()
 +
-     if (GGML_CUDA_FA_ALL_QUANTS)
-         file(GLOB   SRCS "template-instances/fattn-vec*.cu")
-         list(APPEND GGML_SOURCES_CUDA ${SRCS})
-@@ -129,6 +144,10 @@ if (CUDAToolkit_FOUND)
+     ggml_cuda_fattn_vec_instances(${CMAKE_CURRENT_SOURCE_DIR} SRCS)
+     list(APPEND GGML_SOURCES_CUDA ${SRCS})
+ 
+@@ -120,6 +135,10 @@ if (CUDAToolkit_FOUND)
                               ${GGML_SOURCES_CUDA}
                              )
  
@@ -451,9 +460,9 @@ index 74e6b19..2cd998f 100644
 +        target_compile_definitions(ggml-cuda PRIVATE GGML_CUDA_SAGE_ATTN2_ENABLED)
 +    endif()
 +
-     add_compile_definitions(GGML_CUDA_PEER_MAX_BATCH_SIZE=${GGML_CUDA_PEER_MAX_BATCH_SIZE})
- 
      if (GGML_CUDA_GRAPHS)
+         add_compile_definitions(GGML_CUDA_USE_GRAPHS)
+     endif()
 diff --git a/src/ggml-cuda/convrot-linear.cu b/src/ggml-cuda/convrot-linear.cu
 new file mode 100644
 index 0000000..5754b77
@@ -757,7 +766,7 @@ index 0000000..0d0a39d
 +
 +bool ggml_cuda_convrot_linear_supported(int device, const ggml_tensor * dst);
 diff --git a/src/ggml-cuda/ggml-cuda.cu b/src/ggml-cuda/ggml-cuda.cu
-index 52de847..901e541 100644
+index 7905538..ca96f13 100644
 --- a/src/ggml-cuda/ggml-cuda.cu
 +++ b/src/ggml-cuda/ggml-cuda.cu
 @@ -17,6 +17,7 @@
@@ -768,7 +777,7 @@ index 52de847..901e541 100644
  #include "ggml-cuda/convert.cuh"
  #include "ggml-cuda/count-equal.cuh"
  #include "ggml-cuda/cpy.cuh"
-@@ -42,6 +43,7 @@
+@@ -44,6 +45,7 @@
  #include "ggml-cuda/rope.cuh"
  #include "ggml-cuda/roll.cuh"
  #include "ggml-cuda/scale.cuh"
@@ -776,7 +785,7 @@ index 52de847..901e541 100644
  #include "ggml-cuda/snake.cuh"
  #include "ggml-cuda/softcap.cuh"
  #include "ggml-cuda/softmax.cuh"
-@@ -2243,6 +2245,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
+@@ -2257,6 +2259,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
              ggml_cuda_op_rms_norm_back(ctx, dst);
              break;
          case GGML_OP_MUL_MAT:
@@ -784,7 +793,7 @@ index 52de847..901e541 100644
              ggml_cuda_mul_mat(ctx, dst->src[0], dst->src[1], dst);
              break;
          case GGML_OP_MUL_MAT_ID:
-@@ -2350,6 +2353,12 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
+@@ -2367,6 +2370,12 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
          case GGML_OP_FLASH_ATTN_EXT:
              ggml_cuda_flash_attn_ext(ctx, dst);
              break;
@@ -797,7 +806,7 @@ index 52de847..901e541 100644
          case GGML_OP_CROSS_ENTROPY_LOSS:
              ggml_cuda_cross_entropy_loss(ctx, dst);
              break;
-@@ -4909,6 +4918,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+@@ -5120,6 +5129,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                      return false;
              }
              break;
@@ -805,7 +814,7 @@ index 52de847..901e541 100644
          case GGML_OP_MUL_MAT:
          case GGML_OP_MUL_MAT_ID:
              {
-@@ -5285,6 +5295,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+@@ -5502,6 +5512,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                  op->type == GGML_TYPE_F32;
          case GGML_OP_FLASH_ATTN_EXT:
              return ggml_cuda_flash_attn_ext_supported(dev_ctx->device, op);
@@ -816,7 +825,7 @@ index 52de847..901e541 100644
          case GGML_OP_CROSS_ENTROPY_LOSS:
          case GGML_OP_CROSS_ENTROPY_LOSS_BACK:
          case GGML_OP_OPT_STEP_ADAMW:
-@@ -5313,6 +5327,7 @@ static int64_t get_op_batch_size(const ggml_tensor * op) {
+@@ -5530,6 +5544,7 @@ static int64_t get_op_batch_size(const ggml_tensor * op) {
      switch (op->op) {
          case GGML_OP_GET_ROWS:
              return 0;
@@ -5017,10 +5026,10 @@ index 0000000..e8e9b5e
 +
 +} // namespace vllm
 diff --git a/src/ggml.c b/src/ggml.c
-index eb7389d..2e13724 100644
+index 73542dd..0b05edb 100644
 --- a/src/ggml.c
 +++ b/src/ggml.c
-@@ -6948,7 +6948,8 @@ static void ggml_compute_backward(
+@@ -7052,7 +7052,8 @@ static void ggml_compute_backward(
                  ggml_add_or_set(ctx, cgraph, isrc0, ggml_rms_norm_back(ctx, grad, src0, eps));
              }
          } break;

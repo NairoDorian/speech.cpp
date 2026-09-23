@@ -35,9 +35,10 @@ Behaviour is unchanged: every fast path is gated on full contiguity (and, for
 concat_any, matching types) and falls through to the upstream loop otherwise.
 
 diff --git a/src/ggml-cpu/ops.cpp b/src/ggml-cpu/ops.cpp
+index 6eadbad..26e71ac 100644
 --- a/src/ggml-cpu/ops.cpp
 +++ b/src/ggml-cpu/ops.cpp
-@@ -1914,6 +1914,41 @@
+@@ -1914,6 +1914,41 @@ static void ggml_compute_forward_concat_any(
      GGML_ASSERT(ggml_is_contiguous_rows(src0));
      GGML_ASSERT(ggml_is_contiguous_rows(src1));
  
@@ -79,7 +80,7 @@ diff --git a/src/ggml-cpu/ops.cpp b/src/ggml-cpu/ops.cpp
      int64_t o[4] = {0, 0, 0, 0};
  
      if (dim == 0) {
-@@ -2052,6 +2087,54 @@
+@@ -2052,6 +2087,54 @@ static void ggml_compute_forward_concat_f32(
  
      GGML_ASSERT(dim >= 0 && dim < 4);
  

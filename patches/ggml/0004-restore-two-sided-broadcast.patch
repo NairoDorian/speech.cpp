@@ -117,10 +117,10 @@ index 75e3829..3236d8c 100644
          if (is_src1_contiguous_rows) {
              // src1 is broadcastable across src0 and dst in i1, i2, i3
 diff --git a/src/ggml-cpu/ops.cpp b/src/ggml-cpu/ops.cpp
-index f5b3770..f84ab1e 100644
+index ebddbfd..6eadbad 100644
 --- a/src/ggml-cpu/ops.cpp
 +++ b/src/ggml-cpu/ops.cpp
-@@ -4573,7 +4573,15 @@ static void ggml_compute_forward_scale_f32(
+@@ -4702,7 +4702,15 @@ static void ggml_compute_forward_scale_f32(
  
      GGML_ASSERT(ggml_is_contiguous(src0));
      GGML_ASSERT(ggml_is_contiguous(dst));
@@ -137,7 +137,7 @@ index f5b3770..f84ab1e 100644
  
      float s; // scale factor
      float b; // bias
-@@ -4584,22 +4592,37 @@ static void ggml_compute_forward_scale_f32(
+@@ -4713,22 +4721,37 @@ static void ggml_compute_forward_scale_f32(
      const int ith = params->ith;
      const int nth = params->nth;
  
@@ -183,7 +183,7 @@ index f5b3770..f84ab1e 100644
              if (dst->data != src0->data) {
                  // src0 is same shape as dst => same indices
                  // TODO: add x parameter to ggml_vec_scale_f32 and remove this memcpy
-@@ -4608,10 +4631,10 @@ static void ggml_compute_forward_scale_f32(
+@@ -4737,10 +4760,10 @@ static void ggml_compute_forward_scale_f32(
              ggml_vec_scale_f32(nc, (float *) ((char *) dst->data + i1*nb1), s);
          }
      } else {

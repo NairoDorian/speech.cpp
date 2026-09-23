@@ -21,6 +21,11 @@
 #
 # Flags:
 #   --dry-run        Resolve the ref and report the file-level diff; do not touch external/ggml.
+#   --check          Like --dry-run, but exit 1 when the recipe (pin + patches) does
+#                    NOT reproduce external/ggml. With no ref this is the round-trip
+#                    gate for the patch invariant: any path it reports is a delta in
+#                    the tree that no patch carries (adopted from transcribe.cpp
+#                    48b1f911). Writes nothing either way.
 #   --force          Proceed even if external/ggml has uncommitted local changes (default: abort).
 #   --repo <url>     Override the upstream URL (default: the repo: line in UPSTREAM).
 
@@ -44,6 +49,7 @@ shopt -u nullglob
 REF=""
 REPO=""
 DRY_RUN=0
+CHECK=0
 FORCE=0
 
 die() { echo "sync-ggml: $*" >&2; exit 1; }
@@ -51,9 +57,10 @@ die() { echo "sync-ggml: $*" >&2; exit 1; }
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --dry-run) DRY_RUN=1; shift ;;
+        --check)   DRY_RUN=1; CHECK=1; shift ;;
         --force)   FORCE=1; shift ;;
         --repo)    REPO="${2:-}"; [ -n "$REPO" ] || die "--repo needs a URL"; shift 2 ;;
-        -h|--help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         --*)       die "unknown flag: $1" ;;
         *)         [ -z "$REF" ] || die "more than one ref given ($REF, $1)"; REF="$1"; shift ;;
     esac
@@ -160,12 +167,25 @@ find "$STAGE_DIR" -type f -exec touch {} +
 
 if [ "$DRY_RUN" -eq 1 ]; then
     echo "[dry-run] would re-vendor: ${CUR_SHA:0:12} -> ${RESOLVED:0:12}"
-    if diff -rq "$GGML_DIR" "$STAGE_DIR" >/dev/null 2>&1; then
+    # Compare CONTENT, not bytes: the stage is LF (git archive) while a Windows
+    # checkout of this tree carries CRLF for many blobs, so a byte diff reports
+    # hundreds of EOL-only "differences" and hides the real ones among them.
+    DRY_DIFF="$(diff -rq --strip-trailing-cr "$GGML_DIR" "$STAGE_DIR" 2>&1 || true)"
+    if [ -z "$DRY_DIFF" ]; then
         echo "[dry-run] no differences — external/ggml already matches this ref."
     else
-        echo "[dry-run] differences exist (see git diff -- external/ggml after a real sync)"
+        echo "[dry-run] content differences ($(printf '%s\n' "$DRY_DIFF" | wc -l | tr -d ' ') path(s)):"
+        printf '%s\n' "$DRY_DIFF" | sed "s#${GGML_DIR}/##; s#${STAGE_DIR}/##g" | head -40 | sed 's/^/[dry-run]   /'
+        if [ "$RESOLVED" = "$CUR_SHA" ]; then
+            echo "[dry-run] SAME pin: every path above is a delta that is in the tree but in no"
+            echo "[dry-run] patch (or a patch not yet vendored). Capture it before a real sync."
+        fi
     fi
     echo "[dry-run] nothing written."
+    if [ "$CHECK" -eq 1 ] && [ -n "$DRY_DIFF" ]; then
+        echo "sync-ggml: --check FAILED: pin + patches does not reproduce external/ggml" >&2
+        exit 1
+    fi
     exit 0
 fi
 

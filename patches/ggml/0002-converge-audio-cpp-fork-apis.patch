@@ -1,5 +1,11 @@
+
+
+Rebased onto ggml 0.24.0 (456172ec) on 2026-09-23: upstream added
+ggml_flash_attn_ext_set_n_kv_max at the insertion point in include/ggml.h;
+both are kept (upstream's declaration first, then the fork APIs).
+
 diff --git a/include/ggml-rpc.h b/include/ggml-rpc.h
-index 276aea0..55a1a44 100644
+index cbfe400..53af1a2 100644
 --- a/include/ggml-rpc.h
 +++ b/include/ggml-rpc.h
 @@ -11,7 +11,7 @@ extern "C" {
@@ -12,10 +18,10 @@ index 276aea0..55a1a44 100644
  
  #define GGML_RPC_MAX_SERVERS       16
 diff --git a/include/ggml.h b/include/ggml.h
-index c2ccd97..45e903c 100644
+index 85a1ae7..c1c479e 100644
 --- a/include/ggml.h
 +++ b/include/ggml.h
-@@ -590,6 +590,15 @@ extern "C" {
+@@ -601,6 +601,15 @@ extern "C" {
  
          GGML_OP_GLU,
  
@@ -31,7 +37,7 @@ index c2ccd97..45e903c 100644
          GGML_OP_COUNT,
      };
  
-@@ -1430,6 +1439,12 @@ extern "C" {
+@@ -1484,6 +1493,12 @@ extern "C" {
              struct ggml_tensor  * a,
              struct ggml_tensor  * b);
  
@@ -43,8 +49,8 @@ index c2ccd97..45e903c 100644
 +
      // change the precision of a matrix multiplication
      // set to GGML_PREC_F32 for higher precision (useful for phi-2)
-     GGML_API void ggml_mul_mat_set_prec(
-@@ -2045,6 +2060,15 @@ extern "C" {
+     GGML_DEPRECATED(GGML_API void ggml_mul_mat_set_prec(
+@@ -2113,6 +2128,15 @@ extern "C" {
              int                   s,  // stride
              int                   d); // dilation
  
@@ -60,9 +66,9 @@ index c2ccd97..45e903c 100644
      // depthwise
      // TODO: this is very likely wrong for some cases! - needs more testing
      GGML_API struct ggml_tensor * ggml_conv_1d_dw(
-@@ -2433,6 +2457,40 @@ extern "C" {
-     GGML_API enum ggml_prec ggml_flash_attn_ext_get_prec(
-             const struct ggml_tensor * a);
+@@ -2508,6 +2532,40 @@ extern "C" {
+             struct ggml_tensor * a,
+             int32_t              n_kv_max);
  
 +    // SageAttention2 (scaled cosine attention), F16 inputs (AudioCPP).
 +    // q, k, v: [head_dim, seq, n_head, batch]  res: [head_dim, n_head, seq, batch]
@@ -101,7 +107,7 @@ index c2ccd97..45e903c 100644
      GGML_API void ggml_flash_attn_ext_add_sinks(
              struct ggml_tensor * a,
              struct ggml_tensor * sinks);
-@@ -2812,6 +2870,7 @@ extern "C" {
+@@ -2887,6 +2945,7 @@ extern "C" {
      GGML_API struct ggml_tensor *  ggml_graph_node   (struct ggml_cgraph * cgraph, int i); // if i < 0, returns nodes[n_nodes + i]
      GGML_API struct ggml_tensor ** ggml_graph_nodes  (struct ggml_cgraph * cgraph);
      GGML_API int                   ggml_graph_n_nodes(struct ggml_cgraph * cgraph);
@@ -110,10 +116,10 @@ index c2ccd97..45e903c 100644
      GGML_API void   ggml_graph_add_node(struct ggml_cgraph * cgraph, struct ggml_tensor * tensor);
  
 diff --git a/src/ggml.c b/src/ggml.c
-index d0d369c..1ee972d 100644
+index 5ef03e1..73542dd 100644
 --- a/src/ggml.c
 +++ b/src/ggml.c
-@@ -1098,9 +1098,13 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
+@@ -1099,9 +1099,13 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
      "OPT_STEP_SGD",
  
      "GLU",
@@ -128,7 +134,7 @@ index d0d369c..1ee972d 100644
  
  static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
      "none",
-@@ -1213,9 +1217,13 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
+@@ -1214,9 +1218,13 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
      "sgd(x)",
  
      "glu(x)",
@@ -143,7 +149,7 @@ index d0d369c..1ee972d 100644
  
  static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
  
-@@ -3295,7 +3303,7 @@ struct ggml_tensor * ggml_mul_mat(
+@@ -3358,7 +3366,7 @@ struct ggml_tensor * ggml_mul_mat(
  void ggml_mul_mat_set_prec(
          struct ggml_tensor * a,
          enum ggml_prec       prec) {
@@ -152,7 +158,7 @@ index d0d369c..1ee972d 100644
  
      const int32_t prec_i32 = (int32_t) prec;
  
-@@ -3305,13 +3313,189 @@ void ggml_mul_mat_set_prec(
+@@ -3368,13 +3376,189 @@ void ggml_mul_mat_set_prec(
  void ggml_mul_mat_set_hint(
          struct ggml_tensor * a,
          enum ggml_op_hint    hint) {

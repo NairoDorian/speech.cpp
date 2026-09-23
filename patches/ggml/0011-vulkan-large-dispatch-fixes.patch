@@ -1,0 +1,41 @@
+audio.cpp fork delta on the Vulkan backend, captured 2026-09-23 (previously
+untracked in external/ggml - see 0008's header). Source commit: audio.cpp #542
+(54026af7, fix-vulkan-col2im-1d-dispatch).
+
+  - COL2IM_1D: clamp the x element count to maxComputeWorkGroupCount[0] *
+    wg_denoms[0] (the shader already strides over the remainder) instead of
+    dispatching ne0*ne1 elements in x, which exceeded the per-dimension
+    workgroup limit on large outputs.
+
+History: this patch was captured with a second fix, audio.cpp #508 (43833e87,
+"Apply upstream Vulkan fill dispatch fix": FILL on a 2D workgroup grid,
+fill.comp flattening, non-empty asserts in ARANGE/FILL). Upstream ggml 0.24.0
+(456172ec) carries that fix verbatim, so those three hunks were retired in the
+same session they were captured. On every bump, check whether upstream has
+converged on the COL2IM_1D clamp too, and retire this patch once it has.
+
+diff --git a/src/ggml-vulkan/ggml-vulkan.cpp b/src/ggml-vulkan/ggml-vulkan.cpp
+index 9415a77..a8add3e 100644
+--- a/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -12623,6 +12623,20 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
+             elements[1] = std::min(elements[1], ctx->device->properties.limits.maxComputeWorkGroupCount[1]);
+             elements[2] = std::min(elements[2], ctx->device->properties.limits.maxComputeWorkGroupCount[2]);
+         } break;
++    case GGML_OP_COL2IM_1D:
++        {
++            const uint64_t total = uint64_t(dst->ne[0]) * uint64_t(dst->ne[1]);
++            const uint64_t max_x_elements =
++                uint64_t(ctx->device->properties.limits.maxComputeWorkGroupCount[0]) *
++                uint64_t(pipeline->wg_denoms[0]);
++
++            elements = {
++                uint32_t(std::min(total, max_x_elements)),
++                1,
++                1
++            };
++        } break;
++
+     case GGML_OP_IM2COL_3D:
+         {
+             const uint32_t IC = ((const uint32_t *)(dst->op_params))[9];

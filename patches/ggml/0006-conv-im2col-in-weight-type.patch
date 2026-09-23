@@ -22,10 +22,10 @@ hardcoded F16 there, so upstream 0.20.2 (F16-unless-BF16) is already a
 superset of the fork's behaviour for that builder.
 
 diff --git a/src/ggml.c b/src/ggml.c
-index 2e13724..b1278f3 100644
+index 0b05edb..1fabffb 100644
 --- a/src/ggml.c
 +++ b/src/ggml.c
-@@ -4709,7 +4709,12 @@ struct ggml_tensor * ggml_conv_1d(
+@@ -4804,7 +4804,12 @@ struct ggml_tensor * ggml_conv_1d(
          int                   s0,
          int                   p0,
          int                   d0) {
@@ -39,7 +39,7 @@ index 2e13724..b1278f3 100644
  
      struct ggml_tensor * result =
          ggml_mul_mat(ctx,
-@@ -4743,7 +4748,8 @@ struct ggml_tensor * ggml_conv_1d_dw(
+@@ -4838,7 +4843,8 @@ struct ggml_tensor * ggml_conv_1d_dw(
          int                   d0) {
      struct ggml_tensor * new_b = ggml_reshape_4d(ctx, b, b->ne[0], 1, b->ne[1], b->ne[2]);
  
@@ -49,7 +49,7 @@ index 2e13724..b1278f3 100644
  
      struct ggml_tensor * result = ggml_mul_mat(ctx, im2col, a);
  
-@@ -4849,7 +4855,8 @@ struct ggml_tensor * ggml_conv_2d(
+@@ -4944,7 +4950,8 @@ struct ggml_tensor * ggml_conv_2d(
          int                   p1,
          int                   d0,
          int                   d1) {

@@ -127,17 +127,8 @@ if (CUDAToolkit_FOUND)
         message(STATUS "CUDA SageAttention2 disabled for CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES}")
     endif()
 
-    if (GGML_CUDA_FA_ALL_QUANTS)
-        file(GLOB   SRCS "template-instances/fattn-vec*.cu")
-        list(APPEND GGML_SOURCES_CUDA ${SRCS})
-        add_compile_definitions(GGML_CUDA_FA_ALL_QUANTS)
-    else()
-        list(APPEND GGML_SOURCES_CUDA
-            template-instances/fattn-vec-instance-f16-f16.cu
-            template-instances/fattn-vec-instance-q4_0-q4_0.cu
-            template-instances/fattn-vec-instance-q8_0-q8_0.cu
-            template-instances/fattn-vec-instance-bf16-bf16.cu)
-    endif()
+    ggml_cuda_fattn_vec_instances(${CMAKE_CURRENT_SOURCE_DIR} SRCS)
+    list(APPEND GGML_SOURCES_CUDA ${SRCS})
 
     ggml_add_backend_library(ggml-cuda
                              ${GGML_HEADERS_CUDA}
@@ -147,8 +138,6 @@ if (CUDAToolkit_FOUND)
     if (GGML_CUDA_SAGE_ATTN2_ENABLED)
         target_compile_definitions(ggml-cuda PRIVATE GGML_CUDA_SAGE_ATTN2_ENABLED)
     endif()
-
-    add_compile_definitions(GGML_CUDA_PEER_MAX_BATCH_SIZE=${GGML_CUDA_PEER_MAX_BATCH_SIZE})
 
     if (GGML_CUDA_GRAPHS)
         add_compile_definitions(GGML_CUDA_USE_GRAPHS)

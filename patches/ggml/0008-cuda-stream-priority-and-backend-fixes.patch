@@ -1,0 +1,162 @@
+audio.cpp fork deltas on the CUDA/HIP backend, captured 2026-09-23. They reached
+external/ggml through audio.cpp merges WITHOUT a tracked patch, so the next
+sync-ggml.sh run would have deleted them silently (see the patch-invariant note
+in external/ggml/UPSTREAM). Source commits (audio.cpp PR numbers):
+
+  - #321 (69421fc9) per-backend CUDA stream priority and stream access:
+      ggml_backend_cuda_set_stream_priority(backend, priority) - lazily created
+      streams use cudaStreamCreateWithPriority when priority != 0; streams that
+      already exist keep theirs. ggml_backend_cuda_get_stream(backend) returns
+      the compute cudaStream_t so host code can order its own kernels/copies
+      with graph computes. Both are exported through the reg proc-address
+      table; the engine resolves them dynamically in
+      src/framework/core/backend.cpp (used by yue2, fish_audio and the qwen
+      decode runtime). Also: ggml_backend_cuda_clear_graph's definition spells
+      "struct ggml_cgraph", matching the C header declaration from patch 0007.
+  - #320 (17751c0e) zero the MMQ stream-k fixup staging buffer before launch.
+      The fixup pass reads tiles a partial block may not have written; without
+      the memset those are uninitialised pool memory (nondeterministic output
+      on reused pool capacity).
+  - #346 (ee7be933) vendors/hip.h: the CUDA -> HIP name mapping the above needs.
+
+Both new entry points tolerate a NULL backend, matching 0007's hooks.
+
+Rebased onto ggml 0.24.0 (456172ec) on 2026-09-23, on top of the new 0007
+(transcribe.cpp's implementation): the two declarations now follow 0007's
+documented trim/evict block in include/ggml-cuda.h.
+
+Not carried: the audio.cpp tree also re-declared
+ggml_backend_cuda_split_buffer_type in include/ggml-cuda.h. Upstream has no
+definition for it and nothing in this repo calls it - a stale header line left
+by a merge - so it is intentionally dropped.
+
+Retire each hunk when upstream ggml grows an equivalent (the MMQ memset is a
+good upstream-PR candidate).
+
+diff --git a/include/ggml-cuda.h b/include/ggml-cuda.h
+index 977df7f..d3509b3 100644
+--- a/include/ggml-cuda.h
++++ b/include/ggml-cuda.h
+@@ -51,6 +51,15 @@ GGML_BACKEND_API void ggml_backend_cuda_trim_pools(ggml_backend_t backend);
+ // cached instance holds.
+ GGML_BACKEND_API void ggml_backend_cuda_clear_graph(ggml_backend_t backend, const struct ggml_cgraph * graph);
+ 
++// Sets the CUDA scheduling priority used for this backend instance's lazily
++// created streams (lower = higher priority, 0 = default). Scoped to the
++// instance; already-created streams keep their priority.
++GGML_BACKEND_API void ggml_backend_cuda_set_stream_priority(ggml_backend_t backend, int priority);
++
++// Returns the backend's current compute CUDA stream (cudaStream_t) so host
++// code can enqueue its own kernels/copies ordered with graph computes.
++GGML_BACKEND_API void * ggml_backend_cuda_get_stream(ggml_backend_t backend);
++
+ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_cuda_reg(void);
+ 
+ #ifdef  __cplusplus
+diff --git a/src/ggml-cuda/common.cuh b/src/ggml-cuda/common.cuh
+index d8b7f05..0a0d3f6 100644
+--- a/src/ggml-cuda/common.cuh
++++ b/src/ggml-cuda/common.cuh
+@@ -1530,12 +1530,23 @@ struct ggml_backend_cuda_context {
+ 
+     ggml_cuda_stream_context concurrent_stream_context;
+ 
++    // Scheduling priority for this context's lazily created streams
++    // (CUDA: numerically lower = higher priority, 0 = default). Set through
++    // ggml_backend_cuda_set_stream_priority(); scoped to this backend
++    // instance, unlike a process-wide environment variable.
++    int stream_priority = 0;
++
+     ~ggml_backend_cuda_context();
+ 
+     cudaStream_t stream(int device, int stream) {
+         if (streams[device][stream] == nullptr) {
+             ggml_cuda_set_device(device);
+-            CUDA_CHECK(cudaStreamCreateWithFlags(&streams[device][stream], cudaStreamNonBlocking));
++            if (stream_priority != 0) {
++                CUDA_CHECK(cudaStreamCreateWithPriority(
++                    &streams[device][stream], cudaStreamNonBlocking, stream_priority));
++            } else {
++                CUDA_CHECK(cudaStreamCreateWithFlags(&streams[device][stream], cudaStreamNonBlocking));
++            }
+         }
+         return streams[device][stream];
+     }
+diff --git a/src/ggml-cuda/ggml-cuda.cu b/src/ggml-cuda/ggml-cuda.cu
+index 5224316..8775f2f 100644
+--- a/src/ggml-cuda/ggml-cuda.cu
++++ b/src/ggml-cuda/ggml-cuda.cu
+@@ -4869,7 +4869,7 @@ void ggml_backend_cuda_trim_pools(ggml_backend_t backend) {
+     }
+ }
+ 
+-void ggml_backend_cuda_clear_graph(ggml_backend_t backend, const ggml_cgraph * graph) {
++void ggml_backend_cuda_clear_graph(ggml_backend_t backend, const struct ggml_cgraph * graph) {
+ #ifdef USE_CUDA_GRAPH
+     if (backend == nullptr || !ggml_backend_is_cuda(backend) || graph == nullptr || graph->n_nodes <= 0) {
+         return;
+@@ -4884,6 +4884,22 @@ void ggml_backend_cuda_clear_graph(ggml_backend_t backend, const ggml_cgraph * g
+ #endif
+ }
+ 
++void ggml_backend_cuda_set_stream_priority(ggml_backend_t backend, int priority) {
++    if (backend == nullptr || !ggml_backend_is_cuda(backend)) {
++        return;
++    }
++    ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
++    cuda_ctx->stream_priority = priority;
++}
++
++void * ggml_backend_cuda_get_stream(ggml_backend_t backend) {
++    if (backend == nullptr || !ggml_backend_is_cuda(backend)) {
++        return nullptr;
++    }
++    ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
++    return (void *) cuda_ctx->stream();
++}
++
+ int ggml_backend_cuda_get_device_count() {
+     return ggml_cuda_info().device_count;
+ }
+@@ -5794,6 +5810,12 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
+     if (strcmp(name, "ggml_backend_cuda_clear_graph") == 0) {
+         return (void *)ggml_backend_cuda_clear_graph;
+     }
++    if (strcmp(name, "ggml_backend_cuda_set_stream_priority") == 0) {
++        return (void *)ggml_backend_cuda_set_stream_priority;
++    }
++    if (strcmp(name, "ggml_backend_cuda_get_stream") == 0) {
++        return (void *)ggml_backend_cuda_get_stream;
++    }
+     return nullptr;
+ }
+ 
+diff --git a/src/ggml-cuda/mmq.cuh b/src/ggml-cuda/mmq.cuh
+index 6923f35..181056e 100644
+--- a/src/ggml-cuda/mmq.cuh
++++ b/src/ggml-cuda/mmq.cuh
+@@ -1451,6 +1451,10 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
+     ggml_cuda_pool_alloc<float> tmp_fixup(pool);
+     if (fixup_needed) {
+         tmp_fixup.alloc(block_nums_stream_k.x * config.J*config.I);
++        // Pool memory is recycled uninitialized; zero the partial-sum staging
++        // so any fixup cell the merge pass visits before/without a producer
++        // contributes exactly nothing instead of stale pool bytes.
++        CUDA_CHECK(cudaMemsetAsync(tmp_fixup.ptr, 0, block_nums_stream_k.x * config.J*config.I * sizeof(float), stream));
+     }
+ 
+     const dim3 block_nums_fixup(block_nums_stream_k.x, config.I/warp_size, 1);
+diff --git a/src/ggml-cuda/vendors/hip.h b/src/ggml-cuda/vendors/hip.h
+index 2fc0fe9..076f4d1 100644
+--- a/src/ggml-cuda/vendors/hip.h
++++ b/src/ggml-cuda/vendors/hip.h
+@@ -118,6 +118,9 @@
+ #define cudaStreamPerThread hipStreamPerThread
+ #define cudaStreamSynchronize hipStreamSynchronize
+ #define cudaStreamWaitEvent hipStreamWaitEvent
++#define cudaStreamCreateWithPriority hipStreamCreateWithPriority
++#define cudaStreamGetPriority hipStreamGetPriority
++#define cudaDeviceGetStreamPriorityRange hipDeviceGetStreamPriorityRange
+ #define cudaGraphExec_t hipGraphExec_t
+ #define cudaGraphNode_t hipGraphNode_t
+ #define cudaKernelNodeParams hipKernelNodeParams
