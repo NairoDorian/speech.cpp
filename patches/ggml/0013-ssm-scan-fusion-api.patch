@@ -1,0 +1,77 @@
+audio.cpp fork delta: the ggml_ssm_scan_set_fusion API and one more im2col
+lowering value, ported 2026-09-23. Source commit: audio.cpp #600 (82b4dc3a,
+"Add opt-in CUDA SSM gate fusion and tiled F32 im2col") - header and ggml.c
+hunks only.
+
+  - enum ggml_ssm_scan_fusion {NONE, GATE} and ggml_ssm_scan_set_fusion().
+  - GGML_IM2COL_2D_LOWERING_CUDA_F32_K3_TILED.
+
+DELIBERATE DIVERGENCE from audio.cpp: the fusion flag lives in op_params slot 1,
+not slot 0. audio.cpp's ggml predates ggml-org's "recurrent state rollback"
+(llama/26623), which made slot 0 of SSM_SCAN the state count K (asserted >= 1
+by the CPU and CUDA kernels). Writing FUSION_NONE (0) to slot 0 would set K=0.
+Whoever ports the CUDA fused kernel must read the flag from slot 1.
+
+NOT PORTED YET: the CUDA side of 82b4dc3a (ssm-scan.cu[h] fused gate,
+ggml-cuda.cu can_fuse / try_fuse, im2col.cu tiled F32). Nothing in the engine
+calls ggml_ssm_scan_set_fusion today, so the flag is inert.
+
+diff --git a/include/ggml.h b/include/ggml.h
+index c605be4c..427ccab6 100644
+--- a/include/ggml.h
++++ b/include/ggml.h
+@@ -720,6 +720,7 @@ extern "C" {
+         GGML_IM2COL_2D_LOWERING_DEFAULT = 0,
+         GGML_IM2COL_2D_LOWERING_CUDA_N_K3_PAD1_X8 = 1,
+         GGML_IM2COL_2D_LOWERING_CUDA_N_K3_NOPAD_X8 = 2,
++        GGML_IM2COL_2D_LOWERING_CUDA_F32_K3_TILED = 3,
+     };
+ 
+     enum ggml_im2col_3d_lowering {
+@@ -727,6 +728,11 @@ extern "C" {
+         GGML_IM2COL_3D_LOWERING_CUDA_N1_K3_NOPAD_X8 = 1,
+     };
+ 
++    enum ggml_ssm_scan_fusion {
++        GGML_SSM_SCAN_FUSION_NONE = 0,
++        GGML_SSM_SCAN_FUSION_GATE = 1,
++    };
++
+     enum ggml_rms_norm_channels_lowering {
+         GGML_RMS_NORM_CHANNELS_LOWERING_DEFAULT = 0,
+         GGML_RMS_NORM_CHANNELS_LOWERING_CUDA_COALESCED = 1,
+@@ -2802,6 +2808,13 @@ extern "C" {
+             struct ggml_tensor  * ids,
+             int64_t               K);
+ 
++    // Opt-in fused gate for SSM_SCAN (audio.cpp #600). Stored in op_params
++    // slot 1 (slot 0 is K). Only a hint: backends without the fused kernel
++    // ignore it.
++    GGML_API void ggml_ssm_scan_set_fusion(
++            struct ggml_tensor         * tensor,
++            enum ggml_ssm_scan_fusion   fusion);
++
+     // partition into non-overlapping windows with padding if needed
+     // example:
+     // a:   768   64   64    1
+diff --git a/src/ggml.c b/src/ggml.c
+index 2c90e065..f22429c2 100644
+--- a/src/ggml.c
++++ b/src/ggml.c
+@@ -6374,6 +6374,16 @@ struct ggml_tensor * ggml_ssm_scan(
+     return result;
+ }
+ 
++void ggml_ssm_scan_set_fusion(
++        struct ggml_tensor        * tensor,
++        enum ggml_ssm_scan_fusion   fusion) {
++    GGML_ASSERT(tensor->op == GGML_OP_SSM_SCAN);
++    // Slot 1, not audio.cpp's slot 0: since ggml 0.24.0 slot 0 holds K (the
++    // number of recurrent states kept, asserted >= 1 by every backend), and
++    // writing the flag there would set K = 0 for FUSION_NONE.
++    ggml_set_op_params_i32(tensor, 1, (int32_t) fusion);
++}
++
+ // ggml_win_part
+ 
+ struct ggml_tensor * ggml_win_part(

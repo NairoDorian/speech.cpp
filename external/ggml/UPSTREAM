@@ -12,6 +12,10 @@ patches:
   patches/ggml/0009-bf16-rounding-and-conversion.patch
   patches/ggml/0010-vibeasr-int8-cpu-pipeline.patch
   patches/ggml/0011-vulkan-large-dispatch-fixes.patch
+  patches/ggml/0012-lowering-apis.patch
+  patches/ggml/0013-ssm-scan-fusion-api.patch
+  patches/ggml/0014-mul-mat-acc-and-snake-1d.patch
+  patches/ggml/0015-cpu-reject-unimplemented-lowering-ops.patch
 
 This directory is generated from the upstream ggml tree at the SHA above, minus
 .github/ and .pi/, with the listed downstream patches applied in order. Do not

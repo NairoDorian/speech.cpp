@@ -496,6 +496,27 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
             return ggml_is_contiguous(op->src[0]);
         case GGML_OP_SSM_SCAN:
             return ggml_get_op_params_i32(op, 0) == 1 || op->src[3]->ne[0] == 1;
+        // audio.cpp lowering-era ops (patches 0012 / 0014). MUL_MAT_ACC and
+        // SNAKE_1D have single-threaded reference kernels with these limits;
+        // the other four have CUDA kernels upstream and none here, and
+        // ggml_compute_forward has no default case - reaching it would
+        // silently produce nothing - so the CPU must refuse them and let the
+        // scheduler place them elsewhere (or fail at graph setup).
+        case GGML_OP_MUL_MAT_ACC:
+            return src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_F32 &&
+                   op->type == GGML_TYPE_F32 &&
+                   src0->ne[2] == 1 && src0->ne[3] == 1 &&
+                   src1->ne[2] == 1 && src1->ne[3] == 1;
+        case GGML_OP_SNAKE_1D:
+            return src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_F32 &&
+                   ggml_is_contiguous(src0) && ggml_is_contiguous(src1) &&
+                   src0->ne[2] == 1 && src0->ne[3] == 1;
+        case GGML_OP_CONV_3D_CONCAT_PAD_SPATIAL_GEMM:
+        case GGML_OP_RMS_NORM_CHANNELS:
+        case GGML_OP_RMS_NORM_CHANNELS_SILU:
+        case GGML_OP_RMS_NORM_CHANNELS_ADD_BIAS_SILU:
+        case GGML_OP_ROPE_INTERLEAVED_PAIRS:
+            return false;
         default:
             return true;
     }
