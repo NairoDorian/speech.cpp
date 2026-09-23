@@ -100,6 +100,13 @@ public:
         TensorStorageType storage_type,
         std::initializer_list<int64_t> expected_source_shape,
         std::initializer_list<int64_t> tensor_shape) const;
+    // Same, for shapes known only at run time (any source / target rank; the
+    // element counts must match).
+    [[nodiscard]] TensorData require_tensor_as_shape(
+        std::string_view name,
+        TensorStorageType storage_type,
+        const std::vector<int64_t> & expected_source_shape,
+        const std::vector<int64_t> & tensor_shape) const;
     virtual void set_backend_tensor(
         ggml_tensor * tensor,
         std::string_view name,

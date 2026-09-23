@@ -1,6 +1,12 @@
+// These checks use assert() and the suite builds Release, where NDEBUG
+// compiles every one of them out - until 2026-09-23 this test could not
+// fail. Keep the checks live regardless of build type.
+#undef NDEBUG
+
 #include "engine/framework/audio/frontend_spec.h"
 #include "engine/framework/audio/mel_extractor.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <iostream>
@@ -75,10 +81,22 @@ int main() {
         assert(out_frames == 100); // 101 - 1 dropped trailing frame
         assert(mel.size() == static_cast<size_t>(out_mels * out_frames));
 
+        // Whisper normalization is log10 -> clamp to (max - 8) -> (x + 4) / 4, so
+        // the absolute range follows the input's loudness; what it guarantees
+        // is a dynamic range of at most 8 / 4 = 2.0 with the maximum at
+        // (max_log10 + 4) / 4. The fixed [-0.1, 1.5] window asserted here
+        // before 2026-09-23 was never exercised (NDEBUG) and is wrong for this
+        // 0.5-amplitude tone.
+        float min_v = mel.front();
+        float max_v = mel.front();
         for (float val : mel) {
             assert(std::isfinite(val));
-            assert(val >= -0.1f && val <= 1.5f);
+            min_v = std::min(min_v, val);
+            max_v = std::max(max_v, val);
         }
+        std::cout << "  whisper mel range [" << min_v << ", " << max_v << "]" << std::endl;
+        assert(max_v - min_v <= 2.0f + 1e-5f);
+        assert(max_v > min_v);  // a pure tone is not flat across 80 bins
         std::cout << "  [PASS] Whisper-style per-utterance normalization parity" << std::endl;
     }
 

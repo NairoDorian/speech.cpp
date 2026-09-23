@@ -1265,8 +1265,17 @@ TensorData TensorSource::require_tensor_as_shape(
     TensorStorageType storage_type,
     std::initializer_list<int64_t> expected_source_shape,
     std::initializer_list<int64_t> tensor_shape) const {
-    const std::vector<int64_t> expected(expected_source_shape);
-    const core::TensorShape shape = shape_from_dims(std::vector<int64_t>(tensor_shape));
+    return require_tensor_as_shape(name, storage_type, std::vector<int64_t>(expected_source_shape),
+                                   std::vector<int64_t>(tensor_shape));
+}
+
+TensorData TensorSource::require_tensor_as_shape(
+    std::string_view name,
+    TensorStorageType storage_type,
+    const std::vector<int64_t> & expected_source_shape,
+    const std::vector<int64_t> & tensor_shape) const {
+    const std::vector<int64_t> & expected = expected_source_shape;
+    const core::TensorShape shape = shape_from_dims(tensor_shape);
     if (shape.num_elements() != std::accumulate(expected.begin(), expected.end(), int64_t{1}, std::multiplies<int64_t>())) {
         throw std::runtime_error("tensor source shape element count mismatch for " + std::string(name));
     }
@@ -1274,7 +1283,7 @@ TensorData TensorSource::require_tensor_as_shape(
     const ggml_type type = ggml_type_for_tensor_storage(resolve_tensor_storage_type(*this, name, storage_type));
     const auto raw = require_tensor_data(name);
     validate_expected_shape(name, raw.metadata.shape, expected);
-    if (raw.metadata.shape == std::vector<int64_t>(tensor_shape) &&
+    if (raw.metadata.shape == tensor_shape &&
         raw_dtype_matches_ggml_type(raw.metadata.dtype, type)) {
         validate_raw_tensor_byte_size(name, shape, type, raw.bytes.size());
         return TensorData{shape, type, raw.bytes};

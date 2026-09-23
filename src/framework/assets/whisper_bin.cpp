@@ -2,13 +2,14 @@
 //
 // Implements the TensorSource interface by parsing the ggml container format
 // used by whisper.cpp: a 0x67676d6c magic, 11 int32 hparams, mel filterbank,
-// token vocabulary, and a contiguous tensor manifest.  The file is read into
-// memory once on construction; individual tensor payloads are served on
-// demand from the in-memory buffer.
+// token vocabulary, and a contiguous tensor manifest.  Construction indexes
+// the manifest (names, types, shapes, payload offsets); each tensor payload is
+// read from disk on demand, so a multi-GB large-v3 .bin is never held in RAM.
 //
-// This consolidates the parallel parser in `src/runtime/transcribe-bin-loader.cpp`
-// (arch-level, C ABI) and the ported copy in `src/models/whisper/assets.cpp`
-// (engine-level) into a single `TensorSource` implementation.
+// The header / vocab parse for the engine `whisper` package lives in
+// src/models/whisper/assets.cpp (load_bin); this is its TensorSource. The
+// arch-side parallel parser (src/runtime/transcribe-bin-loader.cpp) was
+// deleted with the Whisper arch (Phase 11 W2b, ledger B16c).
 
 #include "engine/framework/assets/whisper_bin.h"
 
@@ -84,9 +85,9 @@ public:
         return out;
     }
 
-    void release_storage() const override {
-        data_.clear();
-    }
+    // Payloads are read from disk per tensor (read_payload), so there is no
+    // file-sized buffer to release.
+    void release_storage() const override {}
 
     RawTensorData require_tensor_data(std::string_view name) const override {
         auto it = index_.find(std::string(name));
@@ -95,14 +96,7 @@ public:
                 "tensor not found in whisper .bin: " + std::string(name));
         }
         const auto & entry = it->second;
-        const size_t offset = entry.byte_offset;
-        const size_t size = entry.byte_size;
-        if (offset + size > data_.size()) {
-            throw std::runtime_error(
-                "tensor data out of bounds in whisper .bin: " + std::string(name));
-        }
-        std::vector<std::byte> raw(size);
-        std::memcpy(raw.data(), data_.data() + offset, size);
+        std::vector<std::byte> raw = read_payload(entry);
         return RawTensorData{
             TensorMetadata{entry.name, ggml_type_name(entry.type), entry.shape},
             std::move(raw),
@@ -128,7 +122,8 @@ public:
             return n;
         }();
         std::vector<float> out(n_elem);
-        const auto * data = data_.data() + entry.byte_offset;
+        const std::vector<std::byte> payload = read_payload(entry);
+        const auto * data = reinterpret_cast<const uint8_t *>(payload.data());
         switch (entry.type) {
             case GGML_TYPE_F32:
                 std::memcpy(out.data(), data, n_elem * sizeof(float));
@@ -171,9 +166,30 @@ public:
 
 private:
     std::filesystem::path path_;
-    // File contents, read on construction.  Released after release_storage().
-    mutable std::vector<uint8_t> data_;
+    uint64_t file_size_ = 0;
     std::map<std::string, TensorEntry> index_;
+
+    // Streams one tensor's payload. Until 2026-09-23 the constructor read the
+    // WHOLE file into memory, so loading a large-v3 .bin (~3 GB) peaked at the
+    // file size on top of the backend copy; the engine Whisper package kept a
+    // private per-tensor streamer to avoid exactly that. Reading per tensor
+    // here lets it use this shared source instead (B31).
+    std::vector<std::byte> read_payload(const TensorEntry & entry) const {
+        if (entry.byte_offset + entry.byte_size > file_size_) {
+            throw std::runtime_error("tensor data out of bounds in whisper .bin: " + entry.name);
+        }
+        std::ifstream fin(path_, std::ios::binary);
+        if (!fin) {
+            throw std::runtime_error(std::string(kTag) + ": failed to reopen " + path_.string());
+        }
+        fin.seekg(static_cast<std::streamoff>(entry.byte_offset));
+        std::vector<std::byte> raw(entry.byte_size);
+        fin.read(reinterpret_cast<char *>(raw.data()), static_cast<std::streamsize>(entry.byte_size));
+        if (!fin) {
+            throw std::runtime_error(std::string(kTag) + ": short read for tensor " + entry.name);
+        }
+        return raw;
+    }
 
     // --- parsing -----------------------------------------------------------
 
@@ -209,38 +225,45 @@ private:
     }
 
     void read_and_parse() {
-        // Read entire file into memory.
+        // Header and manifest only: payloads are located (offset + size) and
+        // skipped, never read here.
         std::ifstream fin(path_, std::ios::binary | std::ios::ate);
         if (!fin) {
             throw std::runtime_error(std::string(kTag) + ": failed to open " + path_.string());
         }
-        const size_t file_size = static_cast<size_t>(fin.tellg());
-        data_.resize(file_size);
+        file_size_ = static_cast<uint64_t>(fin.tellg());
         fin.seekg(0);
-        fin.read(reinterpret_cast<char *>(data_.data()), static_cast<std::streamsize>(file_size));
-        if (!fin) {
-            throw std::runtime_error(std::string(kTag) + ": failed to read " + path_.string());
-        }
+        auto read_i32 = [&](const char * what) {
+            int32_t v = 0;
+            fin.read(reinterpret_cast<char *>(&v), sizeof(v));
+            if (!fin) {
+                throw std::runtime_error(std::string(kTag) + ": truncated file while reading " + what);
+            }
+            return v;
+        };
+        auto skip = [&](uint64_t bytes, const char * what) {
+            const uint64_t here = static_cast<uint64_t>(fin.tellg());
+            if (here + bytes > file_size_) {
+                throw std::runtime_error(std::string(kTag) + ": truncated file in " + what);
+            }
+            fin.seekg(static_cast<std::streamoff>(here + bytes));
+        };
 
         // --- magic ---
-        if (file_size < sizeof(uint32_t)) {
-            throw std::runtime_error(std::string(kTag) + ": file too small for magic");
-        }
-        uint32_t magic = 0;
-        std::memcpy(&magic, data_.data(), sizeof(magic));
-        if (magic != k_whisper_bin_magic) {
+        if (static_cast<uint32_t>(read_i32("magic")) != k_whisper_bin_magic) {
             throw std::runtime_error(std::string(kTag) + ": bad magic (not a whisper .bin)");
         }
 
-        // --- hparams (11 × int32), starting at offset 4 ---
-        const int32_t * hp = reinterpret_cast<const int32_t *>(data_.data() + 4);
-        // hp[0]=n_vocab, hp[1]=n_audio_ctx, hp[2]=n_audio_state, hp[3]=n_audio_head,
-        // hp[4]=n_audio_layer, hp[5]=n_text_ctx, hp[6]=n_text_state, hp[7]=n_text_head,
-        // hp[8]=n_text_layer, hp[9]=n_mels, hp[10]=ftype
-
+        // --- hparams (11 x int32): n_vocab, n_audio_ctx, n_audio_state,
+        //     n_audio_head, n_audio_layer, n_text_ctx, n_text_state,
+        //     n_text_head, n_text_layer, n_mels, ftype ---
+        int32_t hp[11];
+        for (int32_t & v : hp) {
+            v = read_i32("hparams");
+        }
         // Validate Whisper geometry (same gate as parse_whisper_bin).
-        const int32_t n_mels = hp[9];
         const int32_t n_vocab = hp[0];
+        const int32_t n_mels = hp[9];
         if (n_mels != 80 && n_mels != 128) {
             throw std::runtime_error(std::string(kTag) + ": hparams n_mels != 80/128");
         }
@@ -248,41 +271,36 @@ private:
             throw std::runtime_error(std::string(kTag) + ": hparams n_vocab not a known Whisper value");
         }
 
-        size_t pos = 4 + 11 * sizeof(int32_t);
-
         // --- mel filterbank ---
-        const int32_t n_mel_filters = *reinterpret_cast<const int32_t *>(data_.data() + pos);
-        pos += sizeof(int32_t);
-        const int32_t n_fft_filters = *reinterpret_cast<const int32_t *>(data_.data() + pos);
-        pos += sizeof(int32_t);
-        pos += static_cast<size_t>(n_mel_filters) * static_cast<size_t>(n_fft_filters) * sizeof(float);
+        const int32_t n_mel_filters = read_i32("mel n_mel");
+        const int32_t n_fft_filters = read_i32("mel n_fft");
+        if (n_mel_filters <= 0 || n_fft_filters <= 0) {
+            throw std::runtime_error(std::string(kTag) + ": invalid mel filter dimensions");
+        }
+        skip(static_cast<uint64_t>(n_mel_filters) * static_cast<uint64_t>(n_fft_filters) * sizeof(float),
+             "mel filterbank");
 
         // --- vocab ---
-        int32_t n_vocab_in_file = *reinterpret_cast<const int32_t *>(data_.data() + pos);
-        pos += sizeof(int32_t);
+        const int32_t n_vocab_in_file = read_i32("vocab count");
+        if (n_vocab_in_file < 0 || n_vocab_in_file > n_vocab) {
+            throw std::runtime_error(std::string(kTag) + ": vocab count inconsistent with n_vocab");
+        }
         for (int32_t i = 0; i < n_vocab_in_file; ++i) {
-            const uint32_t len = *reinterpret_cast<const uint32_t *>(data_.data() + pos);
-            pos += sizeof(uint32_t);
-            pos += len;
+            const int32_t len = read_i32("vocab token length");
+            if (len < 0) {
+                throw std::runtime_error(std::string(kTag) + ": negative vocab token length");
+            }
+            skip(static_cast<uint64_t>(len), "vocab");
         }
 
         // --- tensor manifest ---
-        while (pos + sizeof(int32_t) <= file_size) {
-            // Peek for clean EOF.
-            int32_t n_dims = *reinterpret_cast<const int32_t *>(data_.data() + pos);
-            if (pos + sizeof(int32_t) == file_size) {
-                break;  // clean EOF
-            }
-            if (pos + sizeof(int32_t) > file_size || n_dims < 1 || n_dims > 4) {
+        while (static_cast<uint64_t>(fin.tellg()) < file_size_) {
+            const int32_t n_dims = read_i32("tensor n_dims");
+            const int32_t name_len = read_i32("tensor name length");
+            const int32_t ttype = read_i32("tensor type");
+            if (n_dims < 1 || n_dims > 4) {
                 throw std::runtime_error(std::string(kTag) + ": truncated or invalid tensor header");
             }
-            pos += sizeof(int32_t);
-
-            int32_t name_len = *reinterpret_cast<const int32_t *>(data_.data() + pos);
-            pos += sizeof(int32_t);
-            int32_t ttype = *reinterpret_cast<const int32_t *>(data_.data() + pos);
-            pos += sizeof(int32_t);
-
             if (name_len <= 0 || name_len > 256) {
                 throw std::runtime_error(std::string(kTag) + ": invalid tensor name length");
             }
@@ -292,12 +310,17 @@ private:
 
             int64_t ne[4] = {1, 1, 1, 1};
             for (int32_t i = 0; i < n_dims; ++i) {
-                ne[i] = *reinterpret_cast<const int32_t *>(data_.data() + pos);
-                pos += sizeof(int32_t);
+                ne[i] = read_i32("tensor dim");
+                if (ne[i] <= 0) {
+                    throw std::runtime_error(std::string(kTag) + ": non-positive tensor dim");
+                }
             }
 
-            std::string name(reinterpret_cast<const char *>(data_.data() + pos), name_len);
-            pos += name_len;
+            std::string name(static_cast<size_t>(name_len), '\0');
+            fin.read(name.data(), name_len);
+            if (!fin) {
+                throw std::runtime_error(std::string(kTag) + ": truncated tensor name");
+            }
 
             const ggml_type type = static_cast<ggml_type>(ttype);
             const uint64_t nbytes = tensor_nbytes(type, ne);
@@ -307,7 +330,7 @@ private:
 
             // Reverse ggml ne-order (fastest first) to row-major (slowest first).
             std::vector<int64_t> shape;
-            shape.reserve(n_dims);
+            shape.reserve(static_cast<size_t>(n_dims));
             for (int32_t i = n_dims - 1; i >= 0; --i) {
                 shape.push_back(ne[i]);
             }
@@ -316,11 +339,11 @@ private:
             entry.name = std::move(name);
             entry.type = type;
             entry.shape = std::move(shape);
-            entry.byte_offset = pos;
+            entry.byte_offset = static_cast<size_t>(fin.tellg());
             entry.byte_size = static_cast<size_t>(nbytes);
+            skip(nbytes, "tensor payload");
 
             index_.try_emplace(entry.name, std::move(entry));
-            pos += nbytes;
         }
 
         if (index_.empty()) {

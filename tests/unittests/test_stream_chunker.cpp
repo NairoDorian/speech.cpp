@@ -1,3 +1,8 @@
+// These checks use assert() and the suite builds Release, where NDEBUG
+// compiles every one of them out - until 2026-09-23 this test could not
+// fail. Keep the checks live regardless of build type.
+#undef NDEBUG
+
 #include "engine/framework/runtime/stream_chunker.h"
 
 #include <cassert>

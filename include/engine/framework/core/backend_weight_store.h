@@ -413,51 +413,15 @@ private:
         if (source_shape.empty() || source_shape.size() > kMaxTensorRank) {
             throw std::runtime_error(name_ + " source tensor rank must be between 1 and 4");
         }
-        if (tensor_shape.rank == 1) {
-            if (source_shape.size() == 1) {
-                return source.require_tensor_as_shape(
-                    tensor_name, storage_type, {source_shape[0]}, {tensor_shape.dims[0]});
-            }
-        } else if (tensor_shape.rank == 2) {
-            if (source_shape.size() == 2) {
-                return source.require_tensor_as_shape(
-                    tensor_name,
-                    storage_type,
-                    {source_shape[0], source_shape[1]},
-                    {tensor_shape.dims[0], tensor_shape.dims[1]});
-            }
-            if (source_shape.size() == 3) {
-                return source.require_tensor_as_shape(
-                    tensor_name,
-                    storage_type,
-                    {source_shape[0], source_shape[1], source_shape[2]},
-                    {tensor_shape.dims[0], tensor_shape.dims[1]});
-            }
-        } else if (tensor_shape.rank == 3) {
-            if (source_shape.size() == 2) {
-                return source.require_tensor_as_shape(
-                    tensor_name,
-                    storage_type,
-                    {source_shape[0], source_shape[1]},
-                    {tensor_shape.dims[0], tensor_shape.dims[1], tensor_shape.dims[2]});
-            }
-            if (source_shape.size() == 3) {
-                return source.require_tensor_as_shape(
-                    tensor_name,
-                    storage_type,
-                    {source_shape[0], source_shape[1], source_shape[2]},
-                    {tensor_shape.dims[0], tensor_shape.dims[1], tensor_shape.dims[2]});
-            }
-        } else if (tensor_shape.rank == 4) {
-            if (source_shape.size() == 4) {
-                return source.require_tensor_as_shape(
-                    tensor_name,
-                    storage_type,
-                    {source_shape[0], source_shape[1], source_shape[2], source_shape[3]},
-                    {tensor_shape.dims[0], tensor_shape.dims[1], tensor_shape.dims[2], tensor_shape.dims[3]});
-            }
+        if (tensor_shape.rank == 0 || tensor_shape.rank > kMaxTensorRank) {
+            throw std::runtime_error(name_ + " unsupported tensor reshape rank");
         }
-        throw std::runtime_error(name_ + " unsupported tensor reshape rank");
+        // Any rank pair with equal element counts (e.g. a legacy .bin conv
+        // bias stored [C, 1] loaded as [C]); the source validates the counts.
+        // This used to enumerate rank pairs by hand and rejected [C, 1] -> [C].
+        const std::vector<int64_t> target(tensor_shape.dims.begin(),
+                                          tensor_shape.dims.begin() + static_cast<ptrdiff_t>(tensor_shape.rank));
+        return source.require_tensor_as_shape(tensor_name, storage_type, source_shape, target);
     }
 
     std::vector<std::byte> values_to_bytes(
