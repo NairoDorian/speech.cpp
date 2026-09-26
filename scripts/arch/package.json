@@ -1,0 +1,15 @@
+{
+  "name": "speechcpp-arch-tools",
+  "private": true,
+  "type": "module",
+  "description": "Generates ARCHITECTURE.md (repomix-derived map), the repomix pack, and runs the pre-commit routine. See scripts/arch/README.md.",
+  "scripts": {
+    "arch": "bun gen-architecture.ts",
+    "arch:check": "bun gen-architecture.ts --check",
+    "repomix": "bun repomix.ts",
+    "precommit": "bun pre-commit.ts"
+  },
+  "devDependencies": {
+    "repomix": "1.18.1"
+  }
+}

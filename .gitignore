@@ -64,3 +64,7 @@ build_qwen3.log
 
 # local-only: 0.1B Falcon-H1 detailed port plan (keep local, not upstream)
 docs/FALCON_H1_0.1B_PORT_PLAN.md
+
+# --- repomix / architecture tooling (scripts/arch) ---
+/repomix-output.xml
+/scripts/arch/node_modules/

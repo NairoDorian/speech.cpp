@@ -1,0 +1,12 @@
+#!/bin/sh
+#
+# speech.cpp commit gate. Activated once per clone with:
+#     git config core.hooksPath .githooks
+# git runs hooks with sh (Git Bash on Windows), so this shim only hands over to
+# the real routine, scripts/arch/pre-commit.ts (bun): it regenerates the
+# repomix-derived ARCHITECTURE.md and runs fast staged-file hygiene checks.
+# Nothing here builds or tests: that is the phase-exit routine (AGENTS.md).
+#
+# Bypass with `git commit --no-verify` (rarely right).
+
+exec bun "$(git rev-parse --show-toplevel)/scripts/arch/pre-commit.ts"
