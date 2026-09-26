@@ -1,5 +1,8 @@
 # Binding Author Notes
 
+> **speech.cpp note (2026-09-26).** This describes transcribe.cpp's binding generator. In speech.cpp the header is `include/transcribe/transcribe.h` (+ `extensions.h`) today, and **`speech.h` is the target ABI** (V7-D1). Bindings are **Rust first** (a `speech-sys` / `speech` crate with model-set Cargo features, building from source or linking a BUNDLE install tree), then Python, then TypeScript (`PLAN.md` phase 13, phase E). The `transcribe-cpp` crate keeps working through the `transcribe.h` shim so ZER0 and Android_FreeSpeech can switch backend first.
+
+
 Use `include/transcribe/extensions.h` as the default header for generated
 bindings. It includes `transcribe.h` plus every family extension header shipped
 by the install, so generators see the full public surface in one translation

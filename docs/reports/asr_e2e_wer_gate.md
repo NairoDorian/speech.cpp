@@ -1,5 +1,8 @@
 # End-to-end ASR WER gates (unified C ABI)
 
+> **speech.cpp note (2026-09-26).** The 10 % bound described below is a structural tripwire, not a regression gate. The checkpoint audit found every registration relying on it while the baselines are 1–3 edits (LESSONS A10). `PLAN.md` S1.3 makes every registration pass `baseline edits + 1`. The port bar remains "== the reference baseline".
+
+
 This report records the end-to-end speech-to-text validation of the unified
 runtime: real GGUF ASR models loaded through `transcribe_open()`, the in-tree
 LibriSpeech fixtures transcribed through `transcribe_run()` — and, since

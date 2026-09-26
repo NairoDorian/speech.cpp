@@ -1,5 +1,8 @@
 # audio.cpp C ABI (`libaudiocpp`)
 
+> **Legacy ABI: frozen, and retiring (V7-D1, 2026-09-26).** No new entry points. It is **retired, not shimmed**, once `speech.h` reaches parity (`PLAN.md` S3.3, ledger row B32). It shares the library name `audiocpp` and three symbol names (`audiocpp_stream_start/push/finish`) with upstream's different `include/audiocpp.h`; do not mix them (`PLAN.md` K2 / S1.1). New integrations should use `transcribe.h` now and `speech.h` later.
+
+
 A minimal C interface exposing audio.cpp's model loading, inference, and
 streaming capabilities to foreign-language runtimes (Rust FFI, Python
 ctypes, Go cgo, etc.).

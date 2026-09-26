@@ -6,6 +6,17 @@
 > **Date**: 2026-08-26
 > **Supersedes**: v5.0 (2026-08-23). See [§0.4](#04-what-changed-structurally-from-v5) for the structural changes and [`docs/reports/fusion_review_2026-08-26.md`](docs/reports/fusion_review_2026-08-26.md) for the review that produced them.
 > **Tree audited at**: `5e1a7e5` (`main`, 66 commits ahead of `upstream/audio.cpp@c79e588`, 0 behind); parents read at `audio.cpp@c79e588`, `transcribe.cpp@2102bca`
+>
+> **⚠ 2026-09-26: v7 proposal pending.**
+> - A third reference source, CrispASR (`../CrispASR`), was added.
+> - A ground-up re-review is in [`docs/reports/fusion_rethink_2026-09-26.md`](docs/reports/fusion_rethink_2026-09-26.md).
+> - It keeps the engine spine but proposes, in order:
+>   1. S0: stabilize and sync; ggml ≥ 0.25.3, since L13 is currently red.
+>   2. S1: an ABI decision, because two different `audiocpp.h` files now coexist.
+>   3. S2: enforce 11a *before* further ports.
+>   4. CrispASR as a mined reference parent, not merged.
+>   5. New task kinds.
+> - Decisions D1–D6 in that note are open. Until they are taken, this v6.0 plan remains authoritative.
 
 ---
 
@@ -1243,6 +1254,16 @@ Deletions: `src/runtime/arch/{qwen3_asr, voxtral_realtime, sortformer, sensevoic
 | **W4** | `canary`, `canary_qwen`, `voxtral` (offline) | Larger; `canary` pair shares a decoder lineage, both have batched paths. `voxtral` unlocks `voxtral-mini-3b`, `voxtral-mini-4b-realtime` and `voxtral-small-24b`, none of which any engine loader can reach today |
 | **W5** | `granite`, `granite_nar`, `moss` (ASR + diarization) | `granite` pair depends on Shaw relative attention (§5.3) landing in the framework module. `moss_asr` lands under its new canonical id from §10.7, alongside the untouched `moss_tts_*` families |
 | **W6** | Phase-10 survivors' arch copies retired | Bookkeeping close-out |
+
+> **Re-plan (2026-09-24).** audio.cpp #568 (`16797a73`, 2026-09-16, merged into speech.cpp) added engine
+> packages `canary_asr`, `cohere_asr` and `moss_transcribe_diarize` (500-700 LOC each, on shared framework
+> modules). For those three families W3-W5 are no longer ports but **Phase-10.5-style verdicts**: pin a
+> model, measure arch vs engine through the C ABI (text, timestamps, batch, streaming, ext knobs), merge the
+> loser's features into the winner, then retire - the cheap path W1/W2 did not have. Remaining true ports
+> (no engine package on either side): `gigaam`, `medasr`, `canary_qwen`, `voxtral` (offline), `granite`,
+> `granite_nar`, and the embedded sortformer core parakeet's multitalker uses. `parakeet` stays arch-canonical
+> (10.1) until its engine port. Status of what is left, measured 2026-09-24: `src/runtime` 63.2k LOC (from ~95k),
+> of which 44k in the 11 arch families and 19.5k shared runtime.
 
 #### Per-family procedure
 

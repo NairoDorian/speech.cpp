@@ -1,5 +1,13 @@
 # Client Compact Minimized Build Profile
 
+> **2026-09-26 — superseded direction.** speech.cpp's app build is becoming the **BUNDLE profile** (PLAN.md phase E, decision V7-D7). The full DEV profile keeps the server, WebUI and tools for testing.
+> - The BUNDLE profile is library-only: no CLI, no GGUF tool, no server or WebUI.
+> - It has named model-set composites and Cargo features, down to a single family.
+> - It exposes the unified ABI (`transcribe.h`, then `speech.h`) instead of the legacy `audiocpp` C ABI this profile ships.
+> - It provides an install tree + link manifest for Rust `build.rs`, and per-model bundling.
+>
+> This profile stays usable until E1 lands, then it is replaced.
+
 This guide describes how to configure, build, and integrate the **`client-compact-minimized-build`** profile for `speech.cpp`.
 
 This build profile is specifically optimized for client-side and desktop GUI applications that embed speech processing (STT and TTS) without requiring the HTTP server, WebUI frontend assets, or hundreds of megabytes of unused model architectures.

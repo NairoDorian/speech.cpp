@@ -17,7 +17,7 @@
       "name": "cpu-full",
       "inherits": "dev-base",
       "displayName": "CPU, full model set, unified ABI + transcribe arches",
-      "description": "The configuration the merge is validated against on CPU (progress.md test baseline; includes abi_bridge_hello / abi_stream_hello / asr_e2e_wer_test).",
+      "description": "The configuration the merge is validated against on CPU (suite of record, see PLAN.md §2; includes abi_bridge_hello / abi_stream_hello / asr_e2e_wer_test).",
       "binaryDir": "${sourceDir}/build-cpu-full",
       "cacheVariables": {
         "AUDIOCPP_MODEL_SET": "full",

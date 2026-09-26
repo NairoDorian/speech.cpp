@@ -1,5 +1,12 @@
 # Family Checklist
 
+> **speech.cpp note (2026-09-26).** This guide comes from transcribe.cpp and is kept verbatim so parent diffs stay easy to triage. **In speech.cpp, translate it as follows** ([`PLAN.md`](../../PLAN.md) *North star*, rules R1–R11):
+> - `src/arch/<family>/` means **an engine package**: `src/models/<family>/` (graphs, assets, thin session), `include/engine/models/<family>/` and `model_specs/<family>.json`, on the shared `framework/*` layers. **No private KV cache, decode loop, loader, mel or scheduler** (rule R5). Existing transcribe arches live in `src/runtime/arch/` only until they retire.
+> - Before starting, answer the scope question (R9: does FreeSpeech need it, and in which profile?) and run the upstream-first check (R4 / L16).
+> - Tests follow the quick/full tiers (one short clip by default; `AGENTS.md`). The port bar is WER equal to the reference baseline.
+> - The family must build in the BUNDLE profile for desktop **and** Android (R1, R2).
+
+
 Use this checklist to decide whether a model family is ready to call
 supported.
 

@@ -1,5 +1,8 @@
 # GGML Reference Map
 
+> **speech.cpp note (2026-09-26).** Paths `src/arch/...`, `src/conformer/...` are transcribe.cpp's tree. In speech.cpp they live under `src/runtime/...` until retirement; new work goes into engine packages on `framework/*` ([`PLAN.md`](../../PLAN.md) rule R5).
+
+
 > Paths of the form `src/arch/<family>/...` are transcribe.cpp's tree (parent
 > repo, read at `2102bca`), which speech.cpp carries under
 > `src/runtime/arch/<family>/` until Phase 10.5 / 11 retires each family into

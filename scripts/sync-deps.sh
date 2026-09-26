@@ -9,7 +9,7 @@
 # improvement in transcribe.cpp is exactly as authoritative as one in
 # audio.cpp, and a dependency bump on either parent (ggml above all) is a
 # first-class upstream change for us. See AGENTS.md "Dual Parentage" and
-# MULTI_AGENT_FUSION_PLAN_AND_TRACKER.md Operating Rules 6 and 7.
+# AGENTS.md "Upstream sync rules" (formerly tracker Operating Rules 6 and 7).
 #
 # Usage:
 #   scripts/sync-deps.sh                # drift report (fetches remote REFS only)
