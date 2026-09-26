@@ -46,7 +46,7 @@ external/ggml (generated: pin + patches/ggml)
 
 | Directory | Files | Lines | Tokens | What it is |
 |---|--:|--:|--:|---|
-| _(root files)_ | 11 | 9.16k | 148k | Top-level docs and build entry points (README, PLAN, AGENTS, LESSONS, CHANGELOG, CMakeLists.txt, presets). |
+| _(root files)_ | 11 | 9.17k | 148k | Top-level docs and build entry points (README, PLAN, AGENTS, LESSONS, CHANGELOG, CMakeLists.txt, presets). |
 | `app/` | 51 | 13.9k | 137k | DEV-profile tools (never a library dependency, R1): CLI, server + WebUI, GGUF tool, model manager, workflow. |
 | &nbsp;&nbsp;`app/cli/` | 8 | 2.09k | 21.2k | audiocpp_cli: run any family from the command line (DEV). |
 | &nbsp;&nbsp;`app/common/` | 3 | 74 | 581 | Code shared by the DEV apps. |

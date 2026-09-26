@@ -247,7 +247,7 @@ S0 → S1 → S2 → S3 → E (BUNDLE profile + composites + Android; E0–E4 ma
     - [ ] h. moss: caps and diarization contract differences. Record them as decisions, or fix. *Gate:* `verdict_moss`.
     - [ ] i. `transcribe_stream_committed_pointer_stability`: pass `TRANSCRIBE_MOONSHINE_STREAMING_TINY_GGUF` in its registration (harness gap, not an asset issue).
   - Fix commits go **one family (or one shared cause) per commit**, each quoting the gate that turned green, with the user's go-ahead. The batch itself had to be one commit because shared `CMakeLists.txt` hunks could not be split; don't repeat that.
-  - Drop `stash@{0}` (superseded premature B16c) with the user's OK.
+  - [x] `stash@{0}` (`transcribe-sync-wip`, 2026-09-11; it was a partial transcribe.cpp copy, not a premature B16c as earlier notes said) was verified to be fully recoverable from transcribe.cpp and dropped on 2026-09-26. Its unadopted parts are listed under S0.3.
   - *Gate:* `ctest -L quick` green in `build-cpu-asr-abi`; core suite green.
 - [ ] **S0.2 audio.cpp merge (21 commits)** as a recorded merge.
   - Treat `4d88768f` as a re-release of the already-merged `9bdd1d90`; adopt its `/utf-8` hunk.
@@ -261,6 +261,10 @@ S0 → S1 → S2 → S3 → E (BUNDLE profile + composites + Android; E0–E4 ma
   - CUDA-graphs default;
   - qwen3_asr packed QKV.
 
+  Also adopt what the dropped 2026-09-11 stash (`transcribe-sync-wip`) had started, taking the **current** transcribe.cpp versions:
+  - the C-ABI smokes `gigaam_workspace_release_smoke`, `voxtral_realtime_real_smoke`, `qwen3_asr_batch_truncation` and `qwen3_asr_e2e_smoke` (transcribe.cpp `tests/`), registered in `cmake/transcribe-tests.cmake` with their `TRANSCRIBE_*_GGUF` variables (they test retired families through the C ABI, so they stay useful);
+  - the transcribe ABI version bump (speech.cpp is still at 0.2.0; the parent is at 0.2.4) with its `transcribe.abihash`.
+  The bindings it copied come later, in phase 13.
   *Gate:* `status.sh` shows `transcribe_cpp_untriaged: 0`.
 - [ ] **S0.4 ggml → ≥ 0.25.3** (`353b63b4` or newer) with `sync-ggml.sh <40-char sha>`.
   - Rebase the 15 patches.
