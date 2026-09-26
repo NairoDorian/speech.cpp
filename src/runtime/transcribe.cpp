@@ -27,6 +27,7 @@
 #include "transcribe-path.h"
 #include "transcribe-session.h"
 #include "transcribe-tokenizer.h"
+#include "engine/framework/assets/asset_paths.h"
 #include "engine/framework/audio/activity.h"
 #include "engine/framework/audio/chunking.h"
 #include "engine/framework/runtime/model.h"
@@ -1594,7 +1595,11 @@ static transcribe_status transcribe_model_load_file_impl(const char *           
 
     // Per-family dispatch. The architecture string came from the GGUF KV so
     // the loader guarantees it is non-null and NUL-terminated.
-    const transcribe::Arch * arch = transcribe::find_arch(loader.arch().c_str());
+    // SPEECHCPP_ENGINE_ARCHS (Phase 11b verdicts) sends a listed arch name
+    // down the engine path below even while its builtin arch still exists.
+    const transcribe::Arch * arch = transcribe::engine_route_forced(loader.arch().c_str())
+        ? nullptr
+        : transcribe::find_arch(loader.arch().c_str());
     if (arch == nullptr) {
         // No builtin transcribe arch and no adapter-table name claims this
         // GGUF architecture. Two shapes reach the engine here through the
@@ -2298,7 +2303,8 @@ std::vector<time_span> detect_speech(const float * pcm, int n_samples, int sampl
         std::lock_guard<std::mutex> lock(s_vad_mutex);
         if (!s_silero_model) {
             engine::runtime::ModelLoadRequest req;
-            req.model_path = std::filesystem::path(vp.weight_path ? std::string(vp.weight_path) : "assets/framework/models/silero_vad");
+            req.model_path = vp.weight_path ? std::filesystem::path(std::string(vp.weight_path))
+                                            : engine::assets::resolve_bundled_asset("assets/framework/models/silero_vad");
             req.family_hint = "silero_vad";
             try {
                 auto loader = engine::models::silero_vad::make_silero_vad_loader();

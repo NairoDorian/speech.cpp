@@ -1,0 +1,215 @@
+{
+  "schema_version": 1,
+  "family": "voxtral",
+  "display_name": "Mistral Voxtral (2507)",
+  "description": "Mistral Voxtral Mini 3B / Small 24B (2507) offline speech recognition and speech translation: a Whisper-large-v3 audio encoder whose frames are grouped 4x and projected into a Llama/Ministral causal LM through audio-token injection, decoded greedily. Loads the transcribe.cpp GGUF layout (general.architecture = voxtral).",
+  "category": "asr",
+  "status": "supported",
+  "tasks": [
+    "asr"
+  ],
+  "modes": [
+    "offline"
+  ],
+  "languages": [
+    "en",
+    "fr",
+    "de",
+    "es",
+    "it",
+    "pt",
+    "nl",
+    "hi"
+  ],
+  "capabilities": {
+    "asr": [
+      "cancellation"
+    ]
+  },
+  "runtime": {
+    "tags": [
+      "gguf",
+      "cpu"
+    ]
+  },
+  "options": {
+    "request": [
+      {
+        "name": "language",
+        "type": "string",
+        "description": "Spoken-language hint added to the prompt as lang:<code>; empty or auto lets the model detect it.",
+        "required": false
+      },
+      {
+        "name": "task",
+        "type": "string",
+        "description": "transcribe (default) or translate (the instruct template 'Translate this to {Language}.'); the C ABI's task field.",
+        "required": false,
+        "default": "transcribe"
+      },
+      {
+        "name": "target_language",
+        "type": "string",
+        "description": "Translation target language code (en, fr, de, es, it, pt, nl, hi); defaults to English.",
+        "required": false
+      },
+      {
+        "name": "timestamps",
+        "type": "string",
+        "description": "Accepted and ignored: none or auto only; the model returns one untimed transcript (the C ABI's timestamps field).",
+        "required": false,
+        "default": "none"
+      }
+    ],
+    "session": [
+      {
+        "name": "kv_type",
+        "type": "enum",
+        "description": "Decoder KV-cache dtype: f16 (default, the transcribe.cpp AUTO policy), f32, or auto (= f16).",
+        "values": [
+          "f16",
+          "f32",
+          "auto"
+        ],
+        "required": false,
+        "default": "f16"
+      },
+      {
+        "name": "n_ctx",
+        "type": "int",
+        "description": "Lower the decoder context ceiling (audio tokens + prompt + generation); 0 uses decoder.max_position_embeddings.",
+        "required": false,
+        "min": 0,
+        "default": 0
+      }
+    ],
+    "load": []
+  },
+  "package_defaults": {
+    "download": {
+      "kind": "huggingface_snapshot",
+      "repo": "handy-computer/Voxtral-Mini-3B-2507-gguf",
+      "revision": "main",
+      "gated": false
+    }
+  },
+  "packages": [
+    {
+      "id": "voxtral_mini_3b_2507_q8_0",
+      "display_name": "Voxtral Mini 3B (2507) Q8_0 GGUF",
+      "default": true,
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "Voxtral-Mini-3B-2507-gguf",
+      "files": [
+        "Voxtral-Mini-3B-2507-Q8_0.gguf"
+      ]
+    },
+    {
+      "id": "voxtral_mini_3b_2507_q6_k",
+      "display_name": "Voxtral Mini 3B (2507) Q6_K GGUF",
+      "format": "gguf",
+      "precision": "q6_k",
+      "target_directory": "Voxtral-Mini-3B-2507-gguf",
+      "files": [
+        "Voxtral-Mini-3B-2507-Q6_K.gguf"
+      ]
+    },
+    {
+      "id": "voxtral_mini_3b_2507_q5_k_m",
+      "display_name": "Voxtral Mini 3B (2507) Q5_K_M GGUF",
+      "format": "gguf",
+      "precision": "q5_k_m",
+      "target_directory": "Voxtral-Mini-3B-2507-gguf",
+      "files": [
+        "Voxtral-Mini-3B-2507-Q5_K_M.gguf"
+      ]
+    },
+    {
+      "id": "voxtral_mini_3b_2507_q4_k_m",
+      "display_name": "Voxtral Mini 3B (2507) Q4_K_M GGUF",
+      "format": "gguf",
+      "precision": "q4_k_m",
+      "target_directory": "Voxtral-Mini-3B-2507-gguf",
+      "files": [
+        "Voxtral-Mini-3B-2507-Q4_K_M.gguf"
+      ]
+    },
+    {
+      "id": "voxtral_mini_3b_2507_f16",
+      "display_name": "Voxtral Mini 3B (2507) F16 GGUF",
+      "format": "gguf",
+      "precision": "f16",
+      "target_directory": "Voxtral-Mini-3B-2507-gguf",
+      "files": [
+        "Voxtral-Mini-3B-2507-F16.gguf"
+      ]
+    },
+    {
+      "id": "voxtral_mini_3b_2507_bf16",
+      "display_name": "Voxtral Mini 3B (2507) BF16 GGUF",
+      "format": "gguf",
+      "precision": "bf16",
+      "target_directory": "Voxtral-Mini-3B-2507-gguf",
+      "files": [
+        "Voxtral-Mini-3B-2507-BF16.gguf"
+      ]
+    },
+    {
+      "id": "voxtral_small_24b_2507_q8_0",
+      "display_name": "Voxtral Small 24B (2507) Q8_0 GGUF",
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "Voxtral-Small-24B-2507-gguf",
+      "files": [
+        "Voxtral-Small-24B-2507-Q8_0.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/Voxtral-Small-24B-2507-gguf",
+        "revision": "main",
+        "gated": false
+      }
+    },
+    {
+      "id": "voxtral_small_24b_2507_q4_k_m",
+      "display_name": "Voxtral Small 24B (2507) Q4_K_M GGUF",
+      "format": "gguf",
+      "precision": "q4_k_m",
+      "target_directory": "Voxtral-Small-24B-2507-gguf",
+      "files": [
+        "Voxtral-Small-24B-2507-Q4_K_M.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/Voxtral-Small-24B-2507-gguf",
+        "revision": "main",
+        "gated": false
+      }
+    }
+  ],
+  "dependencies": [],
+  "ui": {
+    "recommended_package": "voxtral_mini_3b_2507_q8_0",
+    "tags": [
+      "ASR",
+      "GGUF"
+    ],
+    "docs": [
+      "docs/asr.md",
+      "docs/gguf.md"
+    ]
+  },
+  "sources": [
+    {
+      "format": "gguf",
+      "roots": {
+        "model": ".",
+        "weights": "$gguf"
+      },
+      "tensors": {
+        "weights": "weights:"
+      }
+    }
+  ]
+}

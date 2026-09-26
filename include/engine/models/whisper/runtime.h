@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/framework/audio/mel_extractor.h"
+#include "engine/framework/core/backend.h"
 #include "engine/framework/core/backend_weight_store.h"
 #include "engine/framework/core/execution_context.h"
 #include "engine/framework/core/module.h"
@@ -80,6 +81,11 @@ private:
                      int n_frames);
   void decode_prompt(const std::vector<int32_t> &tokens, int n_past, int sot_row,
                      std::vector<float> *sot_logits, std::vector<float> &last_logits);
+  // One greedy/beam step through the cached static step graph (W2b.3).
+  void decode_static_step(int32_t token, int n_past, std::vector<float> &logits);
+  // Drop the cached step graph; required whenever kv_cache_ is (re)allocated
+  // because the graph holds views of the KV tensors.
+  void release_static_step();
 
   std::shared_ptr<const WhisperAssets> assets_;
   core::ExecutionContext &execution_context_;
@@ -95,6 +101,17 @@ private:
   GraphRun encoder_run_;
   GraphRun cross_kv_run_;
   GraphRun step_run_;
+
+  // W2b.3: the single-token decoder step graph is built once per KV cache
+  // (build_decoder_step_graph) and reused for every token, instead of
+  // ggml_init + graph build + gallocr per token. Set
+  // SPEECHCPP_WHISPER_STATIC_STEP=0 to fall back to the per-token graph
+  // (parity debugging).
+  bool static_step_enabled_ = true;
+  GraphRun static_step_run_;
+  DecoderBuild static_step_{};
+  core::HostGraphPlan static_step_plan_;
+  std::vector<float> static_step_mask_;
 };
 
 } // namespace engine::models::whisper

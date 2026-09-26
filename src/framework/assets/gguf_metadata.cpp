@@ -168,6 +168,35 @@ std::optional<std::string> GgufMetadata::find_string(std::string_view key) const
     return std::string(gguf_get_val_str(gguf_, id));
 }
 
+std::optional<std::vector<float>> GgufMetadata::find_f32_array(std::string_view key) const {
+    const int64_t id = key_id(key);
+    if (id < 0) {
+        return std::nullopt;
+    }
+    if (gguf_get_kv_type(gguf_, id) != GGUF_TYPE_ARRAY) {
+        fail_type(key, "float array");
+    }
+    const gguf_type elem = gguf_get_arr_type(gguf_, id);
+    const size_t n = gguf_get_arr_n(gguf_, id);
+    std::vector<float> out(n);
+    const void * data = n > 0 ? gguf_get_arr_data(gguf_, id) : nullptr;
+    switch (elem) {
+    case GGUF_TYPE_FLOAT32:
+        for (size_t i = 0; i < n; ++i) {
+            out[i] = static_cast<const float *>(data)[i];
+        }
+        break;
+    case GGUF_TYPE_FLOAT64:
+        for (size_t i = 0; i < n; ++i) {
+            out[i] = static_cast<float>(static_cast<const double *>(data)[i]);
+        }
+        break;
+    default:
+        fail_type(key, "float array");
+    }
+    return out;
+}
+
 std::optional<std::vector<int32_t>> GgufMetadata::find_i32_array(std::string_view key) const {
     const int64_t id = key_id(key);
     if (id < 0) {

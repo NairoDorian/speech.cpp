@@ -8,7 +8,9 @@
 
 #include "transcribe-arch-adapter.h"
 
+#include <cstdlib>
 #include <cstring>
+#include <string_view>
 
 namespace transcribe {
 
@@ -96,6 +98,36 @@ const Arch * find_arch(const char * name) {
         return a;
     }
     return nullptr;
+}
+
+bool engine_route_forced(const char * name) {
+    if (name == nullptr || name[0] == '\0') {
+        return false;
+    }
+    const char * list = std::getenv("SPEECHCPP_ENGINE_ARCHS");
+    if (list == nullptr || list[0] == '\0') {
+        return false;
+    }
+    const std::string_view wanted(name);
+    std::string_view rest(list);
+    while (!rest.empty()) {
+        const size_t comma = rest.find(',');
+        std::string_view item = rest.substr(0, comma);
+        while (!item.empty() && item.front() == ' ') {
+            item.remove_prefix(1);
+        }
+        while (!item.empty() && item.back() == ' ') {
+            item.remove_suffix(1);
+        }
+        if (item == "all" || item == wanted) {
+            return true;
+        }
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        rest.remove_prefix(comma + 1);
+    }
+    return false;
 }
 
 }  // namespace transcribe

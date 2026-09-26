@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <numeric>
@@ -135,6 +136,10 @@ WhisperRuntime::WhisperRuntime(std::shared_ptr<const WhisperAssets> model_assets
   backend_ = execution_context_.backend();
   if (backend_ == nullptr) {
     fail("execution backend is not initialized");
+  }
+  if (const char *env = std::getenv("SPEECHCPP_WHISPER_STATIC_STEP");
+      env != nullptr && std::strcmp(env, "0") == 0) {
+    static_step_enabled_ = false;
   }
   store_ = std::make_shared<core::BackendWeightStore>(
       backend_, execution_context_.backend_type(), "whisper.weights",
@@ -260,6 +265,7 @@ WhisperRuntime::WhisperRuntime(std::shared_ptr<const WhisperAssets> model_assets
 }
 
 WhisperRuntime::~WhisperRuntime() {
+  release_static_step();
   encoder_run_.free();
   cross_kv_run_.free();
   step_run_.free();
@@ -340,6 +346,7 @@ void WhisperRuntime::encode_window(const std::vector<float> &mel, int total_fram
     kv_cache_.free();
   }
   if (kv_cache_.buffer == nullptr) {
+    release_static_step(); // its graph views the KV tensors being replaced
     const int n_ctx = hp.dec_max_target_positions > 0 ? hp.dec_max_target_positions : 448;
     if (!engine::asr::kv_cache_init(kv_cache_, backend_, n_ctx, T_enc_, hp.dec_d_model,
                                     hp.dec_n_layers, kv_type_)) {
@@ -384,6 +391,11 @@ void WhisperRuntime::decode_prompt(const std::vector<int32_t> &tokens, int n_pas
   const auto &hp = assets_->hparams;
   const int vocab = hp.dec_vocab_size;
   const int n_tokens = static_cast<int>(tokens.size());
+
+  if (n_tokens == 1 && sot_logits == nullptr && static_step_enabled_) {
+    decode_static_step(tokens[0], n_past, last_logits);
+    return;
+  }
 
   ggml_init_params params{64ull * 1024ull * 1024ull, nullptr, /*no_alloc=*/true};
   step_run_.free();
@@ -442,6 +454,73 @@ void WhisperRuntime::decode_prompt(const std::vector<int32_t> &tokens, int n_pas
                             row_bytes * static_cast<size_t>(sot_row), row_bytes);
   }
   kv_cache_.n = n_past + n_tokens;
+  kv_cache_.head = kv_cache_.n;
+}
+
+void WhisperRuntime::release_static_step() {
+  static_step_plan_.reset(); // the plan references the graph: free it first
+  static_step_run_.free();
+  static_step_ = DecoderBuild{};
+}
+
+void WhisperRuntime::decode_static_step(int32_t token, int n_past,
+                                        std::vector<float> &logits) {
+  const auto &hp = assets_->hparams;
+  const int n_ctx = kv_cache_.n_ctx;
+  if (n_past < 0 || n_past >= n_ctx) {
+    fail("decoder step position " + std::to_string(n_past) + " outside the " +
+         std::to_string(n_ctx) + "-token KV cache");
+  }
+
+  core::set_backend_threads(backend_, std::max(1, execution_context_.config().threads));
+  if (static_step_run_.graph == nullptr) {
+    ggml_init_params params{64ull * 1024ull * 1024ull, nullptr, /*no_alloc=*/true};
+    static_step_run_.ctx = ggml_init(params);
+    if (static_step_run_.ctx == nullptr) {
+      fail("failed to init decoder step context");
+    }
+    static_step_ = build_decoder_step_graph(static_step_run_.ctx, weights_, hp, kv_cache_,
+                                            T_enc_, /*use_flash=*/true);
+    if (static_step_.graph == nullptr || static_step_.logits_out == nullptr ||
+        static_step_.kv_rows_in == nullptr || static_step_.causal_mask_in == nullptr) {
+      release_static_step();
+      fail("decoder step graph build failed");
+    }
+    static_step_run_.gallocr =
+        ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend_));
+    if (static_step_run_.gallocr == nullptr ||
+        !ggml_gallocr_alloc_graph(static_step_run_.gallocr, static_step_.graph)) {
+      release_static_step();
+      fail("decoder step graph allocation failed");
+    }
+    static_step_run_.graph = static_step_.graph;
+    // Host backends: one plan (and work buffer) for the life of the graph.
+    core::prepare_host_graph_plan(execution_context_, static_step_.graph, static_step_plan_);
+  }
+
+  // Every input is per-call data, uploaded before every compute (the
+  // cached-graph rule): token, position, KV write row, self-attention mask.
+  const int32_t pos = n_past;
+  const int64_t row = n_past;
+  ggml_backend_tensor_set(static_step_.token_ids_in, &token, 0, sizeof(token));
+  ggml_backend_tensor_set(static_step_.pos_ids_in, &pos, 0, sizeof(pos));
+  ggml_backend_tensor_set(static_step_.kv_rows_in, &row, 0, sizeof(row));
+  static_step_mask_.assign(static_cast<size_t>(n_ctx),
+                           -std::numeric_limits<float>::infinity());
+  std::fill(static_step_mask_.begin(), static_step_mask_.begin() + (n_past + 1), 0.0f);
+  ggml_backend_tensor_set(static_step_.causal_mask_in, static_step_mask_.data(), 0,
+                          static_step_mask_.size() * sizeof(float));
+
+  if (core::compute_graph(execution_context_, static_step_.graph, static_step_plan_,
+                          "whisper.decoder_step") != GGML_STATUS_SUCCESS) {
+    fail("decoder step compute failed");
+  }
+  ggml_backend_synchronize(backend_);
+
+  logits.resize(static_cast<size_t>(hp.dec_vocab_size));
+  ggml_backend_tensor_get(static_step_.logits_out, logits.data(), 0,
+                          logits.size() * sizeof(float));
+  kv_cache_.n = n_past + 1;
   kv_cache_.head = kv_cache_.n;
 }
 

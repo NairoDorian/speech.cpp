@@ -20,23 +20,32 @@ engine::audio::NemoMelFrontendConfig mel_config(const ParakeetTDTAssets & assets
     config.preemphasis = source.preemphasis;
     config.window = engine::audio::MelWindow::SymmetricPrecise;
     config.log_zero_guard = source.log_zero_guard;
-    config.norm = engine::audio::MelNorm::PerBinF64;
+    // stt.frontend.normalize == "none" only reaches here from a
+    // transcribe.cpp GGUF (transcribe-mel.h: emit raw log-mel).
+    config.norm = source.normalize_per_feature ? engine::audio::MelNorm::PerBinF64 : engine::audio::MelNorm::None;
     return config;
 }
 
 }  // namespace
 
 ParakeetFrontend::ParakeetFrontend(std::shared_ptr<const ParakeetTDTAssets> assets)
-    : frontend_(assets ? mel_config(*assets) : throw std::runtime_error("Parakeet TDT frontend requires assets")) {}
+    : frontend_(assets ? mel_config(*assets) : throw std::runtime_error("Parakeet TDT frontend requires assets")),
+      all_stft_frames_valid_(assets->config.frontend.all_stft_frames_valid) {}
 
 ParakeetFrontendFeatures ParakeetFrontend::extract(
     const engine::runtime::AudioBuffer & audio,
     bool center) const {
     const auto wall_start = Clock::now();
+    // The transcribe.cpp arch keeps every one of the floor(n / hop) + 1 centred
+    // STFT frames and normalizes over all of them (transcribe-mel.cpp
+    // MelFrontend::compute); the audio.cpp path treats floor(n / hop) as
+    // valid and masks the trailing frame.
+    const auto valid_rule = (center && !all_stft_frames_valid_)
+        ? engine::audio::ValidFrameRule::FloorHops
+        : engine::audio::ValidFrameRule::StftFrames;
     auto mel = frontend_.extract_audio(
         audio.samples, audio.sample_rate, audio.channels,
-        {center, center ? engine::audio::ValidFrameRule::FloorHops
-                        : engine::audio::ValidFrameRule::StftFrames});
+        {center, valid_rule});
     ParakeetFrontendFeatures out;
     out.values = std::move(mel.values);
     out.frames = mel.frames;

@@ -33,6 +33,12 @@ struct SpecBackedVoiceModelConfig {
         const SessionOptions &,
         std::shared_ptr<const Assets>,
         std::shared_ptr<const engine::model_spec::ModelContract>)> create_session;
+    // Optional: a model file in a layout the model spec does not describe that
+    // `load_assets` still reads - e.g. the transcribe.cpp GGUF of a family whose
+    // spec names audio.cpp packages. When it returns true, can_load() accepts
+    // the path without resolving a spec resource bundle (the arch-retirement
+    // path: engine packages must open the files the retired arch opened).
+    std::function<bool(const std::filesystem::path &)> accepts_foreign_layout;
 };
 
 inline std::shared_ptr<const engine::model_spec::ModelContract> require_model_contract(std::string family) {
@@ -195,6 +201,9 @@ public:
         if (request.family_hint.has_value() && !family_matches(*request.family_hint)) {
             return false;
         }
+        if (is_foreign_layout(request.model_path)) {
+            return true;
+        }
         try {
             (void) engine::model_spec::load_resource_bundle_for_family(request.model_path, config_.family);
             return true;
@@ -204,8 +213,22 @@ public:
     }
 
     ModelInspection inspect(const ModelLoadRequest & request) const override {
-        const auto assets = config_.load_assets(request.model_path);
         const auto contract = require_model_contract(config_.family);
+        if (is_foreign_layout(request.model_path)) {
+            // No package in the spec describes this file, so there is nothing
+            // to discover - and selecting a spec source would reject it (an
+            // audio.cpp GGUF source expects that package's own files). The
+            // family's sniff already vouched for the layout; report the
+            // contract without loading the weights (the C-ABI dispatch sniff
+            // calls inspect() before every load).
+            ModelInspection inspection;
+            inspection.model_root = request.model_path.parent_path();
+            inspection.metadata = contract->metadata;
+            inspection.capabilities = contract->capabilities;
+            inspection.cli = contract->cli;
+            return inspection;
+        }
+        const auto assets = config_.load_assets(request.model_path);
         const auto package_spec = engine::model_spec::default_package_spec_path(config_.family);
 
         ModelInspection inspection;
@@ -234,6 +257,17 @@ public:
     }
 
 private:
+    bool is_foreign_layout(const std::filesystem::path & path) const {
+        if (!config_.accepts_foreign_layout) {
+            return false;
+        }
+        try {
+            return config_.accepts_foreign_layout(path);
+        } catch (const std::exception &) {
+            return false;  // a sniff that cannot read the file does not claim it
+        }
+    }
+
     SpecBackedVoiceModelConfig<Assets> config_;
 };
 

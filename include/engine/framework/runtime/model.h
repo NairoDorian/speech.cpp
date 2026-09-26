@@ -26,7 +26,9 @@ struct TaskCapability {
 };
 
 // Finest timing an ASR family returns when supports_timestamps is set.
-enum class TimestampGranularity { Segment, Word };
+// Token: per-token rows (TaskResult::token_timestamps) as CTC / TDT
+// families time them - the transcribe.cpp arches' TRANSCRIBE_TIMESTAMPS_TOKEN.
+enum class TimestampGranularity { Segment, Word, Token };
 
 struct CapabilitySet {
     std::vector<TaskCapability> supported_tasks;
@@ -56,6 +58,10 @@ struct CapabilitySet {
     // so request_abort() (or a declining progress callback) unwinds them
     // promptly. Mirrors TRANSCRIBE_FEATURE_CANCELLATION across the C ABI.
     bool supports_cancellation = false;
+    // Longest input one run accepts, in milliseconds; 0 = unbounded (the
+    // session chunks internally). Mirrors transcribe_capabilities::max_audio_ms,
+    // which the C ABI adapter used to hard-code to 0 for every engine family.
+    int64_t max_audio_ms = 0;
 };
 
 struct ModelMetadata {

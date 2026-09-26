@@ -1,0 +1,173 @@
+{
+  "schema_version": 1,
+  "family": "granite_nar",
+  "display_name": "IBM Granite Speech NAR",
+  "description": "IBM Granite Speech 4.1 2B NAR: a conformer CTC encoder whose BPE-CTC hypothesis is refined in one bidirectional pass by a Granite-4 1B editor fed Q-Former audio tokens (non-autoregressive). Loads the transcribe.cpp GGUF layout (general.architecture = granite_speech_nar).",
+  "category": "asr",
+  "status": "supported",
+  "tasks": [
+    "asr"
+  ],
+  "modes": [
+    "offline"
+  ],
+  "languages": [
+    "en",
+    "fr",
+    "de",
+    "es",
+    "pt"
+  ],
+  "capabilities": {
+    "asr": [
+      "cancellation"
+    ]
+  },
+  "runtime": {
+    "tags": [
+      "gguf"
+    ]
+  },
+  "options": {
+    "request": [
+      {
+        "name": "language",
+        "type": "string",
+        "description": "Accepted and ignored: the editor does not condition on a language.",
+        "required": false,
+        "default": "auto"
+      },
+      {
+        "name": "task",
+        "type": "string",
+        "description": "transcribe only; translate is rejected (the C ABI's task field).",
+        "required": false,
+        "default": "transcribe"
+      },
+      {
+        "name": "timestamps",
+        "type": "string",
+        "description": "Accepted and ignored: the model returns one untimed transcript (the C ABI's timestamps field).",
+        "required": false,
+        "default": "none"
+      }
+    ],
+    "session": [
+      {
+        "name": "n_ctx",
+        "type": "int",
+        "description": "Lower the editor context ceiling (audio tokens + editor text); 0 uses text.max_position_embeddings (4096).",
+        "required": false,
+        "min": 0,
+        "default": 0
+      },
+      {
+        "name": "granite_nar.shaw_bias",
+        "type": "enum",
+        "description": "Encoder Shaw positional-bias form: skew (default, transcribe.cpp 585b98f7) or direct (the older ctx*ctx lookup; same math, diagnostic).",
+        "values": [
+          "skew",
+          "direct"
+        ],
+        "required": false,
+        "default": "skew"
+      }
+    ],
+    "load": []
+  },
+  "package_defaults": {
+    "download": {
+      "kind": "huggingface_snapshot",
+      "repo": "handy-computer/granite-speech-4.1-2b-nar-gguf",
+      "revision": "main",
+      "gated": false
+    }
+  },
+  "packages": [
+    {
+      "id": "granite_speech_4_1_2b_nar_q8_0",
+      "display_name": "Granite Speech 4.1 2B NAR Q8_0 GGUF",
+      "default": true,
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "granite-speech-4.1-2b-nar-gguf",
+      "files": [
+        "granite-speech-4.1-2b-nar-Q8_0.gguf"
+      ]
+    },
+    {
+      "id": "granite_speech_4_1_2b_nar_q6_k",
+      "display_name": "Granite Speech 4.1 2B NAR Q6_K GGUF",
+      "format": "gguf",
+      "precision": "q6_k",
+      "target_directory": "granite-speech-4.1-2b-nar-gguf",
+      "files": [
+        "granite-speech-4.1-2b-nar-Q6_K.gguf"
+      ]
+    },
+    {
+      "id": "granite_speech_4_1_2b_nar_q5_k_m",
+      "display_name": "Granite Speech 4.1 2B NAR Q5_K_M GGUF",
+      "format": "gguf",
+      "precision": "q5_k_m",
+      "target_directory": "granite-speech-4.1-2b-nar-gguf",
+      "files": [
+        "granite-speech-4.1-2b-nar-Q5_K_M.gguf"
+      ]
+    },
+    {
+      "id": "granite_speech_4_1_2b_nar_q4_k_m",
+      "display_name": "Granite Speech 4.1 2B NAR Q4_K_M GGUF",
+      "format": "gguf",
+      "precision": "q4_k_m",
+      "target_directory": "granite-speech-4.1-2b-nar-gguf",
+      "files": [
+        "granite-speech-4.1-2b-nar-Q4_K_M.gguf"
+      ]
+    },
+    {
+      "id": "granite_speech_4_1_2b_nar_f16",
+      "display_name": "Granite Speech 4.1 2B NAR F16 GGUF",
+      "format": "gguf",
+      "precision": "f16",
+      "target_directory": "granite-speech-4.1-2b-nar-gguf",
+      "files": [
+        "granite-speech-4.1-2b-nar-F16.gguf"
+      ]
+    },
+    {
+      "id": "granite_speech_4_1_2b_nar_bf16",
+      "display_name": "Granite Speech 4.1 2B NAR BF16 GGUF",
+      "format": "gguf",
+      "precision": "bf16",
+      "target_directory": "granite-speech-4.1-2b-nar-gguf",
+      "files": [
+        "granite-speech-4.1-2b-nar-BF16.gguf"
+      ]
+    }
+  ],
+  "dependencies": [],
+  "ui": {
+    "recommended_package": "granite_speech_4_1_2b_nar_q8_0",
+    "tags": [
+      "ASR",
+      "GGUF"
+    ],
+    "docs": [
+      "docs/asr.md",
+      "docs/gguf.md"
+    ]
+  },
+  "sources": [
+    {
+      "format": "gguf",
+      "roots": {
+        "model": ".",
+        "weights": "$gguf"
+      },
+      "tensors": {
+        "weights": "weights:"
+      }
+    }
+  ]
+}

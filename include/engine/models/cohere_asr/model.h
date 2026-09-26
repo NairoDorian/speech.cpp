@@ -11,6 +11,7 @@
 #include "engine/framework/runtime/cache_slots.h"
 #include "engine/framework/tokenizers/sentencepiece.h"
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -37,7 +38,11 @@ struct CohereWeights {
     modules::NormWeights embedding_norm, decoder_norm;
 };
 
+// Opens either layout: the audio.cpp package (model spec + safetensors names)
+// or the transcribe.cpp GGUF the retired `cohere` arch read
+// (general.architecture == "cohere_asr", stt.cohere.* KVs).
 std::shared_ptr<const CohereAssets> load_cohere_assets(const std::filesystem::path & path);
+bool looks_like_transcribe_cohere_gguf(const std::filesystem::path & path);
 std::unique_ptr<CohereWeights> load_cohere_weights(
     const CohereAssets & assets, core::ExecutionContext & execution, assets::TensorStorageType type);
 
@@ -50,8 +55,14 @@ class CohereRuntime {
 public:
     CohereRuntime(const CohereAssets & assets, const CohereWeights & weights, core::ExecutionContext & execution);
     ~CohereRuntime();
+    // Greedy decode of up to 8 utterances. `poll` (optional) is called at every
+    // decode step and may throw (RunControl cancellation). An utterance that
+    // reaches max_tokens before <|endoftext|> keeps its partial tokens and is
+    // flagged in `truncated` (optional) instead of failing the batch.
     std::vector<std::vector<int32_t>> transcribe(const std::vector<std::vector<float>> & samples,
-        const std::vector<int32_t> & prompt, int64_t max_tokens);
+        const std::vector<int32_t> & prompt, int64_t max_tokens,
+        const std::function<void(int64_t step, int64_t total)> & poll = {},
+        std::vector<bool> * truncated = nullptr);
 
 private:
     struct Graphs;

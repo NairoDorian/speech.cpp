@@ -2,7 +2,7 @@
   "schema_version": 1,
   "family": "parakeet_tdt",
   "display_name": "Parakeet-TDT 0.6B v3",
-  "description": "NVIDIA Parakeet-TDT 0.6B v3 FastConformer-TDT ASR covering 25 European languages with automatic language detection. Supports the upstream Transformers-compatible safetensors package and standalone audio.cpp GGUF, with offline full-context, bounded-window long-form, and buffered streaming; the checkpoint uses unlimited bidirectional attention and is not a native cache-aware streaming model.",
+  "description": "NVIDIA Parakeet-TDT 0.6B v3 FastConformer-TDT ASR covering 25 European languages with automatic language detection. Supports the upstream Transformers-compatible safetensors package and standalone audio.cpp GGUF, with offline full-context, bounded-window long-form, and buffered streaming; the checkpoint uses unlimited bidirectional attention and is not a native cache-aware streaming model. Also loads the transcribe.cpp parakeet GGUFs (general.architecture=parakeet: TDT v2/v3/1.1B/primeLine, TDT-CTC hybrids decoded through TDT, RNN-T 0.6B/1.1B/unified-en, CTC 0.6B/1.1B) with the retired arch's numerics and per-file capabilities; cache-aware streaming, prompt-conditioned and multitalker checkpoints are rejected at load.",
   "category": "asr",
   "status": "community",
   "tasks": [
@@ -49,11 +49,31 @@
     "asr": [
       "word_timestamps",
       "partial_results",
-      "vad_chunking"
+      "vad_chunking",
+      "cancellation"
     ]
   },
   "options": {
     "request": [
+      {
+        "name": "language",
+        "type": "string",
+        "description": "Accepted for the C ABI and ignored: no Parakeet head is language-conditioned (v3 identifies the language itself).",
+        "required": false
+      },
+      {
+        "name": "task",
+        "type": "string",
+        "description": "transcribe (translation is not supported); the C ABI's task field.",
+        "required": false,
+        "default": "transcribe"
+      },
+      {
+        "name": "timestamps",
+        "type": "string",
+        "description": "none, auto, segment, word or token (or the C ABI's 0-4). Omitted keeps the full result; for a transcribe.cpp GGUF the rows are elided as the arch did (token rows on the 80 ms encoder grid, word rows, one segment).",
+        "required": false
+      },
       {
         "name": "max_tokens",
         "type": "int",

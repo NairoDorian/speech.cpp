@@ -192,7 +192,9 @@ CrossKvBuild build_cross_kv_graph(ggml_context *ctx, const WhisperWeights &w,
 
 struct DecoderBuild {
   ggml_tensor *token_ids_in = nullptr;   // [n_tokens] i32
-  ggml_tensor *causal_mask_in = nullptr; // [n_kv, n_tokens] f32 (n_tokens > 1)
+  ggml_tensor *pos_ids_in = nullptr;     // [n_tokens] i32
+  ggml_tensor *causal_mask_in = nullptr; // [n_kv, n_tokens] f32 (prompt / static step)
+  ggml_tensor *kv_rows_in = nullptr;     // [1] i64 KV write row (static step only)
 
   // Raw pre-softmax logits [vocab, n_tokens]. Whisper's host loop needs full
   // logits for the suppress masks, so unlike the moonshine families there is
@@ -208,6 +210,18 @@ DecoderBuild build_decoder_graph_kv(ggml_context *ctx, const WhisperWeights &w,
                                     const WhisperHParams &hp,
                                     WhisperKvCache &kv_cache, int n_tokens,
                                     int n_past, int T_enc, bool use_flash);
+
+// Single-token step graph that does not depend on n_past: built once per KV
+// cache and reused for every decode position. Before EVERY compute the caller
+// uploads token_ids_in, pos_ids_in (= n_past), kv_rows_in (= n_past) and
+// causal_mask_in ([n_ctx, 1]: 0 for rows <= n_past, -inf after). All four
+// are per-call data, so the cached-graph input-reuse rule is satisfied
+// without mark_persistent_input. Rows past n_past hold stale-but-finite
+// values (the cache is zeroed at init) and are masked out.
+DecoderBuild build_decoder_step_graph(ggml_context *ctx, const WhisperWeights &w,
+                                      const WhisperHParams &hp,
+                                      WhisperKvCache &kv_cache, int T_enc,
+                                      bool use_flash);
 
 ggml_tensor *find_tensor_by_name(ggml_context *gctx, const char *name);
 

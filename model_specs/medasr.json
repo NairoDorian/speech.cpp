@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "family": "medasr",
+  "display_name": "Google MedASR",
+  "description": "Google MedASR (LASR-CTC) English medical-dictation speech recognition: a 105M-parameter Conformer encoder with RoPE self-attention and a greedy CTC head, loaded from the transcribe.cpp GGUF distribution (handy-computer/medasr-gguf).",
+  "category": "asr",
+  "status": "supported",
+  "tasks": [
+    "asr"
+  ],
+  "modes": [
+    "offline"
+  ],
+  "languages": [
+    "en"
+  ],
+  "capabilities": {
+    "asr": [
+      "word_timestamps",
+      "cancellation"
+    ]
+  },
+  "runtime": {
+    "tags": [
+      "gguf"
+    ]
+  },
+  "options": {
+    "request": [
+      {
+        "name": "language",
+        "type": "string",
+        "description": "Spoken language: empty, auto or en (the model is English-only).",
+        "required": false
+      },
+      {
+        "name": "task",
+        "type": "string",
+        "description": "transcribe (translation is not supported); the C ABI's task field.",
+        "required": false,
+        "default": "transcribe"
+      },
+      {
+        "name": "timestamps",
+        "type": "string",
+        "description": "none, auto, segment, word or token (or the C ABI's 0-4). Accepted for the C ABI; token rows on the 40 ms CTC frame grid are always returned, as the transcribe.cpp arch did.",
+        "required": false,
+        "default": "none"
+      },
+      {
+        "name": "return_timestamps",
+        "type": "bool",
+        "description": "Accepted for the engine CLI; token rows on the 40 ms CTC frame grid are always returned.",
+        "required": false,
+        "default": false
+      }
+    ],
+    "session": [
+      {
+        "name": "weight_type",
+        "type": "enum",
+        "description": "Shared matmul weight storage type; default native (the GGUF's own types).",
+        "preset": "weight_type_conv",
+        "required": false,
+        "default": "native"
+      }
+    ],
+    "load": []
+  },
+  "package_defaults": {
+    "download": {
+      "kind": "huggingface_snapshot",
+      "repo": "handy-computer/medasr-gguf",
+      "revision": "main",
+      "gated": false
+    }
+  },
+  "packages": [
+    {
+      "id": "medasr_q8_0",
+      "display_name": "MedASR Q8_0 GGUF",
+      "default": true,
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "MedASR-GGUF",
+      "files": [
+        "medasr-Q8_0.gguf"
+      ]
+    },
+    {
+      "id": "medasr_f32",
+      "display_name": "MedASR F32 GGUF",
+      "format": "gguf",
+      "precision": "f32",
+      "target_directory": "MedASR-GGUF",
+      "files": [
+        "medasr-F32.gguf"
+      ]
+    },
+    {
+      "id": "medasr_f16",
+      "display_name": "MedASR F16 GGUF",
+      "format": "gguf",
+      "precision": "f16",
+      "target_directory": "MedASR-GGUF",
+      "files": [
+        "medasr-F16.gguf"
+      ]
+    },
+    {
+      "id": "medasr_q6_k",
+      "display_name": "MedASR Q6_K GGUF",
+      "format": "gguf",
+      "precision": "q6_k",
+      "target_directory": "MedASR-GGUF",
+      "files": [
+        "medasr-Q6_K.gguf"
+      ]
+    },
+    {
+      "id": "medasr_q5_k_m",
+      "display_name": "MedASR Q5_K_M GGUF",
+      "format": "gguf",
+      "precision": "q5_k_m",
+      "target_directory": "MedASR-GGUF",
+      "files": [
+        "medasr-Q5_K_M.gguf"
+      ]
+    },
+    {
+      "id": "medasr_q4_k_m",
+      "display_name": "MedASR Q4_K_M GGUF",
+      "format": "gguf",
+      "precision": "q4_k_m",
+      "target_directory": "MedASR-GGUF",
+      "files": [
+        "medasr-Q4_K_M.gguf"
+      ]
+    }
+  ],
+  "dependencies": [],
+  "ui": {
+    "recommended_package": "medasr_q8_0",
+    "tags": [
+      "ASR",
+      "GGUF"
+    ],
+    "docs": [
+      "docs/asr.md",
+      "docs/gguf.md"
+    ]
+  },
+  "sources": [
+    {
+      "format": "gguf",
+      "roots": {
+        "model": ".",
+        "weights": "$gguf"
+      },
+      "tensors": {
+        "weights": "weights:"
+      }
+    }
+  ]
+}

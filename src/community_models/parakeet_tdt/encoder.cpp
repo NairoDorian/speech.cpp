@@ -52,6 +52,32 @@ engine::core::TensorValue pad_symmetric_1d(
         GGML_TYPE_F32);
 }
 
+// Linear whose bias is optional per checkpoint: the audio.cpp package has no
+// conformer biases, the transcribe.cpp 1.1B/CTC/RNNT/hybrid GGUFs do
+// (stt.parakeet.encoder.use_bias).
+engine::core::TensorValue linear(
+    engine::core::ModuleBuildContext & ctx,
+    const engine::core::TensorValue & input,
+    const engine::modules::LinearWeights & weights,
+    int64_t in_features,
+    int64_t out_features) {
+    return engine::modules::LinearModule({in_features, out_features, weights.bias.has_value()})
+        .build(ctx, input, weights);
+}
+
+// The macaron half-step as a graph scale when it was not folded into the
+// weights (TranscribeGguf; conformer.cpp macaron_ff_residual scales after
+// linear2 + bias).
+engine::core::TensorValue scale_if_needed(
+    engine::core::ModuleBuildContext & ctx,
+    const engine::core::TensorValue & input,
+    float scale) {
+    if (scale == 1.0f) {
+        return input;
+    }
+    return engine::core::wrap_tensor(ggml_scale(ctx.ggml, input.tensor, scale), input.shape, GGML_TYPE_F32);
+}
+
 engine::core::TensorValue build_fastconformer_conv_module(
     engine::core::ModuleBuildContext & ctx,
     const engine::core::TensorValue & input_btc,
@@ -61,10 +87,7 @@ engine::core::TensorValue build_fastconformer_conv_module(
     // pointwise_conv1 runs as a Linear over the feature axis, so it wants plain
     // BTC. The BTC->BCT->BTC transpose pair this used to go through cancelled
     // out exactly; only the depthwise conv below actually needs BCT.
-    auto x = engine::modules::LinearModule({input_btc.shape.dims[2], 2 * input_btc.shape.dims[2], false}).build(
-        ctx,
-        input_btc,
-        weights.conv_pw1);
+    auto x = linear(ctx, input_btc, weights.conv_pw1, input_btc.shape.dims[2], 2 * input_btc.shape.dims[2]);
     x = engine::modules::GLUModule().build(ctx, x);
     x = engine::modules::MaskingModule().build(ctx, x, keep_mask);
     x = engine::modules::TransposeModule({{0, 2, 1, 3}, 3}).build(ctx, x);
@@ -78,15 +101,37 @@ engine::core::TensorValue build_fastconformer_conv_module(
             .build(ctx, x, {weights.conv_dw_weight, weights.conv_dw_bias});
     x = engine::modules::TransposeModule({{0, 2, 1, 3}, 3}).build(ctx, x);
     x = engine::modules::SiluModule().build(ctx, x);
-    return engine::modules::LinearModule({d_model, d_model, false}).build(ctx, x, weights.conv_pw2);
+    return linear(ctx, x, weights.conv_pw2, d_model, d_model);
 }
 
-std::vector<float> make_relative_positional_encoding(int64_t hidden, int64_t frames, int64_t max_frames) {
+std::vector<float> make_relative_positional_encoding(
+    int64_t hidden, int64_t frames, int64_t max_frames, bool nemo_f32) {
     if (frames > max_frames) {
         throw std::runtime_error("Parakeet TDT encoder relative position frames exceed maximum");
     }
     const int64_t pos_frames = 2 * frames - 1;
     std::vector<float> values(static_cast<size_t>(pos_frames * hidden), 0.0f);
+    if (nemo_f32) {
+        // arch/parakeet/model.cpp run_one_shot_inner (NeMo RelPositionalEncoding
+        // in float32): positions (T-1) - i, div_term[k] = exp(2k * -ln(1e4) / d).
+        const int64_t half = hidden / 2;
+        std::vector<float> div_term(static_cast<size_t>(half));
+        const float ln_10000 = std::log(10000.0f);
+        for (int64_t k = 0; k < half; ++k) {
+            div_term[static_cast<size_t>(k)] =
+                std::exp(static_cast<float>(2 * k) * (-ln_10000 / static_cast<float>(hidden)));
+        }
+        for (int64_t i = 0; i < pos_frames; ++i) {
+            const float pos = static_cast<float>((frames - 1) - i);
+            float * row = values.data() + static_cast<size_t>(i * hidden);
+            for (int64_t k = 0; k < half; ++k) {
+                const float div = div_term[static_cast<size_t>(k)];
+                row[2 * k] = std::sin(pos * div);
+                row[2 * k + 1] = std::cos(pos * div);
+            }
+        }
+        return values;
+    }
     constexpr long double kBase = 10000.0L;
     const int64_t half_hidden = hidden / 2;
     std::vector<long double> inv_freq(static_cast<size_t>(half_hidden), 0.0L);
@@ -201,11 +246,13 @@ engine::core::TensorValue build_encoder_layer(
     namespace ai = engine::modules::attention::internal;
 
     auto x_norm = engine::modules::LayerNormModule({hidden_size, 1.0e-5f, true, true}).build(ctx, input, weights.norm_ff1);
-    auto ff1 = engine::modules::LinearModule({hidden_size, intermediate_size, false}).build(ctx, x_norm, weights.ff1_linear1);
+    auto ff1 = linear(ctx, x_norm, weights.ff1_linear1, hidden_size, intermediate_size);
     ff1 = engine::modules::SiluModule().build(ctx, ff1);
     // The 0.5 residual half-step is folded into ff1_linear2's weights at load
-    // time (see scaled_f32 in weights.cpp), so no ggml_scale pass here.
-    ff1 = engine::modules::LinearModule({intermediate_size, hidden_size, false}).build(ctx, ff1, weights.ff1_linear2);
+    // time for the audio.cpp layout (see scaled_f32 in weights.cpp), so no
+    // ggml_scale pass there; TranscribeGguf keeps native weights and scales.
+    ff1 = linear(ctx, ff1, weights.ff1_linear2, intermediate_size, hidden_size);
+    ff1 = scale_if_needed(ctx, ff1, weights.ff_residual_scale);
     auto x = engine::core::wrap_tensor(ggml_add(ctx.ggml, input.tensor, ff1.tensor), input.shape, GGML_TYPE_F32);
 
     auto attn_input = engine::modules::LayerNormModule({hidden_size, 1.0e-5f, true, true}).build(ctx, x, weights.norm_attn);
@@ -213,25 +260,19 @@ engine::core::TensorValue build_encoder_layer(
     const int64_t head_dim = hidden_size / heads;
     const int64_t seq_len = input.shape.dims[1];
     const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-    if (!weights.self_attn.qkv_weight.has_value()) {
-        throw std::runtime_error("Parakeet TDT encoder layer requires a fused QKV weight");
-    }
-    // One [hidden, 3*hidden] matmul instead of three separate [hidden, hidden]
-    // matmuls — see the load-time fusion comment in weights.cpp's load_encoder_layer.
-    auto qkv = engine::modules::LinearModule({hidden_size, 3 * hidden_size, false}).build(ctx, attn_input, {*weights.self_attn.qkv_weight, std::nullopt});
 
-    // Read q/k/v out of the fused [seq, 3*hidden] result as strided views that
-    // are already in per-head [heads, seq, head_dim] order, instead of slicing
-    // the feature axis and calling ensure_contiguous_layout on each slice.
-    // Those conts are not optional once you slice: reshape_heads goes through
-    // ggml_reshape, which asserts contiguity. So the slice path copies all
-    // three projections in full (3 * seq * hidden floats per layer) purely to
-    // satisfy the reshape — and then MatMulModule re-materializes its own
-    // operands for k and v anyway, so those two get copied twice. A view costs
-    // nothing, and leaves exactly one copy of k and one of v (inside
-    // MatMulModule) for the whole attention block. Same values, same order.
-    auto qkv_head_view = [&](int64_t feature_offset) {
-        ggml_tensor * base = qkv.tensor;  // ggml ne = (3*hidden, seq), contiguous
+    // Read q/k/v as strided views that are already in per-head
+    // [heads, seq, head_dim] order, instead of slicing the feature axis and
+    // calling ensure_contiguous_layout on each slice. Those conts are not
+    // optional once you slice: reshape_heads goes through ggml_reshape, which
+    // asserts contiguity. So the slice path copies all three projections in
+    // full (3 * seq * hidden floats per layer) purely to satisfy the reshape —
+    // and then MatMulModule re-materializes its own operands for k and v
+    // anyway, so those two get copied twice. A view costs nothing, and leaves
+    // exactly one copy of k and one of v (inside MatMulModule) for the whole
+    // attention block. Same values, same order.
+    auto head_view = [&](const engine::core::TensorValue & projection, int64_t feature_offset) {
+        ggml_tensor * base = projection.tensor;  // ggml ne = (features, seq), contiguous
         return engine::core::wrap_tensor(
             ggml_view_4d(
                 ctx.ggml,
@@ -244,9 +285,27 @@ engine::core::TensorValue build_encoder_layer(
             engine::core::TensorShape::from_dims({1, heads, seq_len, head_dim}),
             GGML_TYPE_F32);
     };
-    auto q_heads = qkv_head_view(0);
-    auto k_heads = qkv_head_view(hidden_size);
-    auto v_heads = qkv_head_view(2 * hidden_size);
+    engine::core::TensorValue q_heads;
+    engine::core::TensorValue k_heads;
+    engine::core::TensorValue v_heads;
+    if (weights.self_attn.qkv_weight.has_value()) {
+        // One [hidden, 3*hidden] matmul instead of three separate [hidden, hidden]
+        // matmuls — see the load-time fusion comment in weights.cpp's load_encoder_layer.
+        auto qkv = linear(ctx, attn_input, {*weights.self_attn.qkv_weight, weights.self_attn.qkv_bias},
+            hidden_size, 3 * hidden_size);
+        q_heads = head_view(qkv, 0);
+        k_heads = head_view(qkv, hidden_size);
+        v_heads = head_view(qkv, 2 * hidden_size);
+    } else {
+        // TranscribeGguf: three native (possibly quantized, possibly
+        // differently-typed) projections, as conformer.cpp rel_pos_mhsa runs them.
+        auto q = linear(ctx, attn_input, {weights.self_attn.q_weight, weights.self_attn.q_bias}, hidden_size, hidden_size);
+        auto k = linear(ctx, attn_input, {weights.self_attn.k_weight, weights.self_attn.k_bias}, hidden_size, hidden_size);
+        auto v = linear(ctx, attn_input, {weights.self_attn.v_weight, weights.self_attn.v_bias}, hidden_size, hidden_size);
+        q_heads = head_view(q, 0);
+        k_heads = head_view(k, 0);
+        v_heads = head_view(v, 0);
+    }
 
     auto p = ai::reshape_heads(ctx, projected_pos_emb, heads, head_dim);
     auto p_heads = ai::permute_tensor(ctx, p, {0, 2, 1, 3});
@@ -296,7 +355,7 @@ engine::core::TensorValue build_encoder_layer(
     }
     context = ai::ensure_contiguous_layout(ctx, context);
     context = engine::core::reshape_tensor(ctx, context, engine::core::TensorShape::from_dims({input.shape.dims[0], input.shape.dims[1], hidden_size}));
-    auto attn_output = engine::modules::LinearModule({hidden_size, hidden_size, false}).build(ctx, context, {weights.self_attn.out_weight, std::nullopt});
+    auto attn_output = linear(ctx, context, {weights.self_attn.out_weight, weights.self_attn.out_bias}, hidden_size, hidden_size);
 
     x = engine::core::wrap_tensor(ggml_add(ctx.ggml, x.tensor, attn_output.tensor), x.shape, GGML_TYPE_F32);
 
@@ -305,9 +364,10 @@ engine::core::TensorValue build_encoder_layer(
     x = engine::core::wrap_tensor(ggml_add(ctx.ggml, x.tensor, conv.tensor), x.shape, GGML_TYPE_F32);
 
     auto ff2_input = engine::modules::LayerNormModule({hidden_size, 1.0e-5f, true, true}).build(ctx, x, weights.norm_ff2);
-    auto ff2 = engine::modules::LinearModule({hidden_size, intermediate_size, false}).build(ctx, ff2_input, weights.ff2_linear1);
+    auto ff2 = linear(ctx, ff2_input, weights.ff2_linear1, hidden_size, intermediate_size);
     ff2 = engine::modules::SiluModule().build(ctx, ff2);
-    ff2 = engine::modules::LinearModule({intermediate_size, hidden_size, false}).build(ctx, ff2, weights.ff2_linear2);
+    ff2 = linear(ctx, ff2, weights.ff2_linear2, intermediate_size, hidden_size);
+    ff2 = scale_if_needed(ctx, ff2, weights.ff_residual_scale);
     x = engine::core::wrap_tensor(ggml_add(ctx.ggml, x.tensor, ff2.tensor), x.shape, GGML_TYPE_F32);
 
     return engine::modules::LayerNormModule({hidden_size, 1.0e-5f, true, true}).build(ctx, x, weights.norm_out);
@@ -386,9 +446,11 @@ const std::vector<float> & ParakeetEncoderRuntime::relative_positional_encoding(
     if (relative_positional_encoding_cache_.size() >= kMaxCachedPositionalEncodings) {
         relative_positional_encoding_cache_.clear();
     }
+    const auto & enc = assets_->config.encoder;
     auto inserted = relative_positional_encoding_cache_.emplace(
         frames,
-        make_relative_positional_encoding(assets_->config.encoder.hidden_size, frames, assets_->config.encoder.max_position_embeddings));
+        make_relative_positional_encoding(
+            enc.hidden_size, frames, enc.max_position_embeddings, enc.nemo_f32_positional_encoding));
     return inserted.first->second;
 }
 
@@ -426,7 +488,10 @@ void ParakeetEncoderRuntime::ensure_graph(int64_t input_frames, int64_t feature_
     const int64_t stage1_features = conv_out(feature_dim);
     const int64_t stage2_features = conv_out(stage1_features);
     const int64_t stage3_features = conv_out(stage2_features);
-    if (stage3_features * enc.subsampling_channels != 4096) {
+    // The projection was loaded as [hidden, channels * feature_size / 8]
+    // (weights.cpp load_subsampling*); 128 mels -> 4096, 80 mels -> 2560.
+    if (stage3_features * enc.subsampling_channels !=
+        enc.subsampling_channels * (config.frontend.feature_size / enc.subsampling_factor)) {
         throw std::runtime_error("Parakeet TDT encoder subsampling feature shape mismatch");
     }
 
@@ -486,6 +551,9 @@ void ParakeetEncoderRuntime::ensure_graph(int64_t input_frames, int64_t feature_
     // does) is folded into this projection's weight and bias at load time — see
     // load_subsampling in weights.cpp.
     x = engine::modules::LinearModule({enc.subsampling_channels * stage3_features, enc.hidden_size, true}).build(ctx, x, enc_weights.subsampling.linear);
+    // TranscribeGguf with stt.parakeet.encoder.xscaling: the scale runs on the
+    // activation after the projection (arch/parakeet/encoder.cpp).
+    x = scale_if_needed(ctx, x, enc_weights.subsampling.output_scale);
 
     graph->projected_pos_emb.reserve(static_cast<size_t>(enc.layers));
     graph->projected_pos_emb_computed.reserve(static_cast<size_t>(enc.layers));
@@ -649,6 +717,29 @@ ParakeetEncodedAudio ParakeetEncoderRuntime::encode(
                 attention_mask_scratch_.begin() + static_cast<std::ptrdiff_t>(query * frames + valid3),
                 attention_mask_scratch_.begin() + static_cast<std::ptrdiff_t>((query + 1) * frames),
                 -std::numeric_limits<float>::infinity());
+        }
+    }
+    // Local attention (TranscribeGguf, e.g. parakeet-tdt_ctc-1.1b [128, 128]):
+    // a real query attends keys in [q - left, q + right] only. This is the
+    // arch's -INF padding of matrix_bd around the (left+right+1) positional
+    // window (conformer.cpp rel_pos_mhsa is_local); the in-window relative
+    // positions of the full 2T-1 table are the same sinusoids, so the scores
+    // match. Padded query rows keep the key-padding mask only, so no row
+    // degenerates to all -inf.
+    const int64_t att_left = assets_->config.encoder.att_context_left;
+    const int64_t att_right = assets_->config.encoder.att_context_right;
+    if (att_left >= 0 && att_right >= 0 && valid3 > 0) {
+        const float neg_inf = -std::numeric_limits<float>::infinity();
+        for (int64_t query = 0; query < valid3; ++query) {
+            float * row = attention_mask_scratch_.data() + static_cast<size_t>(query) * frames;
+            const int64_t lo = std::max<int64_t>(0, query - att_left);
+            const int64_t hi = std::min<int64_t>(graph.encoded_frames - 1, query + att_right);
+            for (int64_t key = 0; key < lo; ++key) {
+                row[key] = neg_inf;
+            }
+            for (int64_t key = hi + 1; key < graph.encoded_frames; ++key) {
+                row[key] = neg_inf;
+            }
         }
     }
     engine::core::write_tensor_f32(graph.attention_mask, attention_mask_scratch_);

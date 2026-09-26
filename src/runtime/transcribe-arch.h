@@ -135,4 +135,12 @@ struct Arch {
 // family matches.
 const Arch * find_arch(const char * name);
 
+// Phase 11b verdict switch: true when the GGUF architecture `name` is listed
+// in $SPEECHCPP_ENGINE_ARCHS (comma-separated GGUF arch names, or "all").
+// transcribe_model_load_file() then skips the builtin transcribe.cpp arch and
+// loads the file through the engine family that reads the same layout
+// (family registry -> `accepts_foreign_layout`), so one GGUF can be measured
+// arch-vs-engine through the unchanged C ABI before the arch is deleted.
+bool engine_route_forced(const char * name);
+
 }  // namespace transcribe

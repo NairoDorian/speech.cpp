@@ -1,5 +1,6 @@
 #include "engine/community_models/sense_asr/session.h"
 
+#include "engine/framework/assets/asset_paths.h"
 #include "engine/framework/audio/chunking.h"
 #include "engine/framework/audio/conversion.h"
 #include "engine/framework/debug/profiler.h"
@@ -277,8 +278,10 @@ query_tokens(const SenseAsrTranscriptionOptions &transcription,
 }
 
 std::filesystem::path default_vad_model_path() {
-  return std::filesystem::path("assets") / "framework" / "models" /
-         "silero_vad";
+  // Not CWD-relative: a C-ABI host outside the repo root got ERR_BACKEND on
+  // every run of the default (auto = VAD) chunking mode until 2026-09-24.
+  return assets::resolve_bundled_asset(std::filesystem::path("assets") / "framework" / "models" /
+                                       "silero_vad");
 }
 
 } // namespace

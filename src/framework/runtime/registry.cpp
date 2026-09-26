@@ -278,10 +278,37 @@ const IVoiceModelLoader * ModelRegistry::find_loader(const ModelLoadRequest & re
     // as Silero VAD ("missing tensor: stft_conv.weight") - the same
     // mis-detection the embedded-family check above closed for audio.cpp
     // packages (Phase 10.5, family 3).
+    //
+    // A loader serves the entry when it answers to ANY spelling of it
+    // (canonical id, alias or GGUF arch): the transcribe.cpp arch names
+    // ("canary", "moss", "granite") differ from the engine package families
+    // that now read those files ("canary_asr", "moss_transcribe_diarize",
+    // "granite_speech"), and matching the canonical id alone rejected them
+    // with "not registered in this build".
     if (const auto arch = foreign_gguf_architecture(request.model_path)) {
         if (const FamilyEntry * entry = resolve_family(*arch)) {
+            // Canonical id first, over every loader, so an alias can never
+            // steal a file from the loader the entry names.
             for (const auto & loader : loaders_) {
                 if (matches_family(*loader, std::string(entry->canonical_id))) {
+                    return loader.get();
+                }
+            }
+            const auto serves_entry = [&](const IVoiceModelLoader & loader) {
+                for (size_t i = 0; i < entry->aliases_count; ++i) {
+                    if (matches_family(loader, std::string(entry->aliases_data[i]))) {
+                        return true;
+                    }
+                }
+                for (size_t i = 0; i < entry->gguf_archs_count; ++i) {
+                    if (matches_family(loader, std::string(entry->gguf_archs_data[i]))) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            for (const auto & loader : loaders_) {
+                if (serves_entry(*loader)) {
                     return loader.get();
                 }
             }

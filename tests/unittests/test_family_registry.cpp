@@ -4,10 +4,12 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 #include <iostream>
 #include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace {
 
@@ -53,6 +55,16 @@ void test_resolve_canonical_and_aliases() {
 
     const FamilyEntry * entry_vo = resolve_family("voxtral");
     CHECK(entry_vo != nullptr);
+
+    // transcribe.cpp arch names resolve to the engine package that reads
+    // their GGUFs (canonical id == the loader's family).
+    for (const auto & [spelling, canonical] : std::initializer_list<std::pair<std::string_view, std::string_view>>{
+             {"canary", "canary_asr"}, {"cohere_asr", "cohere_asr"}, {"cohere", "cohere_asr"},
+             {"moss", "moss_transcribe_diarize"}, {"granite_speech", "granite_speech"},
+             {"granite", "granite_speech"}, {"granite_speech_nar", "granite_nar"}}) {
+        const FamilyEntry * entry = resolve_family(spelling);
+        CHECK(entry != nullptr && entry->canonical_id == canonical);
+    }
 
     // Unknown lookup
     CHECK(resolve_family("nonexistent_unknown_family_xyz") == nullptr);

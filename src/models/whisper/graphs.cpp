@@ -85,7 +85,7 @@ ggml_tensor *mha_self_cached(ggml_context *ctx, ggml_cgraph *gf, ggml_tensor *x,
                              ggml_tensor *v_b, ggml_tensor *out_w,
                              ggml_tensor *out_b, int n_heads, int d_model,
                              int il, int n_past, int n_tokens, int n_kv,
-                             bool use_flash) {
+                             bool use_flash, ggml_tensor *kv_rows = nullptr) {
   const int head_dim = d_model / n_heads;
   const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
   const int n_ctx = kv_cache.n_ctx;
@@ -103,7 +103,21 @@ ggml_tensor *mha_self_cached(ggml_context *ctx, ggml_cgraph *gf, ggml_tensor *x,
   ggml_tensor *Q = ggml_reshape_3d(ctx, Qcur, head_dim, n_heads, n_tokens);
   Q = ggml_permute(ctx, Q, 0, 2, 1, 3);
 
-  {
+  if (kv_rows != nullptr) {
+    // Static step graph: the write position is DATA (a row index uploaded
+    // before every compute), not a view offset baked into the graph, so one
+    // graph serves every decode position.
+    const size_t k_elem = ggml_element_size(kv_cache.self_k);
+    const size_t v_elem = ggml_element_size(kv_cache.self_v);
+    ggml_tensor *k_layer = ggml_view_2d(
+        ctx, kv_cache.self_k, d_model, n_ctx, k_elem * d_model,
+        k_elem * static_cast<size_t>(static_cast<int64_t>(il) * n_ctx * d_model));
+    ggml_tensor *v_layer = ggml_view_2d(
+        ctx, kv_cache.self_v, d_model, n_ctx, v_elem * d_model,
+        v_elem * static_cast<size_t>(static_cast<int64_t>(il) * n_ctx * d_model));
+    ggml_build_forward_expand(gf, ggml_set_rows(ctx, k_layer, Kcur, kv_rows));
+    ggml_build_forward_expand(gf, ggml_set_rows(ctx, v_layer, Vcur, kv_rows));
+  } else {
     const size_t k_elem = ggml_element_size(kv_cache.self_k);
     const size_t v_elem = ggml_element_size(kv_cache.self_v);
 
@@ -340,17 +354,25 @@ CrossKvBuild build_cross_kv_graph(ggml_context *ctx, const WhisperWeights &w,
 // Decoder graph (KV-cached prompt + step)
 // ---------------------------------------------------------------------------
 
-DecoderBuild build_decoder_graph_kv(ggml_context *ctx, const WhisperWeights &w,
-                                    const WhisperHParams &hp,
-                                    WhisperKvCache &kv_cache, int n_tokens,
-                                    int n_past, int T_enc, bool use_flash) {
+namespace {
+
+// Shared decoder body. static_step == false: the historical per-call graph
+// (n_past baked into the KV write views, mask only for the prompt pass).
+// static_step == true: one token, KV rows written by index, the self window
+// spans the whole cache and a [n_ctx, 1] mask hides the not-yet-written rows,
+// so the graph is independent of n_past and is built once per KV cache.
+DecoderBuild build_decoder_impl(ggml_context *ctx, const WhisperWeights &w,
+                                const WhisperHParams &hp,
+                                WhisperKvCache &kv_cache, int n_tokens,
+                                int n_past, int T_enc, bool use_flash,
+                                bool static_step) {
   DecoderBuild db{};
 
   if (ctx == nullptr || n_tokens <= 0 || T_enc <= 0) {
     return db;
   }
-  const int n_kv = n_past + n_tokens;
-  if (n_kv > kv_cache.n_ctx) {
+  const int n_kv = static_step ? kv_cache.n_ctx : n_past + n_tokens;
+  if (n_kv > kv_cache.n_ctx || (static_step && n_tokens != 1)) {
     return db;
   }
 
@@ -361,14 +383,21 @@ DecoderBuild build_decoder_graph_kv(ggml_context *ctx, const WhisperWeights &w,
   named(db.token_ids_in, "dec.token_ids");
   ggml_set_input(db.token_ids_in);
 
-  ggml_tensor *pos_ids_in = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_tokens);
-  named(pos_ids_in, "dec.pos_ids");
-  ggml_set_input(pos_ids_in);
+  db.pos_ids_in = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_tokens);
+  named(db.pos_ids_in, "dec.pos_ids");
+  ggml_set_input(db.pos_ids_in);
 
-  // Self-attention mask only for the prompt pass. With kv_pad == 1 the
-  // single-token step attends the full real cache window and needs none.
+  if (static_step) {
+    db.kv_rows_in = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, n_tokens);
+    named(db.kv_rows_in, "dec.kv_rows");
+    ggml_set_input(db.kv_rows_in);
+  }
+
+  // Self-attention mask for the prompt pass and the static step. The
+  // per-call single-token step attends exactly the real cache window and
+  // needs none.
   ggml_tensor *causal_mask = nullptr;
-  if (n_tokens > 1) {
+  if (n_tokens > 1 || static_step) {
     db.causal_mask_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_kv, n_tokens);
     named(db.causal_mask_in, "dec.causal_mask");
     ggml_set_input(db.causal_mask_in);
@@ -379,7 +408,7 @@ DecoderBuild build_decoder_graph_kv(ggml_context *ctx, const WhisperWeights &w,
       ggml_get_rows(ctx, w.dec_top.token_embd_w, db.token_ids_in);
   named(tok_emb, "dec.token_emb");
 
-  ggml_tensor *pos_emb = ggml_get_rows(ctx, w.dec_top.pos_emb_w, pos_ids_in);
+  ggml_tensor *pos_emb = ggml_get_rows(ctx, w.dec_top.pos_emb_w, db.pos_ids_in);
   named(pos_emb, "dec.pos_emb");
 
   // Embed sum - NO post-embed LayerNorm in Whisper.
@@ -400,7 +429,7 @@ DecoderBuild build_decoder_graph_kv(ggml_context *ctx, const WhisperWeights &w,
       y = mha_self_cached(ctx, db.graph, y, kv_cache, causal_mask, b.self_q_w,
                           b.self_q_b, b.self_k_w, b.self_v_w, b.self_v_b,
                           b.self_out_w, b.self_out_b, n_heads, d_model, i,
-                          n_past, n_tokens, n_kv, use_flash);
+                          n_past, n_tokens, n_kv, use_flash, db.kv_rows_in);
       x = ggml_add(ctx, x, y);
     }
     {
@@ -431,6 +460,24 @@ DecoderBuild build_decoder_graph_kv(ggml_context *ctx, const WhisperWeights &w,
   ggml_build_forward_expand(db.graph, db.logits_out);
 
   return db;
+}
+
+} // namespace
+
+DecoderBuild build_decoder_graph_kv(ggml_context *ctx, const WhisperWeights &w,
+                                    const WhisperHParams &hp,
+                                    WhisperKvCache &kv_cache, int n_tokens,
+                                    int n_past, int T_enc, bool use_flash) {
+  return build_decoder_impl(ctx, w, hp, kv_cache, n_tokens, n_past, T_enc, use_flash,
+                            /*static_step=*/false);
+}
+
+DecoderBuild build_decoder_step_graph(ggml_context *ctx, const WhisperWeights &w,
+                                      const WhisperHParams &hp,
+                                      WhisperKvCache &kv_cache, int T_enc,
+                                      bool use_flash) {
+  return build_decoder_impl(ctx, w, hp, kv_cache, /*n_tokens=*/1, /*n_past=*/0, T_enc,
+                            use_flash, /*static_step=*/true);
 }
 
 } // namespace engine::models::whisper

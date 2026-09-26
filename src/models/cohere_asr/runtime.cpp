@@ -256,7 +256,8 @@ audio::AudioTensor extract_cohere_frontend(
 }
 
 std::vector<std::vector<int32_t>> CohereRuntime::transcribe(
-    const std::vector<std::vector<float>> & samples, const std::vector<int32_t> & prompt, int64_t max_tokens) {
+    const std::vector<std::vector<float>> & samples, const std::vector<int32_t> & prompt, int64_t max_tokens,
+    const std::function<void(int64_t step, int64_t total)> & poll, std::vector<bool> * truncated) {
     const int64_t batch = static_cast<int64_t>(samples.size());
     if (batch < 1 || batch > 8 || prompt.empty() || max_tokens < 1 ||
         static_cast<int64_t>(prompt.size()) + max_tokens > kCacheSteps) {
@@ -338,7 +339,11 @@ std::vector<std::vector<int32_t>> CohereRuntime::transcribe(
     std::vector<bool> finished(static_cast<size_t>(batch), false);
     const int32_t eos = assets_.special_token("<|endoftext|>");
     std::vector<float> logits;
-    for (int64_t step = 0; step < static_cast<int64_t>(prompt.size()) + max_tokens - 1; ++step) {
+    const int64_t total_steps = static_cast<int64_t>(prompt.size()) + max_tokens - 1;
+    for (int64_t step = 0; step < total_steps; ++step) {
+        if (poll) {
+            poll(step, total_steps);
+        }
         const auto cursor = g.cursor.next_step();
         const int32_t position = static_cast<int32_t>(cursor.position);
         causal[static_cast<size_t>(position)] = 0.0f;
@@ -373,10 +378,18 @@ std::vector<std::vector<int32_t>> CohereRuntime::transcribe(
             }
         }
         if (std::all_of(finished.begin(), finished.end(), [](bool done) { return done; })) {
-            return generated;
+            break;
         }
     }
-    throw std::runtime_error("Cohere reached max_tokens before EOS");
+    // Utterances still open hit the token budget: keep what they produced and
+    // say so (L11: truncated honestly, never silently or by failing the batch).
+    if (truncated != nullptr) {
+        truncated->assign(static_cast<size_t>(batch), false);
+        for (int64_t b = 0; b < batch; ++b) {
+            (*truncated)[static_cast<size_t>(b)] = !finished[static_cast<size_t>(b)];
+        }
+    }
+    return generated;
 }
 
 }  // namespace engine::models::cohere_asr

@@ -52,6 +52,8 @@ public:
     [[nodiscard]] std::optional<std::string> find_string(std::string_view key) const;
     [[nodiscard]] std::optional<std::vector<int32_t>> find_i32_array(std::string_view key) const;
     [[nodiscard]] std::optional<std::vector<std::string>> find_string_array(std::string_view key) const;
+    // FLOAT32 (or FLOAT64, narrowed) arrays, e.g. tokenizer.ggml.scores.
+    [[nodiscard]] std::optional<std::vector<float>> find_f32_array(std::string_view key) const;
 
     [[nodiscard]] int32_t require_i32(std::string_view key) const;
     [[nodiscard]] float require_float(std::string_view key) const;

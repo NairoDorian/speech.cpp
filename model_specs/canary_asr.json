@@ -17,7 +17,7 @@
     "es",
     "fr"
   ],
-  "capabilities": {},
+  "capabilities": {"asr": ["cancellation"]},
   "dependencies": [],
   "options": {
     "request": [

@@ -10,6 +10,7 @@
 #include "engine/framework/runtime/model.h"
 #include "engine/framework/tokenizers/sentencepiece.h"
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -36,7 +37,12 @@ struct CanaryWeights {
     modules::NormWeights embedding_norm, decoder_norm;
 };
 
+// Opens either layout: the audio.cpp package (model spec + NeMo state-dict
+// names) or the transcribe.cpp GGUF the retired `canary` arch read
+// (general.architecture == "canary", stt.canary.* KVs). Both must be the
+// Canary 180M Flash architecture.
 std::shared_ptr<const CanaryAssets> load_canary_assets(const std::filesystem::path & path);
+bool looks_like_transcribe_canary_gguf(const std::filesystem::path & path);
 std::unique_ptr<CanaryWeights> load_canary_weights(
     const CanaryAssets & assets, core::ExecutionContext & execution, assets::TensorStorageType type);
 
@@ -55,8 +61,14 @@ class CanaryRuntime {
 public:
     CanaryRuntime(const CanaryAssets & assets, const CanaryWeights & weights, core::ExecutionContext & execution);
     ~CanaryRuntime();
+    // Greedy decode of one chunk. `poll` (optional) is called at every decode
+    // step and may throw (RunControl cancellation). A chunk that reaches its
+    // token budget before <|endoftext|> keeps its partial tokens and sets
+    // `*truncated` (optional) instead of failing the run.
     std::vector<int32_t> transcribe(const std::vector<float> & samples,
-        const std::vector<int32_t> & prompt, int64_t max_tokens);
+        const std::vector<int32_t> & prompt, int64_t max_tokens,
+        const std::function<void(int64_t step, int64_t total)> & poll = {},
+        bool * truncated = nullptr);
 
 private:
     struct Graphs;

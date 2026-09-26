@@ -90,10 +90,19 @@ public:
         if (max_tokens < 0) {
             throw std::runtime_error("Canary max_tokens must not be negative");
         }
+        const int64_t chunk_count = static_cast<int64_t>(chunks.size());
         for (const auto & chunk : chunks) {
             const auto start = mono.begin() + chunk.copy_start_sample;
             const std::vector<float> samples(start, start + chunk.valid_samples);
-            const auto tokens = runtime_->transcribe(samples, prompt, max_tokens);
+            bool truncated = false;
+            const auto tokens = runtime_->transcribe(samples, prompt, max_tokens,
+                [this, &chunk, chunk_count](int64_t step, int64_t total) {
+                    // Chunk-level progress plus a cancellation point per decode step.
+                    emit_progress("canary_asr.decode", static_cast<int64_t>(chunk.index) * total + step,
+                        chunk_count * total);
+                },
+                &truncated);
+            result.truncated = result.truncated || truncated;
             // NeMo AggregateTokenizer joins pieces across language vocabularies before replacing metaspace.
             std::string text;
             for (const auto id : tokens) {
@@ -110,7 +119,8 @@ public:
             }
             result.text_output->text += text;
             trace(debug::LogLevel::Info, "canary_asr", "chunk=" + std::to_string(chunk.index) +
-                " samples=" + std::to_string(chunk.valid_samples) + " tokens=" + std::to_string(tokens.size()));
+                " samples=" + std::to_string(chunk.valid_samples) + " tokens=" + std::to_string(tokens.size()) +
+                (truncated ? " truncated" : ""));
         }
         return result;
     }
@@ -128,6 +138,7 @@ std::shared_ptr<runtime::IVoiceModelLoader> make_canary_asr_loader() {
     runtime::SpecBackedVoiceModelConfig<CanaryAssets> config;
     config.family = "canary_asr";
     config.load_assets = load_canary_assets;
+    config.accepts_foreign_layout = looks_like_transcribe_canary_gguf;
     config.create_session = [](const runtime::TaskSpec & task, const runtime::SessionOptions & options,
         std::shared_ptr<const CanaryAssets> assets, std::shared_ptr<const model_spec::ModelContract> contract) {
         return std::make_unique<CanarySession>(task, options, std::move(assets), std::move(contract));

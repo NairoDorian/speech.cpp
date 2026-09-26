@@ -1,0 +1,548 @@
+{
+  "schema_version": 1,
+  "family": "gigaam",
+  "display_name": "GigaAM-v3 ASR",
+  "description": "Sber / ai-sage GigaAM-v3 Russian speech recognition: a 16-layer rotary Conformer encoder with an RNN-T or CTC head, in end-to-end (punctuation + casing, SentencePiece) and charwise (lowercase, no punctuation) variants. Loads parent transcribe.cpp's GGUF layout.",
+  "category": "asr",
+  "status": "supported",
+  "tasks": [
+    "asr"
+  ],
+  "modes": [
+    "offline"
+  ],
+  "languages": [
+    "ru"
+  ],
+  "capabilities": {
+    "asr": [
+      "cancellation"
+    ]
+  },
+  "runtime": {
+    "tags": [
+      "gguf"
+    ]
+  },
+  "options": {
+    "request": [
+      {
+        "name": "language",
+        "type": "string",
+        "description": "Spoken language: empty / auto or ru (the model is monolingual); other codes are rejected.",
+        "required": false
+      },
+      {
+        "name": "task",
+        "type": "string",
+        "description": "transcribe only; translate is rejected (no translate head). The C ABI's task field.",
+        "required": false,
+        "default": "transcribe"
+      },
+      {
+        "name": "timestamps",
+        "type": "string",
+        "description": "none, auto, segment, word or token (or the C ABI's 0..4). Validated only: every run returns per-token rows timed by their 40 ms encoder frame (the C ABI's TRANSCRIBE_TIMESTAMPS_TOKEN).",
+        "required": false,
+        "default": "none"
+      }
+    ],
+    "session": [
+      {
+        "name": "weight_type",
+        "type": "enum",
+        "description": "Encoder weight storage: native (the GGUF's own types, default), f32 or f16.",
+        "values": [
+          "native",
+          "f32",
+          "f16"
+        ],
+        "required": false,
+        "default": "native"
+      }
+    ],
+    "load": []
+  },
+  "packages": [
+    {
+      "id": "gigaam_v3_e2e_rnnt_q8_0",
+      "display_name": "GigaAM-v3 E2E-RNNT Q8_0 GGUF",
+      "default": true,
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "GigaAM-v3-E2E-RNNT-GGUF",
+      "files": [
+        "gigaam-v3-e2e-rnnt-Q8_0.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-e2e-rnnt-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-e2e-rnnt-Q8_0.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_e2e_rnnt_f16",
+      "display_name": "GigaAM-v3 E2E-RNNT F16 GGUF",
+      "format": "gguf",
+      "precision": "f16",
+      "target_directory": "GigaAM-v3-E2E-RNNT-GGUF",
+      "files": [
+        "gigaam-v3-e2e-rnnt-F16.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-e2e-rnnt-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-e2e-rnnt-F16.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_e2e_rnnt_f32",
+      "display_name": "GigaAM-v3 E2E-RNNT F32 GGUF",
+      "format": "gguf",
+      "precision": "f32",
+      "target_directory": "GigaAM-v3-E2E-RNNT-GGUF",
+      "files": [
+        "gigaam-v3-e2e-rnnt-F32.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-e2e-rnnt-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-e2e-rnnt-F32.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_e2e_rnnt_q6_k",
+      "display_name": "GigaAM-v3 E2E-RNNT Q6_K GGUF",
+      "format": "gguf",
+      "precision": "q6_k",
+      "target_directory": "GigaAM-v3-E2E-RNNT-GGUF",
+      "files": [
+        "gigaam-v3-e2e-rnnt-Q6_K.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-e2e-rnnt-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-e2e-rnnt-Q6_K.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_e2e_rnnt_q5_k_m",
+      "display_name": "GigaAM-v3 E2E-RNNT Q5_K_M GGUF",
+      "format": "gguf",
+      "precision": "q5_k_m",
+      "target_directory": "GigaAM-v3-E2E-RNNT-GGUF",
+      "files": [
+        "gigaam-v3-e2e-rnnt-Q5_K_M.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-e2e-rnnt-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-e2e-rnnt-Q5_K_M.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_e2e_rnnt_q4_k_m",
+      "display_name": "GigaAM-v3 E2E-RNNT Q4_K_M GGUF",
+      "format": "gguf",
+      "precision": "q4_k_m",
+      "target_directory": "GigaAM-v3-E2E-RNNT-GGUF",
+      "files": [
+        "gigaam-v3-e2e-rnnt-Q4_K_M.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-e2e-rnnt-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-e2e-rnnt-Q4_K_M.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_e2e_ctc_q8_0",
+      "display_name": "GigaAM-v3 E2E-CTC Q8_0 GGUF",
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "GigaAM-v3-E2E-CTC-GGUF",
+      "files": [
+        "gigaam-v3-e2e-ctc-Q8_0.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-e2e-ctc-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-e2e-ctc-Q8_0.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_e2e_ctc_f16",
+      "display_name": "GigaAM-v3 E2E-CTC F16 GGUF",
+      "format": "gguf",
+      "precision": "f16",
+      "target_directory": "GigaAM-v3-E2E-CTC-GGUF",
+      "files": [
+        "gigaam-v3-e2e-ctc-F16.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-e2e-ctc-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-e2e-ctc-F16.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_e2e_ctc_f32",
+      "display_name": "GigaAM-v3 E2E-CTC F32 GGUF",
+      "format": "gguf",
+      "precision": "f32",
+      "target_directory": "GigaAM-v3-E2E-CTC-GGUF",
+      "files": [
+        "gigaam-v3-e2e-ctc-F32.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-e2e-ctc-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-e2e-ctc-F32.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_e2e_ctc_q6_k",
+      "display_name": "GigaAM-v3 E2E-CTC Q6_K GGUF",
+      "format": "gguf",
+      "precision": "q6_k",
+      "target_directory": "GigaAM-v3-E2E-CTC-GGUF",
+      "files": [
+        "gigaam-v3-e2e-ctc-Q6_K.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-e2e-ctc-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-e2e-ctc-Q6_K.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_e2e_ctc_q5_k_m",
+      "display_name": "GigaAM-v3 E2E-CTC Q5_K_M GGUF",
+      "format": "gguf",
+      "precision": "q5_k_m",
+      "target_directory": "GigaAM-v3-E2E-CTC-GGUF",
+      "files": [
+        "gigaam-v3-e2e-ctc-Q5_K_M.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-e2e-ctc-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-e2e-ctc-Q5_K_M.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_e2e_ctc_q4_k_m",
+      "display_name": "GigaAM-v3 E2E-CTC Q4_K_M GGUF",
+      "format": "gguf",
+      "precision": "q4_k_m",
+      "target_directory": "GigaAM-v3-E2E-CTC-GGUF",
+      "files": [
+        "gigaam-v3-e2e-ctc-Q4_K_M.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-e2e-ctc-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-e2e-ctc-Q4_K_M.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_rnnt_q8_0",
+      "display_name": "GigaAM-v3 RNNT Q8_0 GGUF",
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "GigaAM-v3-RNNT-GGUF",
+      "files": [
+        "gigaam-v3-rnnt-Q8_0.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-rnnt-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-rnnt-Q8_0.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_rnnt_f16",
+      "display_name": "GigaAM-v3 RNNT F16 GGUF",
+      "format": "gguf",
+      "precision": "f16",
+      "target_directory": "GigaAM-v3-RNNT-GGUF",
+      "files": [
+        "gigaam-v3-rnnt-F16.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-rnnt-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-rnnt-F16.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_rnnt_f32",
+      "display_name": "GigaAM-v3 RNNT F32 GGUF",
+      "format": "gguf",
+      "precision": "f32",
+      "target_directory": "GigaAM-v3-RNNT-GGUF",
+      "files": [
+        "gigaam-v3-rnnt-F32.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-rnnt-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-rnnt-F32.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_rnnt_q6_k",
+      "display_name": "GigaAM-v3 RNNT Q6_K GGUF",
+      "format": "gguf",
+      "precision": "q6_k",
+      "target_directory": "GigaAM-v3-RNNT-GGUF",
+      "files": [
+        "gigaam-v3-rnnt-Q6_K.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-rnnt-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-rnnt-Q6_K.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_rnnt_q5_k_m",
+      "display_name": "GigaAM-v3 RNNT Q5_K_M GGUF",
+      "format": "gguf",
+      "precision": "q5_k_m",
+      "target_directory": "GigaAM-v3-RNNT-GGUF",
+      "files": [
+        "gigaam-v3-rnnt-Q5_K_M.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-rnnt-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-rnnt-Q5_K_M.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_rnnt_q4_k_m",
+      "display_name": "GigaAM-v3 RNNT Q4_K_M GGUF",
+      "format": "gguf",
+      "precision": "q4_k_m",
+      "target_directory": "GigaAM-v3-RNNT-GGUF",
+      "files": [
+        "gigaam-v3-rnnt-Q4_K_M.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-rnnt-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-rnnt-Q4_K_M.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_ctc_q8_0",
+      "display_name": "GigaAM-v3 CTC Q8_0 GGUF",
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "GigaAM-v3-CTC-GGUF",
+      "files": [
+        "gigaam-v3-ctc-Q8_0.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-ctc-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-ctc-Q8_0.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_ctc_f16",
+      "display_name": "GigaAM-v3 CTC F16 GGUF",
+      "format": "gguf",
+      "precision": "f16",
+      "target_directory": "GigaAM-v3-CTC-GGUF",
+      "files": [
+        "gigaam-v3-ctc-F16.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-ctc-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-ctc-F16.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_ctc_f32",
+      "display_name": "GigaAM-v3 CTC F32 GGUF",
+      "format": "gguf",
+      "precision": "f32",
+      "target_directory": "GigaAM-v3-CTC-GGUF",
+      "files": [
+        "gigaam-v3-ctc-F32.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-ctc-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-ctc-F32.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_ctc_q6_k",
+      "display_name": "GigaAM-v3 CTC Q6_K GGUF",
+      "format": "gguf",
+      "precision": "q6_k",
+      "target_directory": "GigaAM-v3-CTC-GGUF",
+      "files": [
+        "gigaam-v3-ctc-Q6_K.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-ctc-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-ctc-Q6_K.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_ctc_q5_k_m",
+      "display_name": "GigaAM-v3 CTC Q5_K_M GGUF",
+      "format": "gguf",
+      "precision": "q5_k_m",
+      "target_directory": "GigaAM-v3-CTC-GGUF",
+      "files": [
+        "gigaam-v3-ctc-Q5_K_M.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-ctc-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-ctc-Q5_K_M.gguf"
+        ],
+        "gated": false
+      }
+    },
+    {
+      "id": "gigaam_v3_ctc_q4_k_m",
+      "display_name": "GigaAM-v3 CTC Q4_K_M GGUF",
+      "format": "gguf",
+      "precision": "q4_k_m",
+      "target_directory": "GigaAM-v3-CTC-GGUF",
+      "files": [
+        "gigaam-v3-ctc-Q4_K_M.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/gigaam-v3-ctc-gguf",
+        "revision": "main",
+        "include": [
+          "gigaam-v3-ctc-Q4_K_M.gguf"
+        ],
+        "gated": false
+      }
+    }
+  ],
+  "dependencies": [],
+  "ui": {
+    "recommended_package": "gigaam_v3_e2e_rnnt_q8_0",
+    "tags": [
+      "ASR",
+      "GGUF"
+    ],
+    "docs": [
+      "docs/porting/families/gigaam.md"
+    ]
+  },
+  "sources": [
+    {
+      "format": "gguf",
+      "roots": {
+        "model": ".",
+        "weights": "$gguf"
+      },
+      "tensors": {
+        "weights": "weights:"
+      }
+    }
+  ]
+}

@@ -20,6 +20,11 @@
 
 namespace engine::community_models::parakeet_tdt {
 
+// Loads the audio.cpp package (model_specs/parakeet_tdt.json) and the
+// transcribe.cpp parakeet GGUF (looks_like_transcribe_parakeet_gguf). For the
+// latter the loaded model's capabilities are the file's own (general.languages,
+// stt.capability.*, TOKEN timestamps, cancellation), as the retired arch
+// published them.
 std::shared_ptr<runtime::IVoiceModelLoader> make_parakeet_tdt_loader();
 
 class ParakeetTDTSessionBase : public runtime::RuntimeSessionBase {
@@ -69,9 +74,11 @@ public:
     runtime::TaskResult run(const runtime::TaskRequest & request) override;
 
 private:
+    // `timestamp_level` is session.cpp's TimestampLevel as an int.
     runtime::TaskResult run_long_form(
         const runtime::AudioBuffer & audio,
-        const ParakeetDecodeOptions & options);
+        const ParakeetDecodeOptions & options,
+        int timestamp_level);
     runtime::TaskResult run_vad_chunks(
         const runtime::AudioBuffer & audio,
         const std::unordered_map<std::string, std::string> & request_options,
@@ -126,6 +133,9 @@ private:
     std::vector<int32_t> token_ids_;
     std::vector<int32_t> token_frame_indices_;
     std::vector<int32_t> token_durations_;
+    std::vector<float> token_probabilities_;
+    bool truncated_ = false;
+    int stream_timestamp_level_ = 0;  // session.cpp TimestampLevel (0 = unspecified)
     runtime::StreamEventCallback stream_event_sink_;
     // merged_decode() returns the whole transcript each time; this turns it
     // back into the increment a partial is contracted to be.

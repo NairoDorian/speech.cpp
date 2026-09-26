@@ -7,9 +7,13 @@
 #include "engine/models/silero_vad/session.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <stdexcept>
+#include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -215,6 +219,84 @@ void validate_enum_contract_options(const runtime::SessionOptions& options) {
 int64_t seconds_to_samples(float seconds, int sample_rate) {
     return static_cast<int64_t>(std::llround(
         static_cast<double>(seconds) * static_cast<double>(sample_rate)));
+}
+
+// Requested timing detail: the C ABI sends transcribe_timestamp_kind as a
+// number (0 none, 1 auto, 2 segment, 3 word, 4 token); engine callers may use
+// the names. Unspecified keeps each layout's historical output.
+enum class TimestampLevel { Unspecified, None, Segment, Word, Token };
+
+std::string lower_ascii(std::string value) {
+    for (auto & ch : value) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return value;
+}
+
+TimestampLevel timestamp_level(const std::unordered_map<std::string, std::string> & options) {
+    const auto value = runtime::find_option(options, {"timestamps"});
+    if (!value.has_value()) {
+        return TimestampLevel::Unspecified;
+    }
+    const std::string ts = lower_ascii(*value);
+    if (ts.empty() || ts == "none" || ts == "0") return TimestampLevel::None;
+    // AUTO resolves to the family max, TOKEN (arch capabilities.cpp).
+    if (ts == "auto" || ts == "1" || ts == "token" || ts == "4") return TimestampLevel::Token;
+    if (ts == "segment" || ts == "2") return TimestampLevel::Segment;
+    if (ts == "word" || ts == "3") return TimestampLevel::Word;
+    throw std::invalid_argument("Parakeet TDT: timestamps must be none, auto, segment, word or token (or 0-4)");
+}
+
+void validate_task_options(const std::unordered_map<std::string, std::string> & options) {
+    // language is accepted and ignored: no Parakeet head is language-conditioned
+    // (v3 identifies the language itself; the prompt-conditioned
+    // nemotron-3.5 checkpoint is rejected at load).
+    const std::string task = lower_ascii(runtime::find_option(options, {"task"}).value_or("transcribe"));
+    if (task == "translate") {
+        throw std::invalid_argument("Parakeet TDT: translation is not supported (no translation head)");
+    }
+    if (!task.empty() && task != "transcribe") {
+        throw std::invalid_argument("Parakeet TDT: task must be transcribe");
+    }
+}
+
+// The C-ABI result for a transcribe.cpp GGUF, elided exactly as
+// arch/parakeet/model.cpp build_result_from_raw_tokens does per requested
+// kind: NONE publishes no rows (the adapter then emits one untimed segment),
+// SEGMENT the single segment, WORD + words, TOKEN + token rows.
+runtime::TaskResult to_task_result(
+    const ParakeetTDTAssets & assets,
+    ParakeetDecodedText decoded,
+    TimestampLevel level) {
+    runtime::TaskResult result;
+    result.truncated = decoded.truncated;
+    if (!assets.transcribe_layout()) {
+        result.text_output = runtime::Transcript{decoded.text, ""};
+        if (level != TimestampLevel::None) {
+            result.word_timestamps = std::move(decoded.word_timestamps);
+        }
+        return result;
+    }
+    result.text_output = runtime::Transcript{decoded.text, ""};
+    if (decoded.raw_text.has_value() && *decoded.raw_text != decoded.text) {
+        result.raw_text = std::move(decoded.raw_text);
+    }
+    if (level == TimestampLevel::None || !decoded.segment_span.has_value()) {
+        return result;
+    }
+    runtime::SpeechSegment segment;
+    segment.span = *decoded.segment_span;
+    segment.text = decoded.text;
+    result.speech_segments.push_back(std::move(segment));
+    if (level == TimestampLevel::Segment) {
+        return result;
+    }
+    result.word_timestamps = std::move(decoded.word_timestamps);
+    if (level == TimestampLevel::Word) {
+        return result;
+    }
+    result.token_timestamps = std::move(decoded.token_timestamps);
+    return result;
 }
 
 }  // namespace
@@ -445,7 +527,14 @@ runtime::TaskResult ParakeetTDTOfflineSession::run(const runtime::TaskRequest & 
         throw std::runtime_error("Parakeet TDT run() received an invalid audio layout");
     }
     const auto wall_start = Clock::now();
-    const auto decode_options = decode_options_for_request(normalized_request);
+    validate_task_options(normalized_request.options);
+    const TimestampLevel level = timestamp_level(normalized_request.options);
+    auto decode_options = decode_options_for_request(normalized_request);
+    // The greedy loops poll this every couple of seconds of audio; a cancel
+    // request unwinds run() with runtime::ProgressCanceled from here.
+    decode_options.progress = [this](int64_t done, int64_t total) {
+        emit_progress("parakeet_tdt.decode", done, total);
+    };
     const int64_t source_frames =
         static_cast<int64_t>(normalized_request.audio_input->samples.size()) /
         std::max(normalized_request.audio_input->channels, 1);
@@ -453,12 +542,23 @@ runtime::TaskResult ParakeetTDTOfflineSession::run(const runtime::TaskRequest & 
         static_cast<double>(source_frames) *
         static_cast<double>(assets_->config.frontend.sample_rate) /
         static_cast<double>(normalized_request.audio_input->sample_rate)));
+    // transcribe-mel.cpp MelFrontend::compute rejects input that yields fewer
+    // than two STFT frames (per-feature normalization divides by n - 1); the
+    // C ABI maps this to TRANSCRIBE_ERR_INVALID_ARG.
+    if (assets_->transcribe_layout() && target_samples < assets_->config.frontend.hop_length) {
+        throw std::invalid_argument("Parakeet TDT: audio is shorter than one mel hop (" +
+            std::to_string(assets_->config.frontend.hop_length) + " samples at 16 kHz)");
+    }
+    emit_progress("parakeet_tdt.frontend", 0, 1);
     const auto chunk_mode = engine::audio::parse_audio_chunk_mode(normalized_request.options);
     if (chunk_mode == engine::audio::AudioChunkMode::QuietEnergy) {
         throw std::runtime_error("Parakeet TDT supports audio_chunk_mode=auto, fixed, vad, or none");
     }
     if (chunk_mode == engine::audio::AudioChunkMode::Vad) {
         auto result = run_vad_chunks(*normalized_request.audio_input, normalized_request.options, decode_options);
+        if (level == TimestampLevel::None) {
+            result.word_timestamps.clear();
+        }
         debug::timing_log_scalar(
             "session.wall_ms",
             engine::debug::elapsed_ms(wall_start, Clock::now()));
@@ -470,7 +570,7 @@ runtime::TaskResult ParakeetTDTOfflineSession::run(const runtime::TaskRequest & 
          (offline_mode_ == "long_form" ||
           (offline_mode_ == "auto" && target_samples > auto_full_context_max_samples_)));
     if (use_long_form) {
-        auto result = run_long_form(*normalized_request.audio_input, decode_options);
+        auto result = run_long_form(*normalized_request.audio_input, decode_options, static_cast<int>(level));
         debug::timing_log_scalar(
             "session.wall_ms",
             engine::debug::elapsed_ms(wall_start, Clock::now()));
@@ -478,19 +578,20 @@ runtime::TaskResult ParakeetTDTOfflineSession::run(const runtime::TaskRequest & 
     }
 
     const auto frontend = frontend_.extract(*normalized_request.audio_input, true);
+    emit_progress("parakeet_tdt.encode", 0, 1);
     const auto encoded = encoder_->encode(frontend);
+    emit_progress("parakeet_tdt.encode", 1, 1);
     auto decoded = decoder_->decode(encoded, decode_options);
 
-    runtime::TaskResult result;
-    result.text_output = runtime::Transcript{decoded.text, ""};
-    result.word_timestamps = std::move(decoded.word_timestamps);
+    auto result = to_task_result(*assets_, std::move(decoded), level);
     debug::timing_log_scalar("session.wall_ms", engine::debug::elapsed_ms(wall_start, Clock::now()));
     return result;
 }
 
 runtime::TaskResult ParakeetTDTOfflineSession::run_long_form(
     const runtime::AudioBuffer& audio,
-    const ParakeetDecodeOptions& options) {
+    const ParakeetDecodeOptions& options,
+    int timestamp_level) {
     if (audio.sample_rate != assets_->config.frontend.sample_rate ||
         audio.channels != 1) {
         throw std::runtime_error(
@@ -504,6 +605,8 @@ runtime::TaskResult ParakeetTDTOfflineSession::run_long_form(
     std::vector<int32_t> token_ids;
     std::vector<int32_t> token_frame_indices;
     std::vector<int32_t> token_durations;
+    std::vector<float> token_probabilities;
+    bool truncated = false;
     int64_t center_start = 0;
     int64_t decoded_frame_offset = 0;
     const int64_t total_samples = static_cast<int64_t>(audio.samples.size());
@@ -551,10 +654,19 @@ runtime::TaskResult ParakeetTDTOfflineSession::run_long_form(
                     decode_options.max_tokens - static_cast<int64_t>(token_ids.size()));
             }
             if (decode_options.max_tokens != 0 || options.max_tokens == 0) {
+                // Progress in whole-recording frames rather than per window.
+                if (options.progress) {
+                    const int64_t offset = decoded_frame_offset;
+                    const int64_t total = (total_samples + samples_per_frame - 1) / samples_per_frame;
+                    decode_options.progress = [&options, offset, total](int64_t done, int64_t) {
+                        options.progress(offset + done, total);
+                    };
+                }
                 auto decoded = decoder_->decode_incremental(
                     center_encoded,
                     decode_options,
                     decoded_frame_offset);
+                truncated = truncated || decoded.truncated;
                 token_ids.insert(
                     token_ids.end(),
                     decoded.token_ids.begin(),
@@ -567,6 +679,12 @@ runtime::TaskResult ParakeetTDTOfflineSession::run_long_form(
                     token_durations.end(),
                     decoded.durations.begin(),
                     decoded.durations.end());
+                token_probabilities.insert(
+                    token_probabilities.end(),
+                    decoded.token_probabilities.begin(),
+                    decoded.token_probabilities.end());
+            } else {
+                truncated = true;  // the token budget ran out before this window
             }
             decoded_frame_offset += center_frames;
         }
@@ -580,11 +698,10 @@ runtime::TaskResult ParakeetTDTOfflineSession::run_long_form(
         std::move(token_frame_indices),
         std::move(token_durations),
         options,
-        audio_end_frame);
-    runtime::TaskResult result;
-    result.text_output = runtime::Transcript{decoded.text, ""};
-    result.word_timestamps = std::move(decoded.word_timestamps);
-    return result;
+        audio_end_frame,
+        std::move(token_probabilities));
+    decoded.truncated = truncated;
+    return to_task_result(*assets_, std::move(decoded), static_cast<TimestampLevel>(timestamp_level));
 }
 
 runtime::TaskResult ParakeetTDTOfflineSession::run_vad_chunks(
@@ -642,9 +759,11 @@ runtime::TaskResult ParakeetTDTOfflineSession::run_vad_chunks(
                 item_decode_options.max_tokens - token_count);
         }
         if (item_decode_options.max_tokens == 0 && decode_options.max_tokens > 0) {
+            result.truncated = true;
             break;
         }
         auto decoded = decoder_->decode(encoded, item_decode_options);
+        result.truncated = result.truncated || decoded.truncated;
         token_count += static_cast<int64_t>(decoded.token_ids.size());
         if (!decoded.text.empty()) {
             if (!text.empty()) {
@@ -763,6 +882,8 @@ void ParakeetTDTStreamingSession::start_stream(const runtime::TaskRequest& reque
     reset();
     auto normalized_request = request;
     normalized_request.options = normalize_request_options(request.options, *contract_);
+    validate_task_options(normalized_request.options);
+    stream_timestamp_level_ = static_cast<int>(timestamp_level(normalized_request.options));
     streaming_decode_options_ = decode_options_for_request(normalized_request);
 }
 
@@ -789,6 +910,8 @@ void ParakeetTDTStreamingSession::reset() {
     token_ids_.clear();
     token_frame_indices_.clear();
     token_durations_.clear();
+    token_probabilities_.clear();
+    truncated_ = false;
     partials_.reset();
     decoder_->reset_state();
     stream_started_ = true;
@@ -806,7 +929,8 @@ ParakeetDecodedText ParakeetTDTStreamingSession::merged_decode() const {
         token_frame_indices_,
         token_durations_,
         streaming_decode_options_,
-        audio_end_frame);
+        audio_end_frame,
+        token_probabilities_);
 }
 
 bool ParakeetTDTStreamingSession::process_center_window(
@@ -865,6 +989,11 @@ bool ParakeetTDTStreamingSession::process_center_window(
                 center_encoded,
                 decode_options,
                 decoded_frame_offset_);
+            truncated_ = truncated_ || decoded.truncated;
+            token_probabilities_.insert(
+                token_probabilities_.end(),
+                decoded.token_probabilities.begin(),
+                decoded.token_probabilities.end());
             token_ids_.insert(
                 token_ids_.end(),
                 decoded.token_ids.begin(),
@@ -979,39 +1108,158 @@ runtime::TaskResult ParakeetTDTStreamingSession::finalize() {
     auto event = process_ready_windows(true);
     (void)event;
     auto decoded = merged_decode();
-    runtime::TaskResult result;
-    result.text_output = runtime::Transcript{decoded.text, ""};
-    result.word_timestamps = std::move(decoded.word_timestamps);
+    decoded.truncated = truncated_;
+    auto result = to_task_result(*assets_, std::move(decoded), static_cast<TimestampLevel>(stream_timestamp_level_));
     finalized_ = true;
     stream_started_ = false;
     return result;
 }
 
+namespace {
+
+std::unique_ptr<runtime::IVoiceTaskSession> create_parakeet_session(
+    const runtime::TaskSpec & task,
+    const runtime::SessionOptions & options,
+    std::shared_ptr<const ParakeetTDTAssets> assets,
+    std::shared_ptr<const engine::model_spec::ModelContract> contract) {
+    if (task.mode == runtime::RunMode::Streaming) {
+        return std::make_unique<ParakeetTDTStreamingSession>(
+            task,
+            options,
+            std::move(assets),
+            std::move(contract));
+    }
+    return std::make_unique<ParakeetTDTOfflineSession>(
+        task,
+        options,
+        std::move(assets),
+        std::move(contract));
+}
+
+// A transcribe.cpp GGUF describes itself; publish what the retired arch did
+// (arch/parakeet/capabilities.cpp + model.cpp load): general.languages,
+// stt.capability.lang_detect, streaming only where the encoder was trained for
+// it, TOKEN timestamps, cancellation, no translation, unbounded input.
+runtime::CapabilitySet transcribe_capabilities(
+    const ParakeetTDTAssets & assets,
+    runtime::CapabilitySet caps) {
+    const auto & identity = assets.identity;
+    if (!identity.languages.empty()) {
+        caps.languages = identity.languages;
+    }
+    caps.supports_language_detection = identity.lang_detect;
+    caps.supports_translate = false;
+    caps.supports_timestamps = true;
+    caps.timestamp_granularity = runtime::TimestampGranularity::Token;
+    caps.supports_cancellation = true;
+    caps.max_audio_ms = 0;
+    runtime::TaskCapability asr;
+    asr.task = runtime::VoiceTaskKind::Asr;
+    asr.modes = {runtime::RunMode::Offline};
+    if (identity.streaming) {
+        asr.modes.push_back(runtime::RunMode::Streaming);
+    }
+    caps.supported_tasks = {asr};
+    return caps;
+}
+
+class ParakeetLoadedModel final : public runtime::ILoadedVoiceModel {
+public:
+    ParakeetLoadedModel(
+        std::shared_ptr<const ParakeetTDTAssets> assets,
+        std::shared_ptr<const engine::model_spec::ModelContract> contract)
+        : assets_(std::move(assets)),
+          contract_(std::move(contract)),
+          metadata_(contract_->metadata),
+          capabilities_(contract_->capabilities) {
+        if (assets_->transcribe_layout()) {
+            metadata_.variant = assets_->identity.variant;
+            metadata_.description = assets_->identity.display_name + " (transcribe.cpp GGUF, " +
+                assets_->config.model_type + ")";
+            capabilities_ = transcribe_capabilities(*assets_, contract_->capabilities);
+        }
+    }
+
+    const runtime::ModelMetadata & metadata() const noexcept override { return metadata_; }
+    const runtime::CapabilitySet & capabilities() const noexcept override { return capabilities_; }
+
+    std::unique_ptr<runtime::IVoiceTaskSession> create_task_session(
+        const runtime::TaskSpec & task,
+        const runtime::SessionOptions & options) const override {
+        if (assets_->transcribe_layout() && task.mode == runtime::RunMode::Streaming &&
+            !assets_->identity.streaming) {
+            throw std::runtime_error("Parakeet transcribe.cpp GGUF '" + assets_->identity.variant +
+                "' is an offline checkpoint (stt.capability.streaming is false)");
+        }
+        return create_parakeet_session(task, options, assets_, contract_);
+    }
+
+private:
+    std::shared_ptr<const ParakeetTDTAssets> assets_;
+    std::shared_ptr<const engine::model_spec::ModelContract> contract_;
+    runtime::ModelMetadata metadata_;
+    runtime::CapabilitySet capabilities_;
+};
+
+bool is_transcribe_gguf(const std::filesystem::path & path) {
+    try {
+        return looks_like_transcribe_parakeet_gguf(path);
+    } catch (const std::exception &) {
+        return false;
+    }
+}
+
+// The spec-backed loader (family, aliases, can_load via the spec or the
+// foreign-layout sniff, catalog advertisement) with load()/inspect() that
+// report the per-file capabilities of a transcribe.cpp GGUF.
+class ParakeetTdtLoader final : public runtime::IVoiceModelLoader {
+public:
+    explicit ParakeetTdtLoader(std::shared_ptr<runtime::IVoiceModelLoader> inner) : inner_(std::move(inner)) {}
+
+    std::string family() const override { return inner_->family(); }
+    std::vector<std::string> family_aliases() const override { return inner_->family_aliases(); }
+    bool can_load(const runtime::ModelLoadRequest & request) const override { return inner_->can_load(request); }
+    runtime::CapabilitySet advertised_capabilities() const override { return inner_->advertised_capabilities(); }
+    std::string advertised_instructions_policy() const override { return inner_->advertised_instructions_policy(); }
+    std::vector<std::string> advertised_api_endpoints() const override { return inner_->advertised_api_endpoints(); }
+
+    runtime::ModelInspection inspect(const runtime::ModelLoadRequest & request) const override {
+        if (!is_transcribe_gguf(request.model_path)) {
+            return inner_->inspect(request);
+        }
+        const auto model = load_model(request);
+        runtime::ModelInspection inspection;
+        inspection.model_root = request.model_path.parent_path();
+        inspection.metadata = model->metadata();
+        inspection.capabilities = model->capabilities();
+        inspection.cli = runtime::require_model_contract(kFamily)->cli;
+        return inspection;
+    }
+
+    std::unique_ptr<runtime::ILoadedVoiceModel> load(const runtime::ModelLoadRequest & request) const override {
+        return load_model(request);
+    }
+
+private:
+    static std::unique_ptr<ParakeetLoadedModel> load_model(const runtime::ModelLoadRequest & request) {
+        auto assets = load_parakeet_assets(request.model_path);
+        auto contract = runtime::require_model_contract(kFamily);
+        return std::make_unique<ParakeetLoadedModel>(std::move(assets), std::move(contract));
+    }
+
+    std::shared_ptr<runtime::IVoiceModelLoader> inner_;
+};
+
+}  // namespace
+
 std::shared_ptr<runtime::IVoiceModelLoader> make_parakeet_tdt_loader() {
     runtime::SpecBackedVoiceModelConfig<ParakeetTDTAssets> config;
     config.family = kFamily;
     config.load_assets = load_parakeet_assets;
-    config.create_session = [](
-                                const runtime::TaskSpec & task,
-                                const runtime::SessionOptions & options,
-                                std::shared_ptr<const ParakeetTDTAssets> assets,
-                                std::shared_ptr<const engine::model_spec::ModelContract> contract) {
-        if (task.mode == runtime::RunMode::Streaming) {
-            return std::unique_ptr<runtime::IVoiceTaskSession>(
-                std::make_unique<ParakeetTDTStreamingSession>(
-                    task,
-                    options,
-                    std::move(assets),
-                    std::move(contract)));
-        }
-        return std::unique_ptr<runtime::IVoiceTaskSession>(
-            std::make_unique<ParakeetTDTOfflineSession>(
-                task,
-                options,
-                std::move(assets),
-                std::move(contract)));
-    };
-    return runtime::make_spec_backed_voice_loader(std::move(config));
+    // The transcribe.cpp GGUF of the retired parakeet arch (assets.cpp).
+    config.accepts_foreign_layout = looks_like_transcribe_parakeet_gguf;
+    config.create_session = create_parakeet_session;
+    return std::make_shared<ParakeetTdtLoader>(runtime::make_spec_backed_voice_loader(std::move(config)));
 }
 
 }  // namespace engine::community_models::parakeet_tdt

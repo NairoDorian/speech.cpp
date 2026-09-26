@@ -205,7 +205,11 @@ CanaryFrontendFeatures extract_canary_frontend(
 }
 
 std::vector<int32_t> CanaryRuntime::transcribe(const std::vector<float> & samples,
-    const std::vector<int32_t> & prompt, int64_t max_tokens) {
+    const std::vector<int32_t> & prompt, int64_t max_tokens,
+    const std::function<void(int64_t step, int64_t total)> & poll, bool * truncated) {
+    if (truncated != nullptr) {
+        *truncated = false;
+    }
     if (samples.size() < 320 || samples.size() > 40 * 16000) {
         throw std::runtime_error("Canary chunks must contain between 20 ms and 40 seconds of audio");
     }
@@ -252,7 +256,11 @@ std::vector<int32_t> CanaryRuntime::transcribe(const std::vector<float> & sample
         throw std::runtime_error("Canary prompt and generation exceed the 1024-token context");
     }
     std::vector<float> logits;
-    for (int64_t step = 0; step < static_cast<int64_t>(prompt.size()) + limit - 1; ++step) {
+    const int64_t total_steps = static_cast<int64_t>(prompt.size()) + limit - 1;
+    for (int64_t step = 0; step < total_steps; ++step) {
+        if (poll) {
+            poll(step, total_steps);
+        }
         const auto cursor = g.cursor.next_step();
         const int32_t position = static_cast<int32_t>(cursor.position);
         const int32_t input_token = step < static_cast<int64_t>(prompt.size()) ? prompt[step] : next;
@@ -277,7 +285,12 @@ std::vector<int32_t> CanaryRuntime::transcribe(const std::vector<float> & sample
         }
         generated.push_back(next);
     }
-    throw std::runtime_error("Canary reached max_tokens before EOS");
+    // The budget ran out before <|endoftext|>: keep what the chunk produced and
+    // say so (L11: truncated honestly, never silently or by failing the run).
+    if (truncated != nullptr) {
+        *truncated = true;
+    }
+    return generated;
 }
 
 }  // namespace engine::models::canary_asr

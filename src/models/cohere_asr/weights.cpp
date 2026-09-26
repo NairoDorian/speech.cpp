@@ -105,7 +105,14 @@ std::unique_ptr<CohereWeights> load_cohere_weights(
         w.feed_forward = {fc1.weight, fc1.bias, fc2.weight, fc2.bias};
         out->decoder.push_back(std::move(w));
     }
-    out->head = linear("log_softmax.mlp.layer0");
+    // The transcribe.cpp GGUF stores the head tied to the token embedding (no
+    // head weight tensor, only its bias); the audio.cpp package stores both.
+    if (source.has_tensor("log_softmax.mlp.layer0.weight")) {
+        out->head = linear("log_softmax.mlp.layer0");
+    } else {
+        out->head.weight = out->embedding;
+        out->head.bias = store.load_f32_tensor(source, "log_softmax.mlp.layer0.bias", {16384});
+    }
     store.upload();
     return out;
 }

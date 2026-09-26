@@ -36,7 +36,17 @@ void test_adapter_find_arch_coverage() {
         "voxtral_realtime",
         "sortformer_diar",
         "roformer",
-        "moss",
+        "moss_transcribe_diarize",
+        "cohere_asr",
+        "canary_asr",
+        "confucius4_r2t2",
+        "nemotron_3_diar",
+        "whisper",
+        "moonshine",
+        "moonshine_streaming",
+        "medasr",
+        "gigaam",
+        "canary_qwen",
     };
 
     for (const char * family : kAdapterFamilies) {
@@ -57,6 +67,11 @@ void test_adapter_find_arch_coverage() {
         }
     }
 
+    // "moss" is the transcribe.cpp arch name, not an engine family: an
+    // adapter row for it would hint a family no loader serves once the arch is
+    // retired, instead of letting the registry route the GGUF to
+    // moss_transcribe_diarize (removed 2026-09-24).
+    CHECK(transcribe::adapter_find_arch("moss") == nullptr);
     CHECK(transcribe::adapter_find_arch("nonexistent_arch") == nullptr);
     CHECK(transcribe::adapter_find_arch("") == nullptr);
     CHECK(transcribe::adapter_find_arch(nullptr) == nullptr);
@@ -64,11 +79,12 @@ void test_adapter_find_arch_coverage() {
 
 void test_overlapping_families_distinct_dispatch() {
     // For the families that overlapped at the start of the fusion
-    // (qwen3_asr, voxtral_realtime, moss), adapter_find_arch must return the
-    // adapter entry point; find_arch returns the transcribe.cpp builtin while
-    // one still exists (moss) and the adapter once Phase 10.5 has retired it
-    // (qwen3_asr and voxtral_realtime, 2026-08-26).
-    const char * const kOverlapping[] = {"qwen3_asr", "voxtral_realtime", "moss"};
+    // (qwen3_asr, voxtral_realtime, moss -> moss_transcribe_diarize),
+    // adapter_find_arch must return the adapter entry point; find_arch returns
+    // the transcribe.cpp builtin while one still exists (moss) and the adapter
+    // once Phase 10.5 has retired it (qwen3_asr and voxtral_realtime,
+    // 2026-08-26).
+    const char * const kOverlapping[] = {"qwen3_asr", "voxtral_realtime", "moss_transcribe_diarize"};
     for (const char * family : kOverlapping) {
         const transcribe::Arch * adapter_arch = transcribe::adapter_find_arch(family);
         CHECK(adapter_arch != nullptr);

@@ -115,7 +115,44 @@ std::string decode_gpt2_bytes(const std::string & piece) {
     return out;
 }
 
+// A SentencePiece byte-fallback piece: exactly "<0xHH>" (hex digits in
+// either case). Returns the byte, or -1 for any other piece.
+int sp_byte_fallback(const std::string & piece) {
+    if (piece.size() != 6 || piece[0] != '<' || piece[1] != '0' || piece[2] != 'x' || piece[5] != '>') {
+        return -1;
+    }
+    const auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        return -1;
+    };
+    const int hi = hex(piece[3]);
+    const int lo = hex(piece[4]);
+    return (hi < 0 || lo < 0) ? -1 : hi * 16 + lo;
+}
+
+// A vocabulary marks word starts either the SentencePiece way (U+2581) or the
+// GPT-2 byte-level way (U+0120). GGUF "tokenizer.ggml.model" does not say
+// which for "bpe": transcribe.cpp's converters write "bpe" for NeMo /
+// SentencePiece-BPE vocabs (parakeet, gigaam, medasr), whose pieces must be
+// joined with U+2581 -> ' ', not GPT-2 byte-decoded (which leaked literal
+// U+2581 characters into the text).
+bool vocab_uses_sp_markers(const std::vector<std::string> & tokens) {
+    bool sp_marker = false;
+    for (const auto & t : tokens) {
+        if (t.find("\xC4\xA0") != std::string::npos) {
+            return false;
+        }
+        sp_marker = sp_marker || t.find(k_sp_space) != std::string::npos;
+    }
+    return sp_marker;
+}
+
 std::string decode_sp_piece(const std::string & piece) {
+    if (const int byte = sp_byte_fallback(piece); byte >= 0) {
+        return std::string(1, static_cast<char>(byte));
+    }
     std::string out;
     out.reserve(piece.size());
     size_t i = 0;
@@ -173,7 +210,7 @@ public:
         }
 
         std::string result;
-        if (model_ == TokenizerModel::ByteLevelBpe || model_ == TokenizerModel::Bpe) {
+        if (model_ == TokenizerModel::ByteLevelBpe || (model_ == TokenizerModel::Bpe && !sp_pieces_)) {
             for (size_t i = 0; i < count; ++i) {
                 int32_t id = ids[i];
                 if (id >= 0 && static_cast<size_t>(id) < tokens_.size()) {
@@ -217,6 +254,9 @@ protected:
     std::vector<int32_t>                     token_type_;
     std::unordered_map<std::string, int32_t> piece_to_id_;
     std::unordered_map<std::string, int32_t> merge_ranks_;
+    // TokenizerModel::Bpe over a SentencePiece-marked vocabulary (see
+    // vocab_uses_sp_markers): decoded by SentencePiece piece join.
+    bool                                     sp_pieces_ = false;
 
     // Splits text into the pieces BPE runs on, per the tokenizer's declared
     // pretokenizer (byte-level models without one get HF's ByteLevel default,
@@ -403,6 +443,10 @@ public:
             }
         }
 
+        if (tok->model_ == TokenizerModel::Bpe) {
+            tok->sp_pieces_ = vocab_uses_sp_markers(tok->tokens_);
+        }
+
         // Scores
         int64_t scores_key = gguf_find_key(ctx, "tokenizer.ggml.scores");
         if (scores_key >= 0 && gguf_get_kv_type(ctx, scores_key) == GGUF_TYPE_ARRAY) {
@@ -472,14 +516,7 @@ class RawTokensTokenizerImpl final : public GenericTokenizerImpl {
     // including every load_tokenizer_from_sentencepiece() result - decoded with
     // literal U+2581 characters instead of spaces.
     static TokenizerModel infer_model(const std::vector<std::string> & tokens) {
-        bool sp_marker = false;
-        for (const auto & t : tokens) {
-            if (t.find("\xC4\xA0") != std::string::npos) {
-                return TokenizerModel::ByteLevelBpe;
-            }
-            sp_marker = sp_marker || t.find(k_sp_space) != std::string::npos;
-        }
-        return sp_marker ? TokenizerModel::Unigram : TokenizerModel::ByteLevelBpe;
+        return vocab_uses_sp_markers(tokens) ? TokenizerModel::Unigram : TokenizerModel::ByteLevelBpe;
     }
 
 public:

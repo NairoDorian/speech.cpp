@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "family": "canary_qwen",
+  "display_name": "NVIDIA Canary-Qwen",
+  "description": "NVIDIA Canary-Qwen-2.5B English speech recognition: a NeMo SALM that feeds a 32-layer FastConformer encoder into a Qwen3-1.7B causal LM through audio-token injection, decoded greedily. Loads the transcribe.cpp GGUF layout (general.architecture = canary_qwen).",
+  "category": "asr",
+  "status": "supported",
+  "tasks": [
+    "asr"
+  ],
+  "modes": [
+    "offline"
+  ],
+  "languages": [
+    "en"
+  ],
+  "capabilities": {
+    "asr": [
+      "cancellation"
+    ]
+  },
+  "runtime": {
+    "tags": [
+      "gguf"
+    ]
+  },
+  "options": {
+    "request": [
+      {
+        "name": "language",
+        "type": "string",
+        "description": "Accepted and ignored: the model transcribes English only.",
+        "required": false,
+        "default": "en"
+      },
+      {
+        "name": "task",
+        "type": "string",
+        "description": "transcribe only; translate is rejected (the C ABI's task field).",
+        "required": false,
+        "default": "transcribe"
+      },
+      {
+        "name": "timestamps",
+        "type": "string",
+        "description": "Accepted and ignored: the model returns one untimed transcript (the C ABI's timestamps field).",
+        "required": false,
+        "default": "none"
+      }
+    ],
+    "session": [
+      {
+        "name": "kv_type",
+        "type": "enum",
+        "description": "Decoder KV-cache dtype: f16 (default, the transcribe.cpp AUTO policy), f32, or auto (= f16).",
+        "values": [
+          "f16",
+          "f32",
+          "auto"
+        ],
+        "required": false,
+        "default": "f16"
+      },
+      {
+        "name": "n_ctx",
+        "type": "int",
+        "description": "Lower the decoder context ceiling (audio tokens + prompt + generation); 0 uses decoder.max_position_embeddings.",
+        "required": false,
+        "min": 0,
+        "default": 0
+      }
+    ],
+    "load": []
+  },
+  "package_defaults": {
+    "download": {
+      "kind": "huggingface_snapshot",
+      "repo": "handy-computer/canary-qwen-2.5b-gguf",
+      "revision": "main",
+      "gated": false
+    }
+  },
+  "packages": [
+    {
+      "id": "canary_qwen_2_5b_q8_0",
+      "display_name": "Canary-Qwen 2.5B Q8_0 GGUF",
+      "default": true,
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "canary-qwen-2.5b-gguf",
+      "files": [
+        "canary-qwen-2.5b-Q8_0.gguf"
+      ]
+    },
+    {
+      "id": "canary_qwen_2_5b_q6_k",
+      "display_name": "Canary-Qwen 2.5B Q6_K GGUF",
+      "format": "gguf",
+      "precision": "q6_k",
+      "target_directory": "canary-qwen-2.5b-gguf",
+      "files": [
+        "canary-qwen-2.5b-Q6_K.gguf"
+      ]
+    },
+    {
+      "id": "canary_qwen_2_5b_q5_k_m",
+      "display_name": "Canary-Qwen 2.5B Q5_K_M GGUF",
+      "format": "gguf",
+      "precision": "q5_k_m",
+      "target_directory": "canary-qwen-2.5b-gguf",
+      "files": [
+        "canary-qwen-2.5b-Q5_K_M.gguf"
+      ]
+    },
+    {
+      "id": "canary_qwen_2_5b_q4_k_m",
+      "display_name": "Canary-Qwen 2.5B Q4_K_M GGUF",
+      "format": "gguf",
+      "precision": "q4_k_m",
+      "target_directory": "canary-qwen-2.5b-gguf",
+      "files": [
+        "canary-qwen-2.5b-Q4_K_M.gguf"
+      ]
+    },
+    {
+      "id": "canary_qwen_2_5b_f16",
+      "display_name": "Canary-Qwen 2.5B F16 GGUF",
+      "format": "gguf",
+      "precision": "f16",
+      "target_directory": "canary-qwen-2.5b-gguf",
+      "files": [
+        "canary-qwen-2.5b-F16.gguf"
+      ]
+    },
+    {
+      "id": "canary_qwen_2_5b_bf16",
+      "display_name": "Canary-Qwen 2.5B BF16 GGUF",
+      "format": "gguf",
+      "precision": "bf16",
+      "target_directory": "canary-qwen-2.5b-gguf",
+      "files": [
+        "canary-qwen-2.5b-BF16.gguf"
+      ]
+    }
+  ],
+  "dependencies": [],
+  "ui": {
+    "recommended_package": "canary_qwen_2_5b_q8_0",
+    "tags": [
+      "ASR",
+      "GGUF"
+    ],
+    "docs": [
+      "docs/asr.md",
+      "docs/gguf.md"
+    ]
+  },
+  "sources": [
+    {
+      "format": "gguf",
+      "roots": {
+        "model": ".",
+        "weights": "$gguf"
+      },
+      "tensors": {
+        "weights": "weights:"
+      }
+    }
+  ]
+}

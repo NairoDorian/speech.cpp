@@ -19,7 +19,8 @@
   "capabilities": {
     "asr": [
       "segments",
-      "speaker_turns"
+      "speaker_turns",
+      "cancellation"
     ]
   },
   "runtime": {
@@ -33,15 +34,39 @@
         "name": "max_tokens",
         "type": "int",
         "min": 1,
-        "default": 5120,
         "required": false,
-        "description": "Maximum generated transcript tokens."
+        "description": "Maximum generated transcript tokens (clamped to the decoder context). Default: the package's generation_config max_new_tokens (5120); for a transcribe.cpp GGUF, the retired arch's adaptive budget max(256, 2 x audio tokens + 128). Running out returns the partial transcript flagged truncated."
       },
       {
         "name": "instruct",
         "type": "string",
         "required": false,
         "description": "Transcription instruction; empty uses the upstream diarization prompt."
+      },
+      {
+        "name": "diarize",
+        "type": "bool",
+        "required": false,
+        "default": false,
+        "description": "Return speaker turns (the model's S01, S02, ... tags). Off by default, the transcribe C ABI's library-wide diarization default; segments and clean text are returned either way."
+      },
+      {
+        "name": "timestamps",
+        "type": "string",
+        "required": false,
+        "default": "auto",
+        "description": "none, auto or segment (or the C ABI's 0 / 1 / 2). none zeroes every segment and speaker-turn time; word timing is not supported."
+      },
+      {
+        "name": "output",
+        "type": "enum",
+        "values": [
+          "clean",
+          "raw"
+        ],
+        "required": false,
+        "default": "clean",
+        "description": "Offline text_output: clean joins the turn texts with single spaces (the retired arch's full_text); raw is the model's tagged [start][Sxx]text[end] transcript. The raw transcript is always attached as the moss_transcribe_diarize.raw_text artifact; a stream's final text is always raw (it is what the deltas spell)."
       }
     ],
     "session": [],

@@ -100,7 +100,17 @@ public:
                 const auto & span = chunks[start + i];
                 batch.emplace_back(mono.begin() + span.start_sample, mono.begin() + span.end_sample);
             }
-            auto generated = runtime_->transcribe(batch, prompt, max_tokens);
+            std::vector<bool> truncated;
+            auto generated = runtime_->transcribe(batch, prompt, max_tokens,
+                [this, start, &chunks](int64_t step, int64_t total) {
+                    // Chunk-level progress plus a cancellation point per decode step.
+                    emit_progress("cohere_asr.decode", static_cast<int64_t>(start) * total + step,
+                        static_cast<int64_t>(chunks.size()) * total);
+                },
+                &truncated);
+            for (const bool cut : truncated) {
+                result.truncated = result.truncated || cut;
+            }
             for (size_t i = 0; i < count; ++i) {
                 const auto & chunk = chunks[start + i];
                 auto & tokens = generated[i];
@@ -136,6 +146,7 @@ std::shared_ptr<runtime::IVoiceModelLoader> make_cohere_asr_loader() {
     runtime::SpecBackedVoiceModelConfig<CohereAssets> config;
     config.family = "cohere_asr";
     config.load_assets = load_cohere_assets;
+    config.accepts_foreign_layout = looks_like_transcribe_cohere_gguf;
     config.create_session = [](const runtime::TaskSpec & task, const runtime::SessionOptions & options,
         std::shared_ptr<const CohereAssets> assets, std::shared_ptr<const model_spec::ModelContract> contract) {
         return std::make_unique<CohereSession>(task, options, std::move(assets), std::move(contract));

@@ -354,18 +354,27 @@ bool MelExtractor::compute(const float *        pcm,
     std::vector<double> padded;
 
     if (!n_fft_is_pow2) {
-        padded_f32.resize(n_samples + 2 * static_cast<size_t>(pad));
+        // PadMode::None frames start at sample 0 with n_fft - win trailing
+        // zeros, exactly like the power-of-two path below. Until 2026-09-24
+        // this path always placed the signal at offset n_fft/2, shifting
+        // every no-pad frame by half an FFT (GigaAM, n_fft 320, found it).
+        const size_t lead = no_pad ? 0 : static_cast<size_t>(pad);
+        padded_f32.assign(no_pad ? n_samples + static_cast<size_t>(n_fft - win)
+                                 : n_samples + 2 * static_cast<size_t>(pad),
+                          0.0f);
         if (spec_.pre_emphasis != 0.0f) {
             const float alpha = spec_.pre_emphasis;
-            padded_f32[static_cast<size_t>(pad)] = pcm[0];
+            padded_f32[lead] = pcm[0];
             for (size_t i = 1; i < n_samples; ++i) {
-                padded_f32[static_cast<size_t>(pad) + i] = pcm[i] - alpha * pcm[i - 1];
+                padded_f32[lead + i] = pcm[i] - alpha * pcm[i - 1];
             }
         } else {
-            std::memcpy(padded_f32.data() + pad, pcm, n_samples * sizeof(float));
+            std::memcpy(padded_f32.data() + lead, pcm, n_samples * sizeof(float));
         }
 
-        if (use_reflect) {
+        if (no_pad) {
+            // trailing zeros already in place
+        } else if (use_reflect) {
             for (int i = 0; i < pad; ++i) {
                 padded_f32[static_cast<size_t>(i)] = padded_f32[static_cast<size_t>(2 * pad - i)];
             }

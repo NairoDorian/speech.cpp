@@ -26,6 +26,7 @@ public:
         bool center) const;
 private:
     engine::audio::NemoMelFrontend frontend_;
+    bool all_stft_frames_valid_ = false;
 };
 
 }  // namespace engine::community_models::parakeet_tdt

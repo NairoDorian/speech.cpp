@@ -29,6 +29,7 @@
 //      declare same-named members, which would silently shadow them.
 
 #include "transcribe-arch-adapter.h"
+#include "transcribe-batch-util.h"
 
 #include "transcribe-log.h"
 #include "transcribe-loader.h"
@@ -43,6 +44,7 @@
 #include "engine/framework/core/backend.h"
 #include "engine/framework/model_spec/metadata.h"
 #include "engine/framework/runtime/model.h"
+#include "engine/framework/runtime/errors.h"
 #include "engine/framework/runtime/registry.h"
 #include "engine/framework/runtime/session.h"
 #include "engine/framework/runtime/stream_chunker.h"
@@ -53,6 +55,8 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <new>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -197,14 +201,48 @@ static int64_t samples_to_us(int64_t samples) {
     return samples * 1000000 / k_native_sample_rate;
 }
 
+// MOSS-Transcribe-Diarize labels turns with the model's own 1-based inline tag
+// ("S01", "S02", ...), and the retired `moss` arch published that number as the
+// ABI speaker id. Returns the number for an id of exactly that form.
+static std::optional<int32_t> inline_speaker_tag_number(const std::string & id) {
+    if (id.size() < 2 || id[0] != 'S') {
+        return std::nullopt;
+    }
+    int64_t value = 0;
+    for (size_t i = 1; i < id.size(); ++i) {
+        if (id[i] < '0' || id[i] > '9') {
+            return std::nullopt;
+        }
+        value = value * 10 + (id[i] - '0');
+        if (value > INT32_MAX) {
+            return std::nullopt;
+        }
+    }
+    if (value <= 0) {
+        return std::nullopt;
+    }
+    return static_cast<int32_t>(value);
+}
+
 // The framework identifies speakers by opaque string; the C ABI uses a 1-based
 // int32 (0 = no attribution). Assign indices in first-appearance order so the
-// numbering is stable within a result and reproducible across runs.
+// numbering is stable within a result and reproducible across runs - except
+// when every turn carries a numbered inline tag (MOSS), whose numbers are kept
+// so a transcript whose first turn is S02 still reports speaker 2.
 class SpeakerIndexer {
 public:
+    explicit SpeakerIndexer(const std::vector<engine::runtime::SpeakerTurn> & turns) {
+        numbered_ = !turns.empty() && std::all_of(turns.begin(), turns.end(), [](const auto & turn) {
+            return inline_speaker_tag_number(turn.speaker_id).has_value();
+        });
+    }
+
     int32_t index_of(const std::string & id) {
         if (id.empty()) {
             return 0;
+        }
+        if (numbered_) {
+            return *inline_speaker_tag_number(id);
         }
         const auto it = ids_.find(id);
         if (it != ids_.end()) {
@@ -216,6 +254,7 @@ public:
     }
 
 private:
+    bool numbered_ = false;
     std::unordered_map<std::string, int32_t> ids_;
 };
 
@@ -308,7 +347,7 @@ static void map_result_into(transcribe_session * ctx, const TaskResult & result)
 
     if (result.text_output.has_value()) {
         ctx->full_text = result.text_output->text;
-        ctx->raw_text = result.text_output->text;
+        ctx->raw_text = result.raw_text.value_or(result.text_output->text);
         ctx->detected_language = result.text_output->language;
     }
 
@@ -335,7 +374,44 @@ static void map_result_into(transcribe_session * ctx, const TaskResult & result)
 
     tie_words_to_segments(ctx->segments, ctx->words);
 
-    SpeakerIndexer speakers;
+    // Token rows (TimestampGranularity::Token families). A token inherits its
+    // word's segment; a token outside any word takes the last segment that
+    // starts at or before it. Words get their [first_token, n_tokens) range.
+    for (const auto & tt : result.token_timestamps) {
+        transcribe_session::TokenEntry entry;
+        entry.id = tt.id;
+        entry.text = tt.text;
+        entry.p = tt.probability;
+        entry.t0_ms = samples_to_ms(tt.span.start_sample);
+        entry.t1_ms = samples_to_ms(tt.span.end_sample);
+        entry.word_index = -1;
+        entry.seg_index = 0;
+        if (tt.word_index >= 0 && static_cast<size_t>(tt.word_index) < ctx->words.size()) {
+            auto & word = ctx->words[static_cast<size_t>(tt.word_index)];
+            entry.word_index = tt.word_index;
+            entry.seg_index = word.seg_index;
+            if (word.n_tokens == 0) {
+                word.first_token = static_cast<int>(ctx->tokens.size());
+            }
+            ++word.n_tokens;
+        } else {
+            for (size_t si = 0; si < ctx->segments.size(); ++si) {
+                if (ctx->segments[si].t0_ms <= entry.t0_ms) {
+                    entry.seg_index = static_cast<int>(si);
+                }
+            }
+        }
+        if (static_cast<size_t>(entry.seg_index) < ctx->segments.size()) {
+            auto & seg = ctx->segments[static_cast<size_t>(entry.seg_index)];
+            if (seg.n_tokens == 0) {
+                seg.first_token = static_cast<int>(ctx->tokens.size());
+            }
+            ++seg.n_tokens;
+        }
+        ctx->tokens.push_back(std::move(entry));
+    }
+
+    SpeakerIndexer speakers(result.speaker_turns);
     for (const auto & turn : result.speaker_turns) {
         transcribe_session::SpeakerSegmentEntry entry;
         entry.t0_ms = samples_to_ms(turn.span.start_sample);
@@ -347,13 +423,16 @@ static void map_result_into(transcribe_session * ctx, const TaskResult & result)
 
     attribute_segment_speakers(ctx->segments, ctx->speaker_segments);
 
-    if (!ctx->words.empty()) {
+    if (!ctx->tokens.empty()) {
+        ctx->result_kind = TRANSCRIBE_TIMESTAMPS_TOKEN;
+    } else if (!ctx->words.empty()) {
         ctx->result_kind = TRANSCRIBE_TIMESTAMPS_WORD;
     } else if (!ctx->segments.empty()) {
         ctx->result_kind = TRANSCRIBE_TIMESTAMPS_SEGMENT;
     }
     ctx->has_result = result.text_output.has_value() || !result.speech_segments.empty() ||
-                      !result.word_timestamps.empty() || !result.speaker_turns.empty() ||
+                      !result.word_timestamps.empty() || !result.token_timestamps.empty() ||
+                      !result.speaker_turns.empty() ||
                       (result.audio_output.has_value() && !result.audio_output->samples.empty());  // audio-only tasks (separation)
 }
 
@@ -374,7 +453,46 @@ static void map_result_into(transcribe_session * ctx, const TaskResult & result)
 // the dispatcher has already rejected requests finer than the model's max.
 static void apply_offline_result_conventions(transcribe_session * ctx, transcribe_timestamp_kind requested,
                                              bool has_transcript) {
-    if (!ctx->words.empty() || !ctx->segments.empty()) {
+    // A non-AUTO request is a ceiling ("Timestamp policy": finer per-run data
+    // is elided). Enforced here so every engine family honours it whether or
+    // not it reads the "timestamps" request option itself. NONE keeps the
+    // segmentation and its text but no timings. Segment speakers were already
+    // attributed from the real timings in map_result_into().
+    if (requested != TRANSCRIBE_TIMESTAMPS_AUTO) {
+        if (requested < TRANSCRIBE_TIMESTAMPS_TOKEN) {
+            ctx->tokens.clear();
+            for (auto & word : ctx->words) {
+                word.first_token = 0;
+                word.n_tokens = 0;
+            }
+            for (auto & seg : ctx->segments) {
+                seg.first_token = 0;
+                seg.n_tokens = 0;
+            }
+        }
+        if (requested < TRANSCRIBE_TIMESTAMPS_WORD) {
+            ctx->words.clear();
+            for (auto & seg : ctx->segments) {
+                seg.first_word = 0;
+                seg.n_words = 0;
+            }
+        }
+        if (requested == TRANSCRIBE_TIMESTAMPS_NONE) {
+            for (auto & seg : ctx->segments) {
+                seg.t0_ms = 0;
+                seg.t1_ms = 0;
+            }
+        }
+        if (!ctx->tokens.empty()) {
+            ctx->result_kind = TRANSCRIBE_TIMESTAMPS_TOKEN;
+        } else if (!ctx->words.empty()) {
+            ctx->result_kind = TRANSCRIBE_TIMESTAMPS_WORD;
+        } else if (!ctx->segments.empty()) {
+            ctx->result_kind = requested == TRANSCRIBE_TIMESTAMPS_NONE ? TRANSCRIBE_TIMESTAMPS_NONE
+                                                                       : TRANSCRIBE_TIMESTAMPS_SEGMENT;
+        }
+    }
+    if (!ctx->tokens.empty() || !ctx->words.empty() || !ctx->segments.empty()) {
         return;
     }
     if (has_transcript && !ctx->full_text.empty()) {
@@ -682,8 +800,12 @@ static void apply_run_params(TaskRequest & request, const transcribe_run_params 
     set_tristate("itn", static_cast<int>(params->itn));
     set_tristate("enable_itn", static_cast<int>(params->itn));
     set_tristate("diarize", static_cast<int>(params->diarize));
+    // Same fan-out for keep_special_tags: parakeet_tdt spells it
+    // "keep_language_tags" (its <ll-RR> tags, and the tag tokens in its token
+    // rows - the arch's behaviour for this flag).
     request.options["keep_special_tags"] = params->keep_special_tags ? "true" : "false";
     request.options["keep_tags"] = params->keep_special_tags ? "true" : "false";
+    request.options["keep_language_tags"] = params->keep_special_tags ? "true" : "false";
     request.options["spec_k_drafts"] = std::to_string(params->spec_k_drafts);
 }
 
@@ -721,9 +843,17 @@ public:
         // An ASR family publishes the finest timing it really returns; the
         // dispatcher rejects finer requests (Whisper: segments only).
         if (caps_has_task(caps_, VoiceTaskKind::Asr) && caps_.supports_timestamps) {
-            this->caps.max_timestamp_kind = caps_.timestamp_granularity == TimestampGranularity::Segment
-                ? TRANSCRIBE_TIMESTAMPS_SEGMENT
-                : TRANSCRIBE_TIMESTAMPS_WORD;
+            switch (caps_.timestamp_granularity) {
+                case TimestampGranularity::Segment:
+                    this->caps.max_timestamp_kind = TRANSCRIBE_TIMESTAMPS_SEGMENT;
+                    break;
+                case TimestampGranularity::Word:
+                    this->caps.max_timestamp_kind = TRANSCRIBE_TIMESTAMPS_WORD;
+                    break;
+                case TimestampGranularity::Token:
+                    this->caps.max_timestamp_kind = TRANSCRIBE_TIMESTAMPS_TOKEN;
+                    break;
+            }
         } else {
             this->caps.max_timestamp_kind = caps_has_task(caps_, VoiceTaskKind::Vad)
                 ? TRANSCRIBE_TIMESTAMPS_SEGMENT
@@ -736,7 +866,9 @@ public:
         this->caps.supports_translate = caps_.supports_translate;
         this->caps.supports_streaming = caps_supports_streaming(caps_);
         this->caps.supports_spec_decode = caps_.supports_speculative_decode;
-        this->caps.max_audio_ms = 0;  // framework sessions chunk internally; treat as unbounded.
+        // 0 = unbounded (the session chunks internally) unless the family
+        // states a hard limit (medasr: its trained 400 s window).
+        this->caps.max_audio_ms = caps_.max_audio_ms;
         this->caps.n_translate_target_languages = 0;
         this->caps.translate_target_languages = nullptr;
         set_languages(caps_.languages);
@@ -868,6 +1000,16 @@ public:
                                              canceled.partial != nullptr && canceled.partial->text_output.has_value());
             has_result = true;
             return TRANSCRIBE_ERR_ABORTED;
+        } catch (const engine::runtime::InputTooLong & e) {
+            transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "adapter run: input too long: %s", e.what());
+            clear_result();
+            return TRANSCRIBE_ERR_INPUT_TOO_LONG;
+        } catch (const engine::runtime::CapacityError & e) {
+            // The device could not hold a run of this size (compute buffer /
+            // KV allocation): the arches' OOM, not a backend fault.
+            transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "adapter run: out of memory: %s", e.what());
+            clear_result();
+            return TRANSCRIBE_ERR_OOM;
         } catch (const std::invalid_argument & e) {
             // A request the family rejects on its merits (an unknown language,
             // a special token in a Whisper prompt, a malformed option value):
@@ -912,7 +1054,22 @@ public:
             }
 
             install_abort_bridge(offline);
-            const std::vector<TaskResult> results = offline->run_batch(requests);
+            std::vector<TaskResult> results;
+            try {
+                results = offline->run_batch(requests);
+            } catch (const std::invalid_argument & e) {
+                if (n == 1) {
+                    throw;
+                }
+                // One malformed utterance must not fail the batch
+                // (transcribe.h: per-utterance status). A family whose batch
+                // path rejects the whole request list is re-run one utterance
+                // at a time so each gets its own status; an abort still
+                // unwinds the whole call.
+                transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_WARN,
+                                    "adapter run_batch: batch rejected (%s); retrying per utterance", e.what());
+                results = run_batch_per_item(*offline, requests);
+            }
 
             batch_results.clear();
             batch_results.reserve(n);
@@ -934,7 +1091,16 @@ public:
                     rs.result_kind = result_kind;
                     // Per-utterance, like the builtin arches: the batch call
                     // itself stays OK (transcribe.h, OUTPUT_TRUNCATED).
-                    rs.status = results[i].truncated ? TRANSCRIBE_ERR_OUTPUT_TRUNCATED : TRANSCRIBE_OK;
+                    rs.status = item_status_to_transcribe(results[i].item_status);
+                    if (rs.status != TRANSCRIBE_OK) {
+                        rs.has_result = false;
+                        if (!results[i].item_error.empty()) {
+                            transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "adapter run_batch: utterance %zu: %s",
+                                                i, results[i].item_error.c_str());
+                        }
+                    } else if (results[i].truncated) {
+                        rs.status = TRANSCRIBE_ERR_OUTPUT_TRUNCATED;
+                    }
                 } else {
                     rs.has_result = false;
                     rs.status = TRANSCRIBE_ERR_BACKEND;
@@ -974,6 +1140,56 @@ public:
             transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "adapter run_batch failed: %s", e.what());
             return TRANSCRIBE_ERR_BACKEND;
         }
+    }
+
+    static transcribe_status item_status_to_transcribe(engine::runtime::TaskItemStatus status) {
+        switch (status) {
+            case engine::runtime::TaskItemStatus::Ok:              return TRANSCRIBE_OK;
+            case engine::runtime::TaskItemStatus::InvalidArgument: return TRANSCRIBE_ERR_INVALID_ARG;
+            case engine::runtime::TaskItemStatus::InputTooLong:    return TRANSCRIBE_ERR_INPUT_TOO_LONG;
+            case engine::runtime::TaskItemStatus::OutOfMemory:     return TRANSCRIBE_ERR_OOM;
+            case engine::runtime::TaskItemStatus::Failed:          return TRANSCRIBE_ERR_BACKEND;
+        }
+        return TRANSCRIBE_ERR_BACKEND;
+    }
+
+    // Serial fallback for a batch the family rejected as a whole: run() per
+    // utterance, turning that utterance's rejection into its item status.
+    // Cancellation (ProgressCanceled) propagates and aborts the batch.
+    static std::vector<TaskResult> run_batch_per_item(engine::runtime::IOfflineVoiceTaskSession & offline,
+                                                      const std::vector<TaskRequest> &            requests) {
+        std::vector<TaskResult> results;
+        results.reserve(requests.size());
+        for (const auto & request : requests) {
+            TaskResult result;
+            try {
+                result = offline.run(request);
+            } catch (const engine::runtime::ProgressCanceled &) {
+                throw;
+            } catch (const engine::runtime::InputTooLong & e) {
+                result = TaskResult{};
+                result.item_status = engine::runtime::TaskItemStatus::InputTooLong;
+                result.item_error = e.what();
+            } catch (const std::invalid_argument & e) {
+                result = TaskResult{};
+                result.item_status = engine::runtime::TaskItemStatus::InvalidArgument;
+                result.item_error = e.what();
+            } catch (const engine::runtime::CapacityError & e) {
+                result = TaskResult{};
+                result.item_status = engine::runtime::TaskItemStatus::OutOfMemory;
+                result.item_error = e.what();
+            } catch (const std::bad_alloc & e) {
+                result = TaskResult{};
+                result.item_status = engine::runtime::TaskItemStatus::OutOfMemory;
+                result.item_error = e.what();
+            } catch (const std::exception & e) {
+                result = TaskResult{};
+                result.item_status = engine::runtime::TaskItemStatus::Failed;
+                result.item_error = e.what();
+            }
+            results.push_back(std::move(result));
+        }
+        return results;
     }
 
     transcribe_status begin_stream(const transcribe_run_params * run_params,
@@ -1167,7 +1383,7 @@ private:
         }
 
         if (!event.speaker_turns.empty()) {
-            SpeakerIndexer speakers;
+            SpeakerIndexer speakers(event.speaker_turns);
             speaker_segments.clear();
             for (const auto & turn : event.speaker_turns) {
                 SpeakerSegmentEntry entry;
@@ -1250,7 +1466,12 @@ static SessionOptions build_session_options(const transcribe_session_params * pa
     SessionOptions options;
     options.backend = backend_config;
 
-    int threads = (p->n_threads > 0) ? p->n_threads : 1;
+    // transcribe.h: n_threads 0 means "library picks a sensible default" - the
+    // same default_n_threads() the builtin arches use. Until 2026-09-24 the
+    // adapter mapped 0 to ONE thread, so every engine family reached through
+    // the C ABI (whisper, moonshine, qwen3_asr, voxtral_realtime, ...) ran
+    // single-threaded unless the caller chose a count.
+    const int threads = (p->n_threads > 0) ? p->n_threads : transcribe::default_n_threads();
     options.backend.threads = threads;
     options.backend.device = 0;
 
@@ -1527,10 +1748,6 @@ static const Arch adapter_archs[] = {
      &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
      &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
      &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
-    {"moss",                &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
-     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
-     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
-     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
     {"moonshine",           &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
      &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
      &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
@@ -1542,6 +1759,62 @@ static const Arch adapter_archs[] = {
     // B16c: the engine `whisper` package (transcribe.cpp GGUFs by
     // general.architecture, whisper.cpp .bin files by the framework sniff).
     {"whisper",             &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    // audio.cpp #568 engine packages (2026-09-16). Reached through the
+    // framework sniff (audio.cpp packages carry general.architecture
+    // "audiocpp"), so `cohere_asr` here does not shadow the builtin transcribe
+    // arch of the same name: transcribe.cpp GGUFs still resolve to the arch
+    // via find_arch(), until the Phase 11b verdict retires one side. All
+    // three engine packages also read the transcribe.cpp GGUFs (2026-09-24,
+    // `accepts_foreign_layout`), which is what that retirement switches on.
+    {"cohere_asr",          &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"canary_asr",          &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"moss_transcribe_diarize", &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    // audio.cpp 9bdd1d90 merge (2026-09-23): audio.cpp packages only, so both
+    // are reached through the framework sniff (embedded family KV).
+    {"confucius4_r2t2",     &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"nemotron_3_diar",     &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    // Phase 11b engine ports of transcribe.cpp arches (2026-09-24). Shadowed
+    // by the builtin arch of the same name until its retirement; reachable
+    // meanwhile through SPEECHCPP_ENGINE_ARCHS (engine_route_forced()).
+    {"canary_qwen",         &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"gigaam",             &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"voxtral",            &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"granite_speech",     &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"granite_nar",        &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
+     &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
+     &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
+     &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},
+    {"medasr",              &adapter_load_impl,      &adapter_init_context_impl,   &adapter_run_impl,
      &adapter_run_batch_impl, &adapter_stream_validate_impl, &adapter_stream_begin_impl,
      &adapter_stream_feed_impl, &adapter_stream_finalize_impl, &adapter_stream_reset_impl,
      &adapter_accepts_ext_kind_impl, &adapter_run_validate_impl},

@@ -27,7 +27,7 @@
     "vi",
     "ko"
   ],
-  "capabilities": {},
+  "capabilities": {"asr": ["cancellation"]},
   "dependencies": [],
   "options": {
     "request": [

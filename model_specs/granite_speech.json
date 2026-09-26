@@ -1,0 +1,200 @@
+{
+  "family": "granite_speech",
+  "schema_version": 1,
+  "display_name": "IBM Granite Speech",
+  "description": "IBM Granite Speech autoregressive audio-LLM (granite-4.0-1b-speech, granite-speech-4.1-2b, granite-speech-4.1-2b-plus): Conformer encoder, BLIP-2 Q-Former projector and Granite-4 LM, loaded from the transcribe.cpp granite_speech GGUF. Translation on 1b / 2b; word timestamps and speaker attribution on -plus.",
+  "category": "asr",
+  "status": "supported",
+  "tasks": [
+    "asr"
+  ],
+  "modes": [
+    "offline"
+  ],
+  "languages": [
+    "en",
+    "fr",
+    "de",
+    "es",
+    "pt",
+    "ja"
+  ],
+  "capabilities": {
+    "asr": [
+      "cancellation",
+      "word_timestamps",
+      "speaker_turns"
+    ]
+  },
+  "dependencies": [],
+  "options": {
+    "request": [
+      {
+        "name": "language",
+        "type": "string",
+        "description": "Spoken language hint; the Granite prompt is language-agnostic, so it does not change decoding.",
+        "required": false
+      },
+      {
+        "name": "task",
+        "type": "string",
+        "description": "transcribe (default) or translate (1b / 2b variants only; needs target_language).",
+        "required": false,
+        "default": "transcribe"
+      },
+      {
+        "name": "target_language",
+        "type": "string",
+        "description": "Translation target (en, fr, de, es, pt, ja, it, zh or the English name).",
+        "required": false
+      },
+      {
+        "name": "timestamps",
+        "type": "string",
+        "description": "none, auto, segment or word (or the C ABI's 0-3). word selects the -plus timestamp task ([T:N] markers).",
+        "required": false,
+        "default": "none"
+      },
+      {
+        "name": "diarize",
+        "type": "bool",
+        "description": "Speaker attribution task ([Speaker N]: tags; -plus only). Exclusive with word timestamps.",
+        "required": false,
+        "default": false
+      },
+      {
+        "name": "max_tokens",
+        "type": "int",
+        "description": "Maximum generated tokens; 0 uses the model's decode budget (context-bounded).",
+        "required": false,
+        "min": 0,
+        "default": 0
+      }
+    ],
+    "session": [
+      {
+        "name": "weight_type",
+        "type": "enum",
+        "description": "Matmul weight storage type; native keeps the GGUF dtypes.",
+        "preset": "weight_type_full",
+        "required": false,
+        "default": "native"
+      },
+      {
+        "name": "kv_type",
+        "type": "enum",
+        "description": "Decoder KV-cache dtype.",
+        "values": [
+          "f16",
+          "f32"
+        ],
+        "required": false,
+        "default": "f16"
+      },
+      {
+        "name": "n_ctx",
+        "type": "int",
+        "description": "Decoder context ceiling in tokens; 0 uses the model maximum (lowering only).",
+        "required": false,
+        "min": 0,
+        "default": 0
+      }
+    ],
+    "load": []
+  },
+  "runtime": {
+    "tags": [
+      "gguf",
+      "cpu"
+    ]
+  },
+  "ui": {
+    "tags": [
+      "ASR",
+      "GGUF"
+    ],
+    "docs": [
+      "docs/porting/families/granite.md"
+    ],
+    "recommended_package": "granite_4_0_1b_speech_q8_0"
+  },
+  "packages": [
+    {
+      "id": "granite_4_0_1b_speech_q8_0",
+      "display_name": "Granite 4.0 1B Speech GGUF Q8_0",
+      "default": true,
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "Granite-4.0-1B-Speech-GGUF",
+      "files": [
+        "granite-4.0-1b-speech-Q8_0.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/granite-4.0-1b-speech-gguf",
+        "revision": "main",
+        "gated": false
+      }
+    },
+    {
+      "id": "granite_4_0_1b_speech_bf16",
+      "display_name": "Granite 4.0 1B Speech GGUF BF16",
+      "format": "gguf",
+      "precision": "bf16",
+      "target_directory": "Granite-4.0-1B-Speech-GGUF",
+      "files": [
+        "granite-4.0-1b-speech-BF16.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/granite-4.0-1b-speech-gguf",
+        "revision": "main",
+        "gated": false
+      }
+    },
+    {
+      "id": "granite_speech_4_1_2b_q8_0",
+      "display_name": "Granite Speech 4.1 2B GGUF Q8_0",
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "Granite-Speech-4.1-2B-GGUF",
+      "files": [
+        "granite-speech-4.1-2b-Q8_0.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/granite-speech-4.1-2b-gguf",
+        "revision": "main",
+        "gated": false
+      }
+    },
+    {
+      "id": "granite_speech_4_1_2b_plus_q8_0",
+      "display_name": "Granite Speech 4.1 2B Plus GGUF Q8_0",
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "Granite-Speech-4.1-2B-Plus-GGUF",
+      "files": [
+        "granite-speech-4.1-2b-plus-Q8_0.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "handy-computer/granite-speech-4.1-2b-plus-gguf",
+        "revision": "main",
+        "gated": false
+      }
+    }
+  ],
+  "sources": [
+    {
+      "format": "gguf",
+      "roots": {
+        "model": ".",
+        "weights": "$gguf"
+      },
+      "tensors": {
+        "weights": "weights:"
+      }
+    }
+  ]
+}

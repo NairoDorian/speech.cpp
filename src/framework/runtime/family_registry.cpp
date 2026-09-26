@@ -57,7 +57,7 @@ static constexpr std::string_view kGgufArchsSortformerDiar[] = {"sortformer_diar
 static constexpr std::string_view kAliasesRoformer[] = {"roformer-sep", "bs_roformer"};
 static constexpr std::string_view kGgufArchsRoformer[] = {"roformer"};
 
-static constexpr std::string_view kAliasesMoss[] = {"moss-asr", "moss_diar", "moss_stt"};
+static constexpr std::string_view kAliasesMoss[] = {"moss", "moss-asr", "moss_diar", "moss_stt"};
 static constexpr std::string_view kGgufArchsMoss[] = {"moss"};
 
 static constexpr std::string_view kAliasesWhisper[] = {"whisper-asr", "openai_whisper"};
@@ -69,23 +69,26 @@ static constexpr std::string_view kGgufArchsMoonshine[] = {"moonshine"};
 static constexpr std::string_view kAliasesMoonshineStreaming[] = {"moonshine-stream", "moonshine-streaming"};
 static constexpr std::string_view kGgufArchsMoonshineStreaming[] = {"moonshine_streaming"};
 
-static constexpr std::string_view kAliasesCanary[] = {"canary-asr", "canary-1b"};
+static constexpr std::string_view kAliasesCanary[] = {"canary", "canary-asr", "canary-1b"};
 static constexpr std::string_view kGgufArchsCanary[] = {"canary"};
 
 static constexpr std::string_view kAliasesCanaryQwen[] = {"canary-qwen", "canary_qwen_asr"};
 static constexpr std::string_view kGgufArchsCanaryQwen[] = {"canary_qwen"};
 
-static constexpr std::string_view kAliasesCohere[] = {"cohere-asr", "cohere_transcribe"};
-static constexpr std::string_view kGgufArchsCohere[] = {"cohere"};
+static constexpr std::string_view kAliasesCohere[] = {"cohere", "cohere-asr", "cohere_transcribe"};
+// transcribe.cpp's cohere arch writes general.architecture = "cohere_asr".
+static constexpr std::string_view kGgufArchsCohere[] = {"cohere_asr", "cohere"};
 
 static constexpr std::string_view kAliasesGigaam[] = {"gigaam-asr", "gigaam_v2"};
 static constexpr std::string_view kGgufArchsGigaam[] = {"gigaam"};
 
-static constexpr std::string_view kAliasesGranite[] = {"granite-asr", "granite_speech"};
-static constexpr std::string_view kGgufArchsGranite[] = {"granite"};
+static constexpr std::string_view kAliasesGranite[] = {"granite", "granite-asr"};
+// transcribe.cpp writes general.architecture "granite_speech" / "granite_speech_nar" (not
+// "granite", which would also claim llama.cpp Granite LM GGUFs).
+static constexpr std::string_view kGgufArchsGranite[] = {"granite_speech"};
 
 static constexpr std::string_view kAliasesGraniteNar[] = {"granite-nar", "granite_nar_asr"};
-static constexpr std::string_view kGgufArchsGraniteNar[] = {"granite_nar"};
+static constexpr std::string_view kGgufArchsGraniteNar[] = {"granite_speech_nar"};
 
 static constexpr std::string_view kAliasesMedasr[] = {"medasr-asr", "medasr_clinical"};
 static constexpr std::string_view kGgufArchsMedasr[] = {"medasr"};
@@ -132,8 +135,14 @@ static constexpr std::string_view kAliasesMossVoicegen[] = {"moss-voicegen"};
 static constexpr std::string_view kAliasesOutetts[] = {"outetts-tts"};
 // Renamed upstream (audio.cpp #647): vietneu_tts -> vieneu_v3_turbo. The old
 // id stays as an alias so existing callers and C ABI scripts keep resolving.
+static constexpr std::string_view kAliasesConfucius4R2t2[] = {"r2t2", "confucius4-r2t2"};
+static constexpr std::string_view kAliasesNemotron3Diar[] = {"nemotron-3-diar", "nemotron_diar"};
 static constexpr std::string_view kAliasesVieneuV3Turbo[] = {"vieneu", "vietneu", "vietneu_tts"};
 
+// Canonical ids are the ENGINE package families (the loader that serves the
+// files): canary -> canary_asr, cohere -> cohere_asr, moss ->
+// moss_transcribe_diarize (2026-09-24). The transcribe.cpp arch names stay as
+// aliases / GGUF archs so old spellings and transcribe-layout GGUFs resolve.
 #define ARR_DESC(arr) arr, (sizeof(arr)/sizeof((arr)[0]))
 #define EMPTY_DESC nullptr, 0
 
@@ -158,19 +167,22 @@ static const FamilyEntry kStaticFamilies[] = {
     {"whisper", ARR_DESC(kAliasesWhisper), ARR_DESC(kGgufArchsWhisper), "model_specs/whisper.json", VoiceTaskKind::Asr},
     {"moonshine", ARR_DESC(kAliasesMoonshine), ARR_DESC(kGgufArchsMoonshine), "model_specs/moonshine.json", VoiceTaskKind::Asr},
     {"moonshine_streaming", ARR_DESC(kAliasesMoonshineStreaming), ARR_DESC(kGgufArchsMoonshineStreaming), "model_specs/moonshine_streaming.json", VoiceTaskKind::Asr},
-    {"canary", ARR_DESC(kAliasesCanary), ARR_DESC(kGgufArchsCanary), "model_specs/canary.json", VoiceTaskKind::Asr},
+    {"canary_asr", ARR_DESC(kAliasesCanary), ARR_DESC(kGgufArchsCanary), "model_specs/canary_asr.json", VoiceTaskKind::Asr},
     {"canary_qwen", ARR_DESC(kAliasesCanaryQwen), ARR_DESC(kGgufArchsCanaryQwen), "model_specs/canary_qwen.json", VoiceTaskKind::Asr},
-    {"cohere", ARR_DESC(kAliasesCohere), ARR_DESC(kGgufArchsCohere), "model_specs/cohere.json", VoiceTaskKind::Asr},
+    {"cohere_asr", ARR_DESC(kAliasesCohere), ARR_DESC(kGgufArchsCohere), "model_specs/cohere_asr.json", VoiceTaskKind::Asr},
     {"gigaam", ARR_DESC(kAliasesGigaam), ARR_DESC(kGgufArchsGigaam), "model_specs/gigaam.json", VoiceTaskKind::Asr},
-    {"granite", ARR_DESC(kAliasesGranite), ARR_DESC(kGgufArchsGranite), "model_specs/granite.json", VoiceTaskKind::Asr},
+    {"granite_speech", ARR_DESC(kAliasesGranite), ARR_DESC(kGgufArchsGranite), "model_specs/granite_speech.json", VoiceTaskKind::Asr},
     {"granite_nar", ARR_DESC(kAliasesGraniteNar), ARR_DESC(kGgufArchsGraniteNar), "model_specs/granite_nar.json", VoiceTaskKind::Asr},
+    {"confucius4_r2t2", ARR_DESC(kAliasesConfucius4R2t2), EMPTY_DESC, "model_specs/confucius4_r2t2.json", VoiceTaskKind::Asr},
     {"medasr", ARR_DESC(kAliasesMedasr), ARR_DESC(kGgufArchsMedasr), "model_specs/medasr.json", VoiceTaskKind::Asr},
 
     // Diarization & Separation
+    // audio.cpp packages only (9bdd1d90 merge): no foreign GGUF arch.
+    {"nemotron_3_diar", ARR_DESC(kAliasesNemotron3Diar), EMPTY_DESC, "model_specs/nemotron_3_diar.json", VoiceTaskKind::Diarization},
     {"sortformer_diar", ARR_DESC(kAliasesSortformerDiar), ARR_DESC(kGgufArchsSortformerDiar), "model_specs/sortformer_diar.json", VoiceTaskKind::Diarization},
     {"roformer", ARR_DESC(kAliasesRoformer), ARR_DESC(kGgufArchsRoformer), "model_specs/roformer.json", VoiceTaskKind::SourceSeparation},
     {"demucs", ARR_DESC(kAliasesDemucs), EMPTY_DESC, "model_specs/demucs.json", VoiceTaskKind::SourceSeparation},
-    {"moss", ARR_DESC(kAliasesMoss), ARR_DESC(kGgufArchsMoss), "model_specs/moss.json", VoiceTaskKind::Asr},
+    {"moss_transcribe_diarize", ARR_DESC(kAliasesMoss), ARR_DESC(kGgufArchsMoss), "model_specs/moss_transcribe_diarize.json", VoiceTaskKind::Asr},
 
     // TTS & Voice
     {"ace_step", ARR_DESC(kAliasesAceStep), EMPTY_DESC, "model_specs/ace_step.json", VoiceTaskKind::Tts},

@@ -191,6 +191,12 @@ option(AUDIOCPP_BUILD_SERVER "Build audiocpp_server and embed WebUI assets" ON)
 option(AUDIOCPP_BUILD_CLI "Build audiocpp_cli binary" ON)
 option(AUDIOCPP_BUILD_GGUF_TOOL "Build audiocpp_gguf tool" ON)
 option(AUDIOCPP_STRIP_DEAD_CODE "Enable function-level linking and linker dead-code elimination in Release builds" ON)
+# Model-backed ASR verdict / parity tests run ONE short clip by default (quick
+# tier: load the model, transcribe 3.5 s once per side -> seconds per test).
+# ON also registers the multi-clip *_full variants (label `full`, slow on CPU).
+option(SPEECHCPP_FULL_ASR_TESTS "Also register the multi-clip (slow) ASR verdict/parity tests" OFF)
+set(SPEECHCPP_ASR_QUICK_FIXTURES ${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/quick)
+set(SPEECHCPP_ASR_FULL_FIXTURES ${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech)
 # Unified ABI runtime (transcribe.cpp port). Default OFF until Phase 5 (V6 plan J.2).
 option(SPEECHCPP_ENABLE_UNIFIED_ABI
     "Build the unified C ABI runtime (engine_transcribe_runtime + transcribe_shared)"
@@ -597,6 +603,7 @@ add_library(engine_core OBJECT
     src/framework/model_spec/schema.cpp
     src/framework/assets/tensor_source.cpp
     src/framework/assets/gguf_metadata.cpp
+    src/framework/assets/asset_paths.cpp
     src/framework/asr/sampling.cpp
     external/miniz/miniz.c
     src/framework/assets/weight_norm_folding.cpp
@@ -780,6 +787,8 @@ target_compile_definitions(engine_core PRIVATE
     MINIZ_NO_STDIO
     MINIZ_NO_TIME
     MINIZ_NO_ZLIB_COMPATIBLE_NAMES
+    # Last-resort root for bundled assets (engine::assets::resolve_bundled_asset).
+    "SPEECHCPP_SOURCE_ROOT=\"${CMAKE_CURRENT_SOURCE_DIR}\""
 )
 target_include_directories(engine_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external/miniz)
 set_source_files_properties(external/miniz/miniz.c PROPERTIES COMPILE_OPTIONS "$<IF:$<C_COMPILER_ID:MSVC>,/w,-w>")
@@ -1638,6 +1647,102 @@ audiocpp_add_model(canary_asr
         engine::models::canary_asr::make_canary_asr_loader
 )
 
+# Phase 11b port of the transcribe.cpp `canary_qwen` arch (2026-09-24): reads the
+# arch's GGUFs (general.architecture "canary_qwen") directly.
+audiocpp_add_model(canary_qwen
+    SOURCES
+        src/models/canary_qwen/assets.cpp
+        src/models/canary_qwen/mel_frontend.cpp
+        src/models/canary_qwen/conformer.cpp
+        src/models/canary_qwen/causal_lm.cpp
+        src/models/canary_qwen/graphs.cpp
+        src/models/canary_qwen/runtime.cpp
+        src/models/canary_qwen/session.cpp
+    INCLUDES
+        engine/models/canary_qwen/session.h
+    LOADERS
+        engine::models::canary_qwen::make_canary_qwen_loader
+)
+
+# Phase 11b port of the transcribe.cpp `gigaam` arch (2026-09-24): reads the
+# arch's GGUFs (general.architecture "gigaam") directly.
+audiocpp_add_model(gigaam
+    SOURCES
+        src/models/gigaam/graphs.cpp
+        src/models/gigaam/decoding.cpp
+        src/models/gigaam/assets.cpp
+        src/models/gigaam/runtime.cpp
+        src/models/gigaam/session.cpp
+    INCLUDES
+        engine/models/gigaam/session.h
+    LOADERS
+        engine::models::gigaam::make_gigaam_loader
+)
+
+# Phase 11b port of the transcribe.cpp `voxtral` arch (2026-09-24): reads the
+# arch's GGUFs (general.architecture "voxtral") directly.
+audiocpp_add_model(voxtral
+    SOURCES
+        src/models/voxtral/assets.cpp
+        src/models/voxtral/tokenizer.cpp
+        src/models/voxtral/mel_frontend.cpp
+        src/models/voxtral/graphs.cpp
+        src/models/voxtral/runtime.cpp
+        src/models/voxtral/session.cpp
+    INCLUDES
+        engine/models/voxtral/model.h
+    LOADERS
+        engine::models::voxtral::make_voxtral_loader
+)
+
+# Phase 11b port of the transcribe.cpp `granite_speech` arch (2026-09-24): reads the
+# arch's GGUFs (general.architecture "granite_speech") directly.
+audiocpp_add_model(granite_speech
+    SOURCES
+        src/models/granite_speech/assets.cpp
+        src/models/granite_speech/tokenizer.cpp
+        src/models/granite_speech/frontend.cpp
+        src/models/granite_speech/weights.cpp
+        src/models/granite_speech/prompt.cpp
+        src/models/granite_speech/runtime.cpp
+        src/models/granite_speech/session.cpp
+    INCLUDES
+        engine/models/granite_speech/model.h
+    LOADERS
+        engine::models::granite_speech::make_granite_speech_loader
+)
+
+# Phase 11b port of the transcribe.cpp `granite_nar` arch (2026-09-24): reads the
+# arch's GGUFs (general.architecture "granite_nar") directly.
+audiocpp_add_model(granite_nar
+    SOURCES
+        src/models/granite_nar/assets.cpp
+        src/models/granite_nar/mel_frontend.cpp
+        src/models/granite_nar/decoding.cpp
+        src/models/granite_nar/graphs.cpp
+        src/models/granite_nar/runtime.cpp
+        src/models/granite_nar/session.cpp
+    INCLUDES
+        engine/models/granite_nar/session.h
+    LOADERS
+        engine::models::granite_nar::make_granite_nar_loader
+)
+
+# Phase 11b port of the transcribe.cpp `medasr` arch (2026-09-24): reads the
+# arch's GGUFs (general.architecture "medasr") directly.
+audiocpp_add_model(medasr
+    SOURCES
+        src/models/medasr/assets.cpp
+        src/models/medasr/decoding.cpp
+        src/models/medasr/graphs.cpp
+        src/models/medasr/runtime.cpp
+        src/models/medasr/session.cpp
+    INCLUDES
+        engine/models/medasr/session.h
+    LOADERS
+        engine::models::medasr::make_medasr_loader
+)
+
 audiocpp_add_model(moonshine_asr
     SOURCES
         src/models/moonshine_asr/assets.cpp
@@ -1951,7 +2056,6 @@ audiocpp_add_model(granite5asr
         engine::community_models::granite5asr::make_granite5asr_loader
     ALIASES
         granite_speech5_asr
-        granite_speech
         granite_speech5_ctc
 )
 
@@ -2367,8 +2471,21 @@ set(AUDIOCPP_ASR_MODEL_TARGETS
     higgs_audio_stt
     vibevoice_asr
     voxtral_realtime
-    moss
+    # `moss` is the MOSS-TTS package group; the ASR/diarization model is
+    # moss_transcribe_diarize (fixed 2026-09-24 - the C-ABI tree never linked it).
+    moss_transcribe_diarize
+    cohere_asr
+    canary_asr
+    confucius4_r2t2
+    granite5asr
+    medasr
+    granite_nar
+    granite_speech
+    voxtral
+    gigaam
+    canary_qwen
     sortformer_diar
+    nemotron_3_diar
     roformer
 )
 if (AUDIOCPP_MODEL_SET STREQUAL "full" OR AUDIOCPP_MODEL_SET STREQUAL "asr+full")
@@ -2644,6 +2761,80 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
         # Exit 2 means "skipped", not "failed" -- CTest needs telling.
         set_tests_properties(abi_bridge_hello abi_stream_hello PROPERTIES SKIP_RETURN_CODE 2)
 
+        # Phase 11b verdict harness: the same transcribe.cpp GGUF loaded as the
+        # builtin arch and through the engine (SPEECHCPP_ENGINE_ARCHS), every
+        # C-ABI result field compared clip by clip, plus caps and a batched
+        # pass. One registration per family still carrying a builtin arch;
+        # `ctest -L verdict` runs them. A family retires when its verdict is
+        # clean (or every remaining difference is a recorded decision), and its
+        # registration goes with the arch. Skips (exit 2) without the model.
+        add_executable(abi_arch_engine_verdict tests/unittests/test_abi_arch_engine_verdict.cpp)
+        target_link_libraries(abi_arch_engine_verdict PRIVATE transcribe)
+        target_include_directories(abi_arch_engine_verdict PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+        if (SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES)
+            set(_speechcpp_verdicts
+                # family|model (models/, scripts/fetch_asr_test_model.py)|engine model (must be
+                # linked, else not registered)|extra args (comma-separated)|quick fixture
+                # (default: the one-clip quick dir)
+                "cohere|cohere-transcribe-03-2026-Q8_0.gguf|cohere_asr|--language,en"
+                "canary|canary-180m-flash-Q4_K_M.gguf|canary_asr|--language,en"
+                "moss|MOSS-Transcribe-Diarize-Q4_K_M.gguf|moss_transcribe_diarize|"
+                "medasr|medasr-Q8_0.gguf|medasr|--language,en"
+                "gigaam_rnnt|gigaam-v3-e2e-rnnt-Q8_0.gguf|gigaam||samples/ru.wav"
+                "gigaam_ctc|gigaam-v3-ctc-Q8_0.gguf|gigaam||samples/ru.wav"
+                "canary_qwen|canary-qwen-2.5b-Q8_0.gguf|canary_qwen|--language,en"
+                "parakeet_tdt_ctc|parakeet-tdt_ctc-110m-Q8_0.gguf|parakeet_tdt|"
+                "parakeet_unified|parakeet-unified-en-0.6b-Q4_K_M.gguf|parakeet_tdt|"
+                "voxtral|Voxtral-Mini-3B-2507-Q4_K_M.gguf|voxtral|--language,en,--fresh-session"
+                "granite|granite-4.0-1b-speech-Q4_K_M.gguf|granite_speech|--language,en"
+                "granite_nar|granite-speech-4.1-2b-nar-Q4_K_M.gguf|granite_nar|--language,en"
+            )
+            foreach(_verdict IN LISTS _speechcpp_verdicts)
+                string(REPLACE "|" ";" _parts "${_verdict}")
+                list(LENGTH _parts _verdict_n)
+                list(GET _parts 0 _verdict_family)
+                list(GET _parts 1 _verdict_model)
+                list(GET _parts 2 _verdict_engine)
+                set(_verdict_args "")
+                if (_verdict_n GREATER 3)
+                    list(GET _parts 3 _verdict_args)
+                    string(REPLACE "," ";" _verdict_args "${_verdict_args}")
+                endif()
+                set(_verdict_quick ${SPEECHCPP_ASR_QUICK_FIXTURES})
+                set(_verdict_extra "")
+                if (_verdict_n GREATER 4)
+                    list(GET _parts 4 _verdict_extra)
+                    set(_verdict_quick ${CMAKE_CURRENT_SOURCE_DIR}/${_verdict_extra})
+                    set(_verdict_extra ${CMAKE_CURRENT_SOURCE_DIR}/${_verdict_extra})
+                endif()
+                # Without the engine family linked the verdict can only fail at load.
+                if (NOT "${_verdict_engine}" IN_LIST AUDIOCPP_LINKED_MODELS)
+                    continue()
+                endif()
+                # Quick (default): one short clip, no batched pass.
+                add_test(
+                    NAME verdict_${_verdict_family}
+                    COMMAND abi_arch_engine_verdict
+                        ${CMAKE_CURRENT_SOURCE_DIR}/models/${_verdict_model}
+                        ${_verdict_quick}
+                        ${_verdict_args} --max-clips 1 --no-batch
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                )
+                set_tests_properties(verdict_${_verdict_family} PROPERTIES SKIP_RETURN_CODE 2 LABELS "verdict;quick" TIMEOUT 900)
+                if (SPEECHCPP_FULL_ASR_TESTS)
+                    add_test(
+                        NAME verdict_full_${_verdict_family}
+                        COMMAND abi_arch_engine_verdict
+                            ${CMAKE_CURRENT_SOURCE_DIR}/models/${_verdict_model}
+                            ${SPEECHCPP_ASR_FULL_FIXTURES} ${_verdict_extra}
+                            ${_verdict_args}
+                        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                    )
+                    set_tests_properties(verdict_full_${_verdict_family} PROPERTIES SKIP_RETURN_CODE 2 LABELS "verdict_full;full" TIMEOUT 3600)
+                endif()
+            endforeach()
+        endif()
+
         # End-to-end ASR WER gate: transcribes the in-tree LibriSpeech
         # fixtures through the public C ABI and scores word error rate against
         # their reference transcripts — the first gate that checks TEXT rather
@@ -2712,11 +2903,10 @@ if (SPEECHCPP_ENABLE_UNIFIED_ABI)
                              "${CMAKE_CURRENT_SOURCE_DIR}/models/sensevoice-small-q8-audiocpp-v1.gguf"
                              "${CMAKE_CURRENT_SOURCE_DIR}/assets/asr_validation/librispeech")
                 # sense_asr defaults to audio_chunk_mode=auto, i.e. Silero VAD
-                # chunking, and its spec default VAD path
-                # (assets/framework/models/silero_vad) is repo-relative - so
-                # these gates must run from the source root, like the Whisper
-                # gates. (A C-ABI caller outside the repo has the same problem:
-                # open item in MULTI_AGENT_FUSION_PLAN_AND_TRACKER.md.)
+                # chunking. Its default VAD path is resolved independently of
+                # the working directory since 2026-09-24
+                # (engine::assets::resolve_bundled_asset); the gates still run
+                # from the source root like the other model gates.
                 set_tests_properties(asr_e2e_sense_asr_wer_test PROPERTIES SKIP_RETURN_CODE 2
                                      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 
@@ -3932,6 +4122,269 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
                 WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
             )
             set_tests_properties(whisper_c_abi_parity_test PROPERTIES SKIP_RETURN_CODE 2)
+        endif()
+
+        # Phase 11b: engine `canary_qwen` vs the builtin arch through the C ABI on
+        # the same GGUF (find_arch() still prefers the arch for "canary_qwen").
+        if (SPEECHCPP_ENABLE_UNIFIED_ABI AND SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES AND
+            "canary_qwen" IN_LIST AUDIOCPP_LINKED_MODELS)
+            add_engine_unittest(canary_qwen_engine_arch_parity_test tests/unittests/test_canary_qwen_engine_arch_parity.cpp)
+            target_sources(canary_qwen_engine_arch_parity_test PRIVATE
+                src/models/canary_qwen/assets.cpp
+                src/models/canary_qwen/mel_frontend.cpp
+                src/models/canary_qwen/conformer.cpp
+                src/models/canary_qwen/causal_lm.cpp
+                src/models/canary_qwen/graphs.cpp
+                src/models/canary_qwen/runtime.cpp
+                src/models/canary_qwen/session.cpp
+            )
+            target_include_directories(canary_qwen_engine_arch_parity_test PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests
+                ${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe)
+            target_link_libraries(canary_qwen_engine_arch_parity_test PRIVATE transcribe)
+            add_test(
+                NAME canary_qwen_engine_arch_parity_test
+                COMMAND canary_qwen_engine_arch_parity_test
+                    ${CMAKE_CURRENT_SOURCE_DIR}/models/canary-qwen-2.5b-Q8_0.gguf
+                    ${SPEECHCPP_ASR_QUICK_FIXTURES}
+                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            )
+            set_tests_properties(canary_qwen_engine_arch_parity_test PROPERTIES SKIP_RETURN_CODE 2 TIMEOUT 3600)
+            set_property(TEST canary_qwen_engine_arch_parity_test APPEND PROPERTY LABELS quick)
+            if (SPEECHCPP_FULL_ASR_TESTS)
+                add_test(
+                    NAME canary_qwen_engine_arch_parity_test_full
+                    COMMAND canary_qwen_engine_arch_parity_test
+                        ${CMAKE_CURRENT_SOURCE_DIR}/models/canary-qwen-2.5b-Q8_0.gguf
+                        ${SPEECHCPP_ASR_FULL_FIXTURES}
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                )
+                set_tests_properties(canary_qwen_engine_arch_parity_test_full PROPERTIES SKIP_RETURN_CODE 2 TIMEOUT 3600 LABELS full)
+            endif()
+        endif()
+
+        # Phase 11b: engine `gigaam` vs the builtin arch through the C ABI on
+        # the same GGUF (find_arch() still prefers the arch for "gigaam").
+        if (SPEECHCPP_ENABLE_UNIFIED_ABI AND SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES AND
+            "gigaam" IN_LIST AUDIOCPP_LINKED_MODELS)
+            add_engine_unittest(gigaam_engine_arch_parity_test tests/unittests/test_gigaam_engine_arch_parity.cpp)
+            target_sources(gigaam_engine_arch_parity_test PRIVATE
+                src/models/gigaam/graphs.cpp
+                src/models/gigaam/decoding.cpp
+                src/models/gigaam/assets.cpp
+                src/models/gigaam/runtime.cpp
+                src/models/gigaam/session.cpp
+            )
+            target_include_directories(gigaam_engine_arch_parity_test PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests
+                ${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe)
+            target_link_libraries(gigaam_engine_arch_parity_test PRIVATE transcribe)
+            add_test(
+                NAME gigaam_engine_arch_parity_test
+                COMMAND gigaam_engine_arch_parity_test
+                    ${CMAKE_CURRENT_SOURCE_DIR}/models/gigaam-v3-e2e-rnnt-Q8_0.gguf
+                    ${SPEECHCPP_ASR_QUICK_FIXTURES}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/samples/ru.wav
+                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            )
+            set_tests_properties(gigaam_engine_arch_parity_test PROPERTIES SKIP_RETURN_CODE 2)
+            set_property(TEST gigaam_engine_arch_parity_test APPEND PROPERTY LABELS quick)
+            if (SPEECHCPP_FULL_ASR_TESTS)
+                add_test(
+                    NAME gigaam_engine_arch_parity_test_full
+                    COMMAND gigaam_engine_arch_parity_test
+                        ${CMAKE_CURRENT_SOURCE_DIR}/models/gigaam-v3-e2e-rnnt-Q8_0.gguf
+                        ${SPEECHCPP_ASR_FULL_FIXTURES}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/samples/ru.wav
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                )
+                set_tests_properties(gigaam_engine_arch_parity_test_full PROPERTIES SKIP_RETURN_CODE 2 TIMEOUT 3600 LABELS full)
+            endif()
+        endif()
+
+        # Phase 11b: engine `voxtral` vs the builtin arch through the C ABI on
+        # the same GGUF (find_arch() still prefers the arch for "voxtral").
+        if (SPEECHCPP_ENABLE_UNIFIED_ABI AND SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES AND
+            "voxtral" IN_LIST AUDIOCPP_LINKED_MODELS)
+            add_engine_unittest(voxtral_engine_arch_parity_test tests/unittests/test_voxtral_engine_arch_parity.cpp)
+            target_sources(voxtral_engine_arch_parity_test PRIVATE
+                src/models/voxtral/assets.cpp
+                src/models/voxtral/tokenizer.cpp
+                src/models/voxtral/mel_frontend.cpp
+                src/models/voxtral/graphs.cpp
+                src/models/voxtral/runtime.cpp
+                src/models/voxtral/session.cpp
+            )
+            target_include_directories(voxtral_engine_arch_parity_test PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests
+                ${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe
+                ${CMAKE_CURRENT_SOURCE_DIR}/external/llama_tokenizer)
+            target_link_libraries(voxtral_engine_arch_parity_test PRIVATE transcribe)
+            add_test(
+                NAME voxtral_engine_arch_parity_test
+                COMMAND voxtral_engine_arch_parity_test
+                    ${CMAKE_CURRENT_SOURCE_DIR}/models/Voxtral-Mini-3B-2507-Q4_K_M.gguf
+                    ${SPEECHCPP_ASR_QUICK_FIXTURES} --quick
+                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            )
+            set_tests_properties(voxtral_engine_arch_parity_test PROPERTIES SKIP_RETURN_CODE 2 TIMEOUT 3600)
+            set_property(TEST voxtral_engine_arch_parity_test APPEND PROPERTY LABELS quick)
+            if (SPEECHCPP_FULL_ASR_TESTS)
+                add_test(
+                    NAME voxtral_engine_arch_parity_test_full
+                    COMMAND voxtral_engine_arch_parity_test
+                        ${CMAKE_CURRENT_SOURCE_DIR}/models/Voxtral-Mini-3B-2507-Q4_K_M.gguf
+                        ${SPEECHCPP_ASR_FULL_FIXTURES}
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                )
+                set_tests_properties(voxtral_engine_arch_parity_test_full PROPERTIES SKIP_RETURN_CODE 2 TIMEOUT 3600 LABELS full)
+            endif()
+        endif()
+
+        # Phase 11b: engine `granite_speech` vs the builtin arch through the C ABI on
+        # the same GGUF (find_arch() still prefers the arch for "granite_speech").
+        if (SPEECHCPP_ENABLE_UNIFIED_ABI AND SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES AND
+            "granite_speech" IN_LIST AUDIOCPP_LINKED_MODELS)
+            add_engine_unittest(granite_speech_engine_arch_parity_test tests/unittests/test_granite_speech_engine_arch_parity.cpp)
+            target_sources(granite_speech_engine_arch_parity_test PRIVATE
+                src/models/granite_speech/assets.cpp
+                src/models/granite_speech/tokenizer.cpp
+                src/models/granite_speech/frontend.cpp
+                src/models/granite_speech/weights.cpp
+                src/models/granite_speech/prompt.cpp
+                src/models/granite_speech/runtime.cpp
+                src/models/granite_speech/session.cpp
+            )
+            target_include_directories(granite_speech_engine_arch_parity_test PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests
+                ${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe
+                ${CMAKE_CURRENT_SOURCE_DIR}/external/llama_tokenizer)
+            target_link_libraries(granite_speech_engine_arch_parity_test PRIVATE transcribe)
+            add_test(
+                NAME granite_speech_engine_arch_parity_test
+                COMMAND granite_speech_engine_arch_parity_test
+                    ${CMAKE_CURRENT_SOURCE_DIR}/models/granite-4.0-1b-speech-Q4_K_M.gguf
+                    ${CMAKE_CURRENT_SOURCE_DIR}/samples
+                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            )
+            set_tests_properties(granite_speech_engine_arch_parity_test PROPERTIES SKIP_RETURN_CODE 2 TIMEOUT 3600)
+        endif()
+
+        # Phase 11b: engine `parakeet_tdt` reading the transcribe.cpp parakeet
+        # GGUFs (dual layout) vs the builtin `parakeet` arch through the C ABI.
+        # The package is a community model already linked into engine_runtime,
+        # so no sources are added here. Offline parity only: the arch's
+        # cache-aware / buffered streaming, multitalker and prompt-conditioned
+        # language hints have no engine counterpart yet (retirement blockers).
+        if (SPEECHCPP_ENABLE_UNIFIED_ABI AND SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES AND
+            "parakeet_tdt" IN_LIST AUDIOCPP_LINKED_MODELS)
+            add_engine_unittest(parakeet_engine_arch_parity_test tests/unittests/test_parakeet_engine_arch_parity.cpp)
+            target_include_directories(parakeet_engine_arch_parity_test PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests
+                ${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe)
+            target_link_libraries(parakeet_engine_arch_parity_test PRIVATE transcribe)
+            foreach(_parakeet_model IN ITEMS
+                    "tdt_ctc_110m|parakeet-tdt_ctc-110m-Q8_0.gguf"
+                    "unified_en_0_6b|parakeet-unified-en-0.6b-Q4_K_M.gguf")
+                string(REPLACE "|" ";" _parakeet_parts "${_parakeet_model}")
+                list(GET _parakeet_parts 0 _parakeet_tag)
+                list(GET _parakeet_parts 1 _parakeet_file)
+                add_test(
+                    NAME parakeet_engine_arch_parity_${_parakeet_tag}
+                    COMMAND parakeet_engine_arch_parity_test
+                        ${CMAKE_CURRENT_SOURCE_DIR}/models/${_parakeet_file}
+                        ${SPEECHCPP_ASR_QUICK_FIXTURES}
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                )
+                set_tests_properties(parakeet_engine_arch_parity_${_parakeet_tag} PROPERTIES
+                    SKIP_RETURN_CODE 2 TIMEOUT 1800)
+                set_property(TEST parakeet_engine_arch_parity_${_parakeet_tag} APPEND PROPERTY LABELS quick)
+                if (SPEECHCPP_FULL_ASR_TESTS)
+                    add_test(
+                        NAME parakeet_engine_arch_parity_${_parakeet_tag}_full
+                        COMMAND parakeet_engine_arch_parity_test
+                            ${CMAKE_CURRENT_SOURCE_DIR}/models/${_parakeet_file}
+                            ${SPEECHCPP_ASR_FULL_FIXTURES}
+                        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                    )
+                    set_tests_properties(parakeet_engine_arch_parity_${_parakeet_tag}_full PROPERTIES SKIP_RETURN_CODE 2 TIMEOUT 3600 LABELS full)
+                endif()
+            endforeach()
+        endif()
+
+        # Phase 11b: engine `granite_nar` vs the builtin arch through the C ABI on
+        # the same GGUF (find_arch() still prefers the arch for "granite_nar").
+        if (SPEECHCPP_ENABLE_UNIFIED_ABI AND SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES AND
+            "granite_nar" IN_LIST AUDIOCPP_LINKED_MODELS)
+            add_engine_unittest(granite_nar_engine_arch_parity_test tests/unittests/test_granite_nar_engine_arch_parity.cpp)
+            target_sources(granite_nar_engine_arch_parity_test PRIVATE
+                src/models/granite_nar/assets.cpp
+                src/models/granite_nar/mel_frontend.cpp
+                src/models/granite_nar/decoding.cpp
+                src/models/granite_nar/graphs.cpp
+                src/models/granite_nar/runtime.cpp
+                src/models/granite_nar/session.cpp
+            )
+            target_include_directories(granite_nar_engine_arch_parity_test PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests
+                ${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe)
+            target_link_libraries(granite_nar_engine_arch_parity_test PRIVATE transcribe)
+            add_test(
+                NAME granite_nar_engine_arch_parity_test
+                COMMAND granite_nar_engine_arch_parity_test
+                    ${CMAKE_CURRENT_SOURCE_DIR}/models/granite-speech-4.1-2b-nar-Q4_K_M.gguf
+                    ${SPEECHCPP_ASR_QUICK_FIXTURES}
+                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            )
+            set_tests_properties(granite_nar_engine_arch_parity_test PROPERTIES SKIP_RETURN_CODE 2 TIMEOUT 3600)
+            set_property(TEST granite_nar_engine_arch_parity_test APPEND PROPERTY LABELS quick)
+            if (SPEECHCPP_FULL_ASR_TESTS)
+                add_test(
+                    NAME granite_nar_engine_arch_parity_test_full
+                    COMMAND granite_nar_engine_arch_parity_test
+                        ${CMAKE_CURRENT_SOURCE_DIR}/models/granite-speech-4.1-2b-nar-Q4_K_M.gguf
+                        ${SPEECHCPP_ASR_FULL_FIXTURES}
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                )
+                set_tests_properties(granite_nar_engine_arch_parity_test_full PROPERTIES SKIP_RETURN_CODE 2 TIMEOUT 3600 LABELS full)
+            endif()
+        endif()
+
+        # Phase 11b: engine `medasr` vs the builtin arch through the C ABI on
+        # the same GGUF (find_arch() still prefers the arch for "medasr").
+        if (SPEECHCPP_ENABLE_UNIFIED_ABI AND SPEECHCPP_ENABLE_TRANSCRIBE_ARCHES AND
+            "medasr" IN_LIST AUDIOCPP_LINKED_MODELS)
+            add_engine_unittest(medasr_engine_arch_parity_test tests/unittests/test_medasr_engine_arch_parity.cpp)
+            target_sources(medasr_engine_arch_parity_test PRIVATE
+                src/models/medasr/assets.cpp
+                src/models/medasr/decoding.cpp
+                src/models/medasr/graphs.cpp
+                src/models/medasr/runtime.cpp
+                src/models/medasr/session.cpp
+            )
+            target_include_directories(medasr_engine_arch_parity_test PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests
+                ${CMAKE_CURRENT_SOURCE_DIR}/include/transcribe)
+            target_link_libraries(medasr_engine_arch_parity_test PRIVATE transcribe)
+            add_test(
+                NAME medasr_engine_arch_parity_test
+                COMMAND medasr_engine_arch_parity_test
+                    ${CMAKE_CURRENT_SOURCE_DIR}/models/medasr-Q8_0.gguf
+                    ${SPEECHCPP_ASR_QUICK_FIXTURES}
+                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            )
+            set_tests_properties(medasr_engine_arch_parity_test PROPERTIES SKIP_RETURN_CODE 2)
+            set_property(TEST medasr_engine_arch_parity_test APPEND PROPERTY LABELS quick)
+            if (SPEECHCPP_FULL_ASR_TESTS)
+                add_test(
+                    NAME medasr_engine_arch_parity_test_full
+                    COMMAND medasr_engine_arch_parity_test
+                        ${CMAKE_CURRENT_SOURCE_DIR}/models/medasr-Q8_0.gguf
+                        ${SPEECHCPP_ASR_FULL_FIXTURES}
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                )
+                set_tests_properties(medasr_engine_arch_parity_test_full PROPERTIES SKIP_RETURN_CODE 2 TIMEOUT 3600 LABELS full)
+            endif()
         endif()
 
         # W2b: the Whisper decoding recipe (timestamp rules, segment retrieval,

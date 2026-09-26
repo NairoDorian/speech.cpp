@@ -1,5 +1,6 @@
 #include "engine/community_models/granite5asr/session.h"
 
+#include "engine/framework/assets/asset_paths.h"
 #include "engine/framework/audio/chunking.h"
 #include "engine/framework/audio/conversion.h"
 #include "engine/framework/debug/profiler.h"
@@ -85,7 +86,7 @@ std::string parse_vad_model_path(
     if (it != options.options.end() && !it->second.empty()) {
         return it->second;
     }
-    return "assets/framework/models/silero_vad";
+    return assets::resolve_bundled_asset("assets/framework/models/silero_vad").string();
 }
 
 std::vector<int32_t> ctc_greedy_collapse(

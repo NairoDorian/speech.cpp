@@ -109,6 +109,18 @@ struct WordTimestamp {
     float confidence = 0.0f;
 };
 
+// One decoded token with its timing, for families that time tokens (CTC /
+// TDT / transducer frames). `word_index` points into
+// TaskResult::word_timestamps (-1 = not part of a published word); a word's
+// tokens are contiguous.
+struct TokenTimestamp {
+    TimeSpan span;
+    int32_t id = -1;
+    std::string text;
+    float probability = 0.0f;
+    int32_t word_index = -1;
+};
+
 struct VoiceReference {
     std::optional<AudioBuffer> audio = std::nullopt;
     std::optional<std::string> cached_voice_id = std::nullopt;
@@ -211,6 +223,12 @@ struct DecodeTelemetry {
     int32_t n_fallbacks = 0;
 };
 
+// Outcome of one item of an offline run_batch (Phase 11b). A family that
+// batches natively reports a rejected utterance on its own result instead of
+// failing the whole batch, like the transcribe.cpp arches did; run() keeps
+// reporting failures by exception.
+enum class TaskItemStatus { Ok, InvalidArgument, InputTooLong, OutOfMemory, Failed };
+
 struct TaskResult {
     std::optional<AudioBuffer> audio_output = std::nullopt;
     std::vector<NamedAudioBuffer> named_audio_outputs;
@@ -218,7 +236,11 @@ struct TaskResult {
     std::vector<SpeechSegment> speech_segments;
     std::vector<SpeakerTurn> speaker_turns;
     std::vector<WordTimestamp> word_timestamps;
+    std::vector<TokenTimestamp> token_timestamps;
     std::vector<DecodeTelemetry> decode_telemetry;
+    // The untrimmed / un-post-processed decode, when it differs from
+    // text_output->text (transcribe_get_raw_text); unset = same text.
+    std::optional<std::string> raw_text = std::nullopt;
     std::optional<VoiceArtifact> artifact_output = std::nullopt;
     std::vector<VoiceArtifact> output_artifacts;
 
@@ -226,6 +248,11 @@ struct TaskResult {
     // models, the input audio window) hit the model's context or audio limit
     // before an EOS was produced. Carries the L11 "truncated honestly" rule.
     bool truncated = false;
+
+    // run_batch only: this item's outcome (see TaskItemStatus). Anything but
+    // Ok means the item produced no result; item_error says why.
+    TaskItemStatus item_status = TaskItemStatus::Ok;
+    std::string item_error;
 };
 
 struct StreamEvent {
@@ -254,6 +281,15 @@ struct ProgressInfo {
 using ProgressCallback = std::function<bool(const ProgressInfo &)>;
 
 // Thrown by run() when a progress callback returns false (cancellation).
+// Thrown by run() / run_batch() when the input exceeds what the model can
+// take in one run (audio + prompt past the decoder context). A kind of
+// invalid_argument, so existing handlers keep treating it as a caller error;
+// the C ABI adapter maps it to TRANSCRIBE_ERR_INPUT_TOO_LONG, which the
+// transcribe.cpp arches returned, instead of INVALID_ARG.
+struct InputTooLong : std::invalid_argument {
+    using std::invalid_argument::invalid_argument;
+};
+
 struct ProgressCanceled : std::runtime_error {
     using std::runtime_error::runtime_error;
 
