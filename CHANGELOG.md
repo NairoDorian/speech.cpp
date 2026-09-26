@@ -14,9 +14,9 @@ Dates are the work-session dates recorded in the plan.
 
 ### Checkpoint re-steer (2026-09-26)
 
-> **⚠ Handover state (L17):** nothing from 2026-09-24 or 2026-09-26 is committed.
-> - The 2026-09-24 batch below **was built and tested today and does not pass**: 2 suite tests and 10 of 12 verdicts fail. The root causes and the fix list are in PLAN.md S0.1 a–i.
-> - The doc moves are staged renames (`git mv`); everything else is unstaged.
+> **⚠ Handover state (L17):** everything is committed and pushed (2026-09-26, at the user's request): `79bd8a38` tooling, `4aab8405` docs, `d6d4f27c` code.
+> - **`d6d4f27c` is a work-in-progress commit that is NOT green.** The 2026-09-24 batch builds, but 2 suite tests and 10 of 12 verdicts fail.
+> - The root causes and the fix list are in PLAN.md S0.1 a–i. Fix them in follow-up commits, one family per commit.
 
 - **One plan.** `PLAN.md` v7 replaces the V6 plan, roadmap v6.0, tracker and progress.md, all now archived under `docs/archive/`.
   - Records moved to `docs/LEDGER.md`; lessons to `LESSONS.md`.

@@ -171,7 +171,7 @@ Evidence for each item is in the checkpoint report.
 
 | # | Problem | Fixed in |
 |---|---|---|
-| K1 | ~75 files of engine work (6 ports, dual layouts, parity tests) are **uncommitted**, and the tracked `CMakeLists.txt` diff depends on them. **Measured 2026-09-26:** it builds, but 2 suite tests and 10 of 12 verdicts fail on real defects (cohere SentencePiece, parakeet graph overflow and segfault, granite routing, granite_nar arch shape, and one shared adapter contract gap). | S0.1 a–i |
+| K1 | The 6-port batch (ports, dual layouts, parity tests) is committed as WIP `d6d4f27c` (2026-09-26, at the user's request) but is **not green**. **Measured 2026-09-26:** it builds, but 2 suite tests and 10 of 12 verdicts fail on real defects (cohere SentencePiece, parakeet graph overflow and segfault, granite routing, granite_nar arch shape, and one shared adapter contract gap). | S0.1 a–i |
 | K13 | Model-backed tests ran the whole corpus several times per side (a >35 min run that never finished). | **Fixed** (S1.9) |
 | K2 | **Two C ABIs named `audiocpp`** (`capi/include/audiocpp.h` and upstream `include/audiocpp.h`) share the library name, and 3 symbols have incompatible signatures (`audiocpp_stream_start/push/finish`). The options `AUDIOCPP_BUILD_C_API` and `AUDIOCPP_BUILD_CAPI` differ by one underscore. | S1.1 (interim), S3 (retire) |
 | K3 | ggml 0.24.0 is below transcribe.cpp's floor 0.25.3; 24 transcribe.cpp commits are untriaged; 21 audio.cpp commits are unmerged; upstream rewrote v0.8.2 (`9bdd1d90` → `4d88768f`), and the `/utf-8` hunk for vieneu is missing. | S0.2–S0.4 |
@@ -234,7 +234,7 @@ S0 → S1 → S2 → S3 → E (BUNDLE profile + composites + Android; E0–E4 ma
 **Pause rule:** stop at each phase exit and ask the user before starting the next phase.
 
 ### S0 — Stabilize (current phase)
-- [ ] **S0.1 Fix, then commit, the uncommitted batch.**
+- [ ] **S0.1 Make the WIP batch green** (committed as `d6d4f27c`, not green).
   - Measured 2026-09-26 ([checkpoint §2](docs/reports/checkpoint_2026-09-26.md#2-true-state-of-the-uncommitted-batch)): both trees build, but gates fail.
   - Fix in this order, re-running `ctest -L quick` after each (~4 min for the whole tier):
     - [ ] a. `model_specs/granite_nar.json`: rename the session option `granite_nar.shaw_bias` → `shaw_bias`. *Gate:* `model_spec_system_test`.
@@ -246,9 +246,9 @@ S0 → S1 → S2 → S3 → E (BUNDLE profile + composites + Android; E0–E4 ma
     - [ ] g. granite_nar arch side broken by the uncommitted `shaw_attn.cpp` edit (shape [128,1025]). Verify by revert, then fix both arches consistently. *Gate:* `verdict_granite_nar`, `granite_nar_engine_arch_parity_test`.
     - [ ] h. moss: caps and diarization contract differences. Record them as decisions, or fix. *Gate:* `verdict_moss`.
     - [ ] i. `transcribe_stream_committed_pointer_stability`: pass `TRANSCRIBE_MOONSHINE_STREAMING_TINY_GGUF` in its registration (harness gap, not an asset issue).
-  - **Commit family by family, green ones first** (medasr, gigaam, canary_qwen after c, voxtral after c), with the user's go-ahead. Never one batch commit, and never a CMake hunk without its sources.
+  - Fix commits go **one family (or one shared cause) per commit**, each quoting the gate that turned green, with the user's go-ahead. The batch itself had to be one commit because shared `CMakeLists.txt` hunks could not be split; don't repeat that.
   - Drop `stash@{0}` (superseded premature B16c) with the user's OK.
-  - *Gate:* `ctest -L quick` green in `build-cpu-asr-abi`; core suite green; `status.sh` `dirty_paths` covers only work in progress.
+  - *Gate:* `ctest -L quick` green in `build-cpu-asr-abi`; core suite green.
 - [ ] **S0.2 audio.cpp merge (21 commits)** as a recorded merge.
   - Treat `4d88768f` as a re-release of the already-merged `9bdd1d90`; adopt its `/utf-8` hunk.
   - Then run `sync-ggml.sh --check`.
